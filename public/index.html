@@ -36,11 +36,10 @@ h1{font-size:25px;margin:0 0 6px}
 .metric small{color:var(--muted);font-size:11px}
 .reason{font-size:12px;color:var(--muted);line-height:1.45;margin-top:12px}
 .tag{display:inline-block;background:#243e43;border:0}
-.statsButton{width:100%;margin-top:14px;border-color:#397b67;color:#b9ffdc;font-weight:750}
+.statsButton{width:100%;margin-top:12px;border-color:#397b67;color:#b9ffdc;font-weight:750}
 .trackButton{width:100%;margin-top:10px;border-color:#527b86;color:#d5f4fa;font-weight:750}
 .trackButton.active{background:#12392e;border-color:#286d53;color:#a7f5cf}
-.trackButton.limit{opacity:.65}
-.statsPanel{margin-top:12px;padding:12px;background:#091f24;border:1px solid #284a50;border-radius:12px}
+.statsPanel{margin-top:12px;padding:12px;background:#091f24;border:1px solid #284a50;border-radius:12px;overflow-wrap:anywhere}
 .statsTitle{font-weight:800;margin-bottom:10px;font-size:13px}
 .statTeams{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .statTeam{background:#102b31;border-radius:9px;padding:10px;min-width:0}
@@ -88,8 +87,8 @@ footer{color:var(--muted);font-size:12px;line-height:1.5;margin-top:20px}
 
 <footer>
   İstatistikler kullanıcı isteğiyle yüklenir. Takip listesi Neon veritabanında saklanır.
-  Otomatik periyodik istatistik toplama henüz etkin değildir.
-  Sağlayıcının sunmadığı veriler sıfır kabul edilmez.
+  10 dakikalık geçmiş, yalnızca mevcut kayıtları gösterir. Otomatik kayıt henüz etkin değildir.
+  Eksik istatistikler sıfır kabul edilmez ve doğrulanmamış gol sinyali üretilmez.
 </footer>
 </main>
 
@@ -98,13 +97,16 @@ const $ = id => document.getElementById(id);
 
 let liveMode = false;
 let liveMatches = [];
-let demoMatches = [
+
+const demoMatches = [
   {id:"demo1",league:"Demo ligi",minute:75,status:"2H",
    home:"Örnek Ev Sahibi",away:"Örnek Deplasman",homeScore:1,awayScore:0}
 ];
 
 const statsCache = new Map();
 const statsLoading = new Set();
+const historyCache = new Map();
+const historyLoading = new Set();
 const trackedMatches = new Map();
 const trackLoading = new Set();
 
@@ -126,8 +128,7 @@ function setBanner(message, type="") {
 }
 
 function updateTrackingCount() {
-  $("trackingCount").textContent =
-    `Takip edilen maç: ${trackedMatches.size}/2`;
+  $("trackingCount").textContent = `Takip edilen maç: ${trackedMatches.size}/2`;
 }
 
 function getStat(stats, names) {
@@ -191,11 +192,152 @@ function renderStatsPanel(id) {
   return `<div class="statsPanel">
     <div class="statsTitle">MAÇ İSTATİSTİKLERİ</div>
     <div class="statTeams">${teams.map(renderTeamStats).join("")}</div>
-    <div class="statsNote">
-      Kaynak: API-Football. Eksik alanlar “Veri yok” olarak gösterilir.
-      Bu istatistikler tek başına gol olacağını göstermez.
-    </div>
+    <div class="statsNote">Kaynak: API-Football. Eksik alanlar “Veri yok” olarak gösterilir.
+    Bu istatistikler tek başına gol olacağını göstermez.</div>
   </div>`;
+}
+
+function parseNumber(value) {
+  if (value == null || value === "") return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const match = String(value).match(/-?\d+(?:\.\d+)?/);
+  return match ? Number(match[0]) : null;
+}
+
+function findSnapshotStat(snapshot, teamName, statNames) {
+  const teams = Array.isArray(snapshot?.teams) ? snapshot.teams : [];
+  const team = teams.find(t => t.team === teamName);
+  if (!team) return null;
+
+  const stats = team.statistics || {};
+
+  for (const name of statNames) {
+    const found = Object.entries(stats).find(([key]) =>
+      key.toLowerCase() === name.toLowerCase()
+    );
+
+    if (found && found[1] != null && found[1] !== "") {
+      return parseNumber(found[1]);
+    }
+  }
+
+  return null;
+}
+
+function renderHistoryPanel(id) {
+  const key = String(id);
+
+  if (historyLoading.has(key)) {
+    return `<div class="statsPanel">10 dakikalık geçmiş yükleniyor…</div>`;
+  }
+
+  const result = historyCache.get(key);
+  if (!result) return "";
+
+  if (result.error) {
+    return `<div class="statsPanel">
+      <div class="statsTitle">10 DAKİKALIK VERİ GEÇMİŞİ</div>
+      <div class="statsError">${escapeHtml(result.error)}</div>
+      <button class="btn statsButton" data-history-id="${escapeHtml(key)}">Tekrar dene</button>
+    </div>`;
+  }
+
+  const history = Array.isArray(result.history) ? result.history : [];
+
+  if (history.length < 2) {
+    return `<div class="statsPanel">
+      <div class="statsTitle">10 DAKİKALIK VERİ GEÇMİŞİ</div>
+      <div class="statsNote">
+        Son 10 dakikadaki kayıt sayısı: ${history.length}.
+        Değişim hesaplamak için en az 2 kayıt gerekiyor.
+        Otomatik kayıt henüz etkin değil.
+      </div>
+      ${history.length === 1 ? `
+        <div class="statsNote">
+          Son kayıt: ${escapeHtml(new Date(history[0].captured_at).toLocaleString("tr-TR"))}
+        </div>` : ""}
+      <button class="btn statsButton" data-history-id="${escapeHtml(key)}">Geçmişi yenile</button>
+    </div>`;
+  }
+
+  const first = history[0];
+  const last = history[history.length - 1];
+  const teams = Array.isArray(last.teams) ? last.teams : [];
+
+  function difference(label, teamName, names) {
+    const before = findSnapshotStat(first, teamName, names);
+    const after = findSnapshotStat(last, teamName, names);
+
+    if (before == null || after == null) {
+      return `<div class="statRow">
+        <span>${escapeHtml(teamName)} · ${escapeHtml(label)}</span>
+        <strong>Veri yok</strong>
+      </div>`;
+    }
+
+    const delta = after - before;
+    const sign = delta > 0 ? "+" : "";
+
+    return `<div class="statRow">
+      <span>${escapeHtml(teamName)} · ${escapeHtml(label)}</span>
+      <strong>${sign}${delta}</strong>
+    </div>`;
+  }
+
+  const rows = teams.map(team => {
+    const name = team.team || "Takım";
+    return [
+      difference("Toplam şut", name, ["Total Shots"]),
+      difference("İsabetli şut", name, ["Shots on Goal", "Shots on target"]),
+      difference("Korner", name, ["Corner Kicks", "Corners"])
+    ].join("");
+  }).join("");
+
+  return `<div class="statsPanel">
+    <div class="statsTitle">SON 10 DAKİKADAKİ KAYITLI DEĞİŞİM</div>
+    <div class="statsNote">Kayıt sayısı: ${history.length}</div>
+    ${rows}
+    <div class="statsNote">
+      İlk kayıt: ${escapeHtml(new Date(first.captured_at).toLocaleString("tr-TR"))}
+    </div>
+    <div class="statsNote">
+      Son kayıt: ${escapeHtml(new Date(last.captured_at).toLocaleString("tr-TR"))}
+    </div>
+    <div class="statsNote">
+      Değerler iki kayıt arasındaki farktır; tek başına gol sinyali değildir.
+    </div>
+    <button class="btn statsButton" data-history-id="${escapeHtml(key)}">Geçmişi yenile</button>
+  </div>`;
+}
+
+async function loadHistory(id) {
+  const key = String(id);
+  if (!/^\d+$/.test(key) || historyLoading.has(key)) return;
+
+  historyLoading.add(key);
+  render();
+
+  try {
+    const response = await fetch(
+      `/api/match/${encodeURIComponent(key)}/history`,
+      {cache:"no-store"}
+    );
+
+    const result = await response.json();
+
+    if (!response.ok) {
+      throw new Error(result.error || `Sunucu hatası: ${response.status}`);
+    }
+
+    historyCache.set(key, result);
+  } catch (error) {
+    historyCache.set(key, {
+      error: `Geçmiş verisi alınamadı: ${error.message}`
+    });
+  } finally {
+    historyLoading.delete(key);
+    render();
+  }
 }
 
 function card(m) {
@@ -205,8 +347,7 @@ function card(m) {
 
   const homeScore = m.homeScore == null ? "–" : m.homeScore;
   const awayScore = m.awayScore == null ? "–" : m.awayScore;
-  const validId = /^\d+$/.test(id);
-  const canLoadStats = validId && liveMode;
+  const canLoadStats = /^\d+$/.test(id) && liveMode;
   const tracked = trackedMatches.has(id);
   const trackingBusy = trackLoading.has(id);
   const atLimit = trackedMatches.size >= 2 && !tracked;
@@ -214,16 +355,13 @@ function card(m) {
   let trackButton = "";
 
   if (canLoadStats) {
-    trackButton = `
-      <button
-        class="btn trackButton ${tracked ? "active" : ""} ${atLimit ? "limit" : ""}"
-        data-track-id="${escapeHtml(id)}"
-        ${trackingBusy || (!tracked && atLimit) ? "disabled" : ""}
-      >
-        ${trackingBusy ? "İşlem yapılıyor…" :
-          tracked ? "✓ Takipte · Takibi bırak" :
-          atLimit ? "Takip sınırı dolu (2/2)" : "+ Takibe al"}
-      </button>`;
+    trackButton = `<button
+      class="btn trackButton ${tracked ? "active" : ""}"
+      data-track-id="${escapeHtml(id)}"
+      ${trackingBusy || (!tracked && atLimit) ? "disabled" : ""}
+    >${trackingBusy ? "İşlem yapılıyor…" :
+      tracked ? "✓ Takipte · Takibi bırak" :
+      atLimit ? "Takip sınırı dolu (2/2)" : "+ Takibe al"}</button>`;
   }
 
   return `<article class="card">
@@ -246,17 +384,23 @@ function card(m) {
         ${statsCache.has(id) && !statsCache.get(id).error ? "İstatistikleri göster" : "İstatistikleri yükle"}
       </button>
       ${renderStatsPanel(id)}
+      ${tracked ? `
+        <button class="btn statsButton" data-history-id="${escapeHtml(id)}">
+          10 dakikalık veri geçmişi
+        </button>
+        ${renderHistoryPanel(id)}
+      ` : ""}
     ` : `<div class="reason">Takip ve istatistik işlemleri için canlı veri modunu aç.</div>`}
   </article>`;
 }
 
 function render() {
   const data = liveMode ? liveMatches : demoMatches;
-  const f = $("filter").value;
+  const filter = $("filter").value;
 
   const filtered = data.filter(m =>
-    f === "all" ||
-    (f === "live" ? getStatus(m) === "live" : getStatus(m) === "finished")
+    filter === "all" ||
+    (filter === "live" ? getStatus(m) === "live" : getStatus(m) === "finished")
   );
 
   $("matches").innerHTML = filtered.length
@@ -284,10 +428,7 @@ async function loadTracked() {
     updateTrackingCount();
     render();
   } catch (error) {
-    setBanner(
-      `Takip listesi alınamadı: ${error.message}. Canlı sunucu ve veritabanını kontrol et.`,
-      "error"
-    );
+    setBanner(`Takip listesi alınamadı: ${error.message}`, "error");
   }
 }
 
@@ -319,10 +460,7 @@ async function toggleTracking(id) {
         : {
             method:"POST",
             headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({
-              home:match.home,
-              away:match.away
-            })
+            body:JSON.stringify({home:match.home,away:match.away})
           }
     );
 
@@ -408,7 +546,6 @@ async function loadLive() {
 
     liveMatches = result.matches;
     liveMode = true;
-
     $("mode").textContent = "Demo moduna dön";
     $("connection").textContent = "API BAĞLI";
 
@@ -426,17 +563,20 @@ async function loadLive() {
   }
 }
 
-// Takip ve istatistik düğmeleri
 $("matches").addEventListener("click", event => {
   const trackButton = event.target.closest("[data-track-id]");
-
   if (trackButton) {
     toggleTracking(trackButton.dataset.trackId);
     return;
   }
 
-  const statsButton = event.target.closest("[data-stats-id]");
+  const historyButton = event.target.closest("[data-history-id]");
+  if (historyButton) {
+    loadHistory(historyButton.dataset.historyId);
+    return;
+  }
 
+  const statsButton = event.target.closest("[data-stats-id]");
   if (statsButton) {
     loadStats(statsButton.dataset.statsId);
   }
@@ -449,9 +589,7 @@ $("refresh").addEventListener("click", () => {
     loadLive();
     loadTracked();
   } else {
-    setBanner(
-      "Demo verileri gösteriliyor. Gerçek veriler için Canlı veriyi aç düğmesine bas."
-    );
+    setBanner("Demo verileri gösteriliyor. Gerçek veriler için Canlı veriyi aç düğmesine bas.");
     render();
   }
 });
