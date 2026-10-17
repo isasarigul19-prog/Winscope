@@ -12,7 +12,7 @@ const API_KEY = process.env.API_FOOTBALL_KEY;
 const DATABASE_URL = process.env.DATABASE_URL;
 const BASE_URL = "https://v3.football.api-sports.io";
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const CSV_FILE = path.join(ROOT,"winscope_historical_odds.csv");
+const CSV_FILE = path.join(ROOT, "winscope_historical_odds.csv");
 const { Pool } = pg;
 
 app.use(express.json());
