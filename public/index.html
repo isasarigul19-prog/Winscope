@@ -19,7 +19,8 @@ h1{font-size:25px;margin:0 0 6px}
 .controls{display:flex;gap:8px;flex-wrap:wrap}
 .btn,select{border:1px solid #36565d;background:#17383e;color:var(--text);border-radius:10px;padding:10px 12px;font:inherit;cursor:pointer}
 .btn.primary{background:var(--pink);border-color:var(--pink);font-weight:800}
-.banner{background:#392f19;border:1px solid #705c2b;color:#ffe4a2;border-radius:12px;padding:12px 14px;margin:14px 0 20px;font-size:13px}
+.btn:disabled{opacity:.55;cursor:wait}
+.banner{background:#392f19;border:1px solid #705c2b;color:#ffe4a2;border-radius:12px;padding:12px 14px;margin:14px 0 20px;font-size:13px;overflow-wrap:anywhere}
 .banner.ok{background:#12392e;color:#a7f5cf;border-color:#286d53}
 .banner.error{background:#431e27;color:#ffd2da;border-color:#873447}
 .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
@@ -27,29 +28,46 @@ h1{font-size:25px;margin:0 0 6px}
 .matchtop{display:flex;justify-content:space-between;align-items:center;gap:10px;color:var(--muted);font-size:12px}
 .minute{color:var(--pink);font-weight:800}
 .scoreline{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:17px 0}
-.team{font-weight:800;max-width:40%;line-height:1.2}
+.team{font-weight:800;max-width:40%;line-height:1.2;overflow-wrap:anywhere}
 .score{font-size:30px;font-weight:900;white-space:nowrap}
 .metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:13px}
-.metric{background:var(--panel2);padding:11px;border-radius:10px}
+.metric{background:var(--panel2);padding:11px;border-radius:10px;min-width:0}
 .metric strong{display:block;font-size:15px;overflow-wrap:anywhere}
 .metric small{color:var(--muted);font-size:11px}
 .reason{font-size:12px;color:var(--muted);line-height:1.45;margin-top:12px}
 .tag{display:inline-block;background:#243e43;border:0}
+.statsButton{width:100%;margin-top:14px;border-color:#397b67;color:#b9ffdc;font-weight:750}
+.statsPanel{margin-top:12px;padding:12px;background:#091f24;border:1px solid #284a50;border-radius:12px}
+.statsTitle{font-weight:800;margin-bottom:10px;font-size:13px}
+.statTeams{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.statTeam{background:#102b31;border-radius:9px;padding:10px;min-width:0}
+.statTeamName{font-size:12px;font-weight:800;min-height:30px;overflow-wrap:anywhere;margin-bottom:8px}
+.statRow{display:flex;justify-content:space-between;gap:6px;border-top:1px solid #29464c;padding:7px 0;font-size:12px}
+.statRow span:first-child{color:var(--muted);overflow-wrap:anywhere}
+.statRow strong{white-space:nowrap}
+.statsNote{font-size:11px;color:var(--muted);line-height:1.5;margin-top:10px}
+.statsError{color:#ffd2da;font-size:12px;line-height:1.5}
 .empty{padding:25px;text-align:center;color:var(--muted)}
 footer{color:var(--muted);font-size:12px;line-height:1.5;margin-top:20px}
 @media(max-width:720px){.grid{grid-template-columns:1fr}h1{font-size:22px}.score{font-size:26px}}
+@media(max-width:360px){.statTeams{grid-template-columns:1fr}.statTeamName{min-height:0}}
 </style>
 </head>
 <body>
 <header>
-  <div><div class="logo">WIN<span>SCORE</span> LIVE</div>
-  <div class="sub">Canlı maç verileri · temkinli analiz</div></div>
+  <div>
+    <div class="logo">WIN<span>SCORE</span> LIVE</div>
+    <div class="sub">Canlı maç verileri · temkinli analiz</div>
+  </div>
   <div class="pill" id="connection">DEMO VERİSİ</div>
 </header>
+
 <main>
 <section class="hero">
-  <div><h1>Gol sinyali mi, maç böyle mi biter?</h1>
-  <div class="sub">Gerçek veriler ve temkinli karar</div></div>
+  <div>
+    <h1>Gol sinyali mi, maç böyle mi biter?</h1>
+    <div class="sub">Gerçek veriler ve temkinli karar</div>
+  </div>
   <div class="controls">
     <select id="filter">
       <option value="all">Tüm maçlar</option>
@@ -60,26 +78,107 @@ footer{color:var(--muted);font-size:12px;line-height:1.5;margin-top:20px}
     <button class="btn primary" id="mode">Canlı veriyi aç</button>
   </div>
 </section>
+
 <div class="banner" id="banner">Demo modu açık. Canlı veriyi açarak sunucuyu kontrol edebilirsin.</div>
 <section class="grid" id="matches"></section>
+
 <footer>
-  Bu ekran API'den gelen maç ve skor bilgilerini gösterir. xG, şut, baskı,
-  oran hareketi ve gol sinyalleri ilgili veriler doğrulanmadan üretilmez.
+  İstatistikler maç seçilerek yüklenir. Sağlayıcı bazı liglerde bazı verileri sunmayabilir.
+  Eksik istatistikler sıfır kabul edilmez ve doğrulanmamış gol sinyali üretilmez.
 </footer>
 </main>
+
 <script>
 const $ = id => document.getElementById(id);
 
 let liveMode = false;
 let liveMatches = [];
 let demoMatches = [
-  {id:"demo1",league:"Demo ligi",minute:75,status:"2H",home:"Örnek Ev Sahibi",away:"Örnek Deplasman",homeScore:1,awayScore:0}
+  {id:"demo1",league:"Demo ligi",minute:75,status:"2H",
+   home:"Örnek Ev Sahibi",away:"Örnek Deplasman",homeScore:1,awayScore:0}
 ];
+
+// İstatistikler sadece kullanıcı isteyince alınır.
+// Aynı maçın sonucu bellekte tutulur; gereksiz tekrarlar önlenir.
+const statsCache = new Map();
+const statsLoading = new Set();
 
 function getStatus(m) {
   const s = String(m.status || "").toUpperCase();
   if (["FT","AET","PEN","CANC","PST","ABD","AWD","WO"].includes(s)) return "finished";
   return "live";
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[c]));
+}
+
+function getStat(stats, names) {
+  if (!stats) return null;
+  for (const name of names) {
+    const found = Object.entries(stats).find(([key]) =>
+      key.toLowerCase() === name.toLowerCase()
+    );
+    if (found && found[1] != null && found[1] !== "") return found[1];
+  }
+  return null;
+}
+
+function statRow(label, value) {
+  const shown = value == null ? "Veri yok" : String(value);
+  return `<div class="statRow">
+    <span>${escapeHtml(label)}</span>
+    <strong>${escapeHtml(shown)}</strong>
+  </div>`;
+}
+
+function renderTeamStats(team) {
+  const s = team.statistics || {};
+  return `<div class="statTeam">
+    <div class="statTeamName">${escapeHtml(team.team || "Takım")}</div>
+    ${statRow("Toplam şut", getStat(s, ["Total Shots"]))}
+    ${statRow("İsabetli şut", getStat(s, ["Shots on Goal", "Shots on target"]))}
+    ${statRow("Korner", getStat(s, ["Corner Kicks", "Corners"]))}
+    ${statRow("Topa sahip olma", getStat(s, ["Ball Possession", "Possession"]))}
+    ${statRow("Beklenen gol (xG)", getStat(s, ["Expected goals", "Expected Goals", "xG"]))}
+    ${statRow("İsabetsiz şut", getStat(s, ["Shots off Goal", "Shots off target"]))}
+  </div>`;
+}
+
+function renderStatsPanel(id) {
+  const key = String(id);
+  if (statsLoading.has(key)) {
+    return `<div class="statsPanel" id="stats-${escapeHtml(key)}">
+      İstatistikler yükleniyor…
+    </div>`;
+  }
+
+  const result = statsCache.get(key);
+  if (!result) return "";
+
+  if (result.error) {
+    return `<div class="statsPanel" id="stats-${escapeHtml(key)}">
+      <div class="statsError">${escapeHtml(result.error)}</div>
+      <button class="btn statsButton" data-stats-id="${escapeHtml(key)}">Tekrar dene</button>
+    </div>`;
+  }
+
+  const teams = Array.isArray(result.teams) ? result.teams : [];
+  if (!result.available || teams.length === 0) {
+    return `<div class="statsPanel" id="stats-${escapeHtml(key)}">
+      Bu maç için sağlayıcıdan istatistik gelmedi. Bu durum istatistiklerin sıfır olduğu anlamına gelmez.
+      <button class="btn statsButton" data-stats-id="${escapeHtml(key)}">Tekrar kontrol et</button>
+    </div>`;
+  }
+
+  return `<div class="statsPanel" id="stats-${escapeHtml(key)}">
+    <div class="statsTitle">MAÇ İSTATİSTİKLERİ</div>
+    <div class="statTeams">${teams.map(renderTeamStats).join("")}</div>
+    <div class="statsNote">Kaynak: API-Football. Eksik alanlar “Veri yok” olarak gösterilir.
+    Bu istatistikler tek başına gol olacağını göstermez.</div>
+  </div>`;
 }
 
 function card(m) {
@@ -88,6 +187,8 @@ function card(m) {
 
   const homeScore = m.homeScore == null ? "–" : m.homeScore;
   const awayScore = m.awayScore == null ? "–" : m.awayScore;
+  const id = String(m.id ?? "");
+  const canLoadStats = /^\d+$/.test(id) && liveMode;
 
   return `<article class="card">
     <div class="matchtop">
@@ -103,14 +204,13 @@ function card(m) {
       <div class="metric"><strong>${escapeHtml(m.status || "Bilinmiyor")}</strong><small>Maç durumu</small></div>
       <div class="metric"><strong>${escapeHtml(m.id ?? "—")}</strong><small>Fikstür ID</small></div>
     </div>
-    <div class="reason">Gösterilen bilgiler sunucudan alınmıştır. Gol tahmini için gerekli ek istatistikler bu ekranda henüz bağlı değil.</div>
+    ${canLoadStats ? `
+      <button class="btn statsButton" data-stats-id="${escapeHtml(id)}">
+        ${statsCache.has(id) && !statsCache.get(id).error ? "İstatistikleri göster" : "İstatistikleri yükle"}
+      </button>
+      ${renderStatsPanel(id)}
+    ` : `<div class="reason">İstatistikleri yüklemek için canlı veri modunu aç.</div>`}
   </article>`;
-}
-
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, c => ({
-    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
-  }[c]));
 }
 
 function render() {
@@ -125,10 +225,51 @@ function render() {
     : '<div class="empty">Bu filtrede gösterilecek maç yok.</div>';
 }
 
+async function loadStats(id) {
+  const key = String(id);
+  if (!/^\d+$/.test(key) || statsLoading.has(key)) return;
+
+  // Daha önce başarıyla alınan veriyi tekrar API'den isteme.
+  const cached = statsCache.get(key);
+  if (cached && !cached.error && cached.available && cached.teams?.length) {
+    render();
+    return;
+  }
+
+  statsLoading.add(key);
+  statsCache.delete(key);
+  render();
+
+  try {
+    const response = await fetch(`/api/match/${encodeURIComponent(key)}/stats`, {
+      cache: "no-store"
+    });
+    const result = await response.json();
+
+    if (!response.ok) {
+      throw new Error(result.error || `Sunucu hatası: ${response.status}`);
+    }
+
+    if (!Array.isArray(result.teams)) {
+      throw new Error("İstatistik yanıtının biçimi beklenenden farklı.");
+    }
+
+    statsCache.set(key, result);
+  } catch (error) {
+    statsCache.set(key, {
+      error: `İstatistikler alınamadı: ${error.message}`
+    });
+  } finally {
+    statsLoading.delete(key);
+    render();
+  }
+}
+
 async function loadLive() {
   $("banner").className = "banner";
   $("banner").textContent = "API'den maç verileri alınıyor…";
   $("connection").textContent = "BAĞLANIYOR";
+  $("mode").disabled = true;
 
   try {
     const response = await fetch("/api/live", {cache:"no-store"});
@@ -153,18 +294,30 @@ async function loadLive() {
     $("connection").textContent = "API HATASI";
     $("banner").className = "banner error";
     $("banner").textContent = `Canlı veri alınamadı: ${error.message}`;
+  } finally {
+    $("mode").disabled = false;
   }
 }
 
+// Tek bir olay dinleyicisi bütün maç kartlarının istatistik düğmelerini yönetir.
+$("matches").addEventListener("click", event => {
+  const button = event.target.closest("[data-stats-id]");
+  if (!button) return;
+  loadStats(button.dataset.statsId);
+});
+
 $("filter").addEventListener("change", render);
+
 $("refresh").addEventListener("click", () => {
   if (liveMode) loadLive();
   else {
     $("banner").className = "banner";
-    $("banner").textContent = "Demo verileri gösteriliyor. Gerçek veriler için Canlı veriyi aç düğmesine bas.";
+    $("banner").textContent =
+      "Demo verileri gösteriliyor. Gerçek veriler için Canlı veriyi aç düğmesine bas.";
     render();
   }
 });
+
 $("mode").addEventListener("click", async () => {
   if (liveMode) {
     liveMode = false;
@@ -177,6 +330,7 @@ $("mode").addEventListener("click", async () => {
     await loadLive();
   }
 });
+
 render();
 </script>
 </body>
