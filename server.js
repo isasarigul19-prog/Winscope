@@ -31,7 +31,9 @@ let autoCaptureRunning = false;
 // API cache: live odds are cached for 60 seconds; pre-match odds for 3 hours.
 const oddsCache = new Map();
 const oddsInFlight = new Map();
+const fixtureDateCache = new Map();
 const CACHE_MS = { live: 60_000, prematch: 3 * 60 * 60 * 1000 };
+const FIXTURE_DATE_CACHE_MS = 15 * 60 * 1000;
 
 function toNumber(value) {
   if (value == null || String(value).trim() === "") return null;
@@ -263,6 +265,39 @@ app.get("/api/live", async (_req, res) => {
   } catch (error) {
     console.error("Live API error:", error.message);
     res.status(502).json({ error: "Canlı maçlar alınamadı.", detail: error.message });
+  }
+});
+
+// Maç önü bülteni: aynı günün fikstürleri 15 dakika önbellekte tutulur.
+app.get("/api/fixtures", async (req, res) => {
+  const date = typeof req.query.date === "string" ? req.query.date : "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: "Tarih YYYY-MM-DD biçiminde olmalı." });
+  }
+  const parsed = new Date(`${date}T00:00:00Z`);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) {
+    return res.status(400).json({ error: "Geçersiz tarih." });
+  }
+  const cached = fixtureDateCache.get(date);
+  if (cached && Date.now() - cached.at < FIXTURE_DATE_CACHE_MS) {
+    return res.json({ ...cached.data, cached: true });
+  }
+  try {
+    const fixtures = await apiGet(`/fixtures?date=${encodeURIComponent(date)}&timezone=Europe/Istanbul`);
+    const matches = fixtures.map(item => ({
+      id: item.fixture.id, league: item.league?.name || "Bilinmeyen lig",
+      country: item.league?.country || "", minute: item.fixture?.status?.elapsed,
+      status: item.fixture?.status?.short || "NS", home: item.teams?.home?.name || "Ev sahibi",
+      away: item.teams?.away?.name || "Deplasman", homeScore: item.goals?.home,
+      awayScore: item.goals?.away, homeId: item.teams?.home?.id, awayId: item.teams?.away?.id,
+      fixtureDate: item.fixture?.date
+    }));
+    const data = { source: "API-Football", date, timezone: "Europe/Istanbul", fetchedAt: new Date().toISOString(), results: matches.length, matches, note: "Fikstür listesi önbelleğe alınır. Oranlar her maç için kullanıcı isteğiyle ayrı sorgulanır." };
+    fixtureDateCache.set(date, { at: Date.now(), data });
+    res.json(data);
+  } catch (error) {
+    console.error("Fixture bulletin API error:", error.message);
+    res.status(502).json({ error: "Maç bülteni alınamadı.", detail: error.message, date });
   }
 });
 
