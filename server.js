@@ -689,6 +689,100 @@ app.get("/api/db-status", async (_req, res) => {
   }
 });
 
+
+app.get("/api/historical/similar", async (req, res) => {
+  if (!pool) {
+    return res.status(503).json({
+      error: "DATABASE_URL ayarlanmamış."
+    });
+  }
+
+  const over = Number(req.query.over);
+  const under = Number(req.query.under);
+
+  if (
+    !Number.isFinite(over) ||
+    !Number.isFinite(under) ||
+    over <= 1 ||
+    under <= 1 ||
+    over > 20 ||
+    under > 20
+  ) {
+    return res.status(400).json({
+      error: "Geçerli over ve under oranları gir. Örnek: ?over=1.80&under=2.00"
+    });
+  }
+
+  try {
+    await initDatabase();
+
+    const result = await pool.query(`
+      WITH similar AS (
+        SELECT
+          id,
+          match_date,
+          home_team,
+          away_team,
+          b365_over25,
+          b365_under25,
+          total_goals,
+          over25_result,
+          ABS(b365_over25 - $1)
+            + ABS(b365_under25 - $2) AS distance
+        FROM historical_matches
+        WHERE b365_over25 IS NOT NULL
+          AND b365_under25 IS NOT NULL
+          AND over25_result IN (0, 1)
+          AND ABS(b365_over25 - $1) <= 0.20
+          AND ABS(b365_under25 - $2) <= 0.20
+        ORDER BY distance ASC
+        LIMIT 100
+      )
+      SELECT
+        COUNT(*)::int AS sample_size,
+        COUNT(*) FILTER (WHERE over25_result = 1)::int AS over25,
+        COUNT(*) FILTER (WHERE over25_result = 0)::int AS under25,
+        ROUND(
+          100.0 * COUNT(*) FILTER (WHERE over25_result = 1)
+          / NULLIF(COUNT(*), 0),
+          2
+        ) AS over25_percent,
+        ROUND(
+          100.0 * COUNT(*) FILTER (WHERE over25_result = 0)
+          / NULLIF(COUNT(*), 0),
+          2
+        ) AS under25_percent,
+        ROUND(AVG(distance)::numeric, 3) AS average_odds_distance
+      FROM similar
+    `, [over, under]);
+
+    const stats = result.rows[0];
+    const sampleSize = stats.sample_size || 0;
+
+    res.json({
+      source: "WinScope historical database",
+      market: "MS 2.5 Alt/Üst",
+      inputOdds: { over, under },
+      matchingRule: "İki açılış oranı için en fazla 0.20 fark",
+      sampleSize,
+      over25: stats.over25 || 0,
+      under25: stats.under25 || 0,
+      over25Percent: stats.over25_percent,
+      under25Percent: stats.under25_percent,
+      averageOddsDistance: stats.average_odds_distance,
+      decision: sampleSize < 30
+        ? "UZAK DUR - Yeterli benzer maç yok"
+        : "Geçmiş örneklem mevcut; canlı istatistik ve diğer sinyaller ayrıca kontrol edilmeli",
+      warning: "Geçmiş sonuçlar gelecekteki maç için garanti veya tek başına bahis önerisi değildir."
+    });
+  } catch (error) {
+    console.error("Similar historical matches error:", error.message);
+    res.status(503).json({
+      error: "Benzer geçmiş maçlar sorgulanamadı."
+    });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`WinScope Live running on port ${PORT}`);
 });
