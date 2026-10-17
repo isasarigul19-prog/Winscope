@@ -15,9 +15,11 @@ header{padding:20px 16px;border-bottom:1px solid #24434a;display:flex;justify-co
 main{max-width:1100px;margin:auto;padding:20px 16px 40px}
 .hero{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:18px}
 h1{font-size:25px;margin:0 0 6px}
+h2{font-size:19px;margin:0 0 8px}
 .pill,.tag{border:1px solid #34545b;border-radius:999px;padding:7px 11px;color:var(--muted);font-size:12px}
 .controls{display:flex;gap:8px;flex-wrap:wrap}
-.btn,select{border:1px solid #36565d;background:#17383e;color:var(--text);border-radius:10px;padding:10px 12px;font:inherit;cursor:pointer}
+.btn,select,input{border:1px solid #36565d;background:#17383e;color:var(--text);border-radius:10px;padding:10px 12px;font:inherit}
+.btn{cursor:pointer}
 .btn.primary{background:var(--pink);border-color:var(--pink);font-weight:800}
 .btn:disabled{opacity:.55;cursor:wait}
 .banner{background:#392f19;border:1px solid #705c2b;color:#ffe4a2;border-radius:12px;padding:12px 14px;margin:14px 0 20px;font-size:13px;overflow-wrap:anywhere}
@@ -50,8 +52,21 @@ h1{font-size:25px;margin:0 0 6px}
 .statsNote{font-size:11px;color:var(--muted);line-height:1.5;margin-top:10px}
 .statsError{color:#ffd2da;font-size:12px;line-height:1.5}
 .empty{padding:25px;text-align:center;color:var(--muted)}
+.section{margin-top:22px}
+.analysisGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+.field input{width:100%;min-width:0}
+.formRow{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.analysisResult{margin-top:14px;padding:14px;border:1px solid #284a50;border-radius:12px;background:#091f24}
+.bigPercent{font-size:25px;font-weight:900}
+.resultStats{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+.resultBox{background:#102b31;padding:12px;border-radius:10px}
+.resultLabel{font-size:12px;color:var(--muted)}
+.assessment{display:inline-block;margin-top:12px;padding:8px 12px;border-radius:9px;background:#392f19;color:#ffe4a2;font-weight:850;font-size:13px}
+.assessment.good{background:#12392e;color:#a7f5cf}
+.assessment.bad{background:#431e27;color:#ffd2da}
 footer{color:var(--muted);font-size:12px;line-height:1.5;margin-top:20px}
-@media(max-width:720px){.grid{grid-template-columns:1fr}h1{font-size:22px}.score{font-size:26px}}
+@media(max-width:720px){.grid{grid-template-columns:1fr}h1{font-size:22px}.score{font-size:26px}.analysisGrid{grid-template-columns:1fr}}
 @media(max-width:360px){.statTeams{grid-template-columns:1fr}.statTeamName{min-height:0}}
 </style>
 </head>
@@ -85,9 +100,32 @@ footer{color:var(--muted);font-size:12px;line-height:1.5;margin-top:20px}
 <div class="banner" id="banner">Demo modu açık. Canlı veriyi açarak sunucuyu kontrol edebilirsin.</div>
 <section class="grid" id="matches"></section>
 
+<section class="card section" id="historicalAnalysis">
+  <h2>📊 Tarihsel 2.5 Üst / Alt Analizi</h2>
+  <div class="sub">Girdiğin oranlara yakın geçmiş maçları karşılaştırır.</div>
+  <div class="formRow" style="margin-top:16px">
+    <div class="field">
+      <label for="overOdds">2.5 Üst açılış oranı</label>
+      <input id="overOdds" type="number" min="1.01" max="100" step="0.01" value="1.80" inputmode="decimal">
+    </div>
+    <div class="field">
+      <label for="underOdds">2.5 Alt açılış oranı</label>
+      <input id="underOdds" type="number" min="1.01" max="100" step="0.01" value="2.00" inputmode="decimal">
+    </div>
+  </div>
+  <button class="btn primary" id="analyzeHistorical" style="width:100%;margin-top:12px">Benzer geçmiş maçları analiz et</button>
+  <div id="historicalResult" class="analysisResult" aria-live="polite">
+    Oranları girip analiz düğmesine bas. Veriler sunucudaki tarihsel maç tablosundan alınır.
+  </div>
+  <div class="statsNote">
+    Karşılaştırma, kayıtlı tarihsel B365 açılış oranlarına dayanır. Benzerlik aralığı her oran için ±0.20'dir.
+    Yeterli örneklem yoksa karar zorlanmaz. Geçmiş sonuçlar gelecek maçın sonucunu garanti etmez.
+  </div>
+</section>
+
 <footer>
   İstatistikler kullanıcı isteğiyle yüklenir. Takip listesi Neon veritabanında saklanır.
-  10 dakikalık geçmiş, yalnızca mevcut kayıtları gösterir. Otomatik kayıt henüz etkin değildir.
+  Takip edilen maçların istatistikleri sunucu çalışırken yaklaşık 60 saniyede bir kaydedilmeye çalışılır.
   Eksik istatistikler sıfır kabul edilmez ve doğrulanmamış gol sinyali üretilmez.
 </footer>
 </main>
@@ -210,17 +248,12 @@ function findSnapshotStat(snapshot, teamName, statNames) {
   if (!team) return null;
 
   const stats = team.statistics || {};
-
   for (const name of statNames) {
     const found = Object.entries(stats).find(([key]) =>
       key.toLowerCase() === name.toLowerCase()
     );
-
-    if (found && found[1] != null && found[1] !== "") {
-      return parseNumber(found[1]);
-    }
+    if (found && found[1] != null && found[1] !== "") return parseNumber(found[1]);
   }
-
   return null;
 }
 
@@ -250,12 +283,8 @@ function renderHistoryPanel(id) {
       <div class="statsNote">
         Son 10 dakikadaki kayıt sayısı: ${history.length}.
         Değişim hesaplamak için en az 2 kayıt gerekiyor.
-        Otomatik kayıt henüz etkin değil.
       </div>
-      ${history.length === 1 ? `
-        <div class="statsNote">
-          Son kayıt: ${escapeHtml(new Date(history[0].captured_at).toLocaleString("tr-TR"))}
-        </div>` : ""}
+      ${history.length === 1 ? `<div class="statsNote">Son kayıt: ${escapeHtml(new Date(history[0].captured_at).toLocaleString("tr-TR"))}</div>` : ""}
       <button class="btn statsButton" data-history-id="${escapeHtml(key)}">Geçmişi yenile</button>
     </div>`;
   }
@@ -269,18 +298,13 @@ function renderHistoryPanel(id) {
     const after = findSnapshotStat(last, teamName, names);
 
     if (before == null || after == null) {
-      return `<div class="statRow">
-        <span>${escapeHtml(teamName)} · ${escapeHtml(label)}</span>
-        <strong>Veri yok</strong>
-      </div>`;
+      return `<div class="statRow"><span>${escapeHtml(teamName)} · ${escapeHtml(label)}</span><strong>Veri yok</strong></div>`;
     }
 
     const delta = after - before;
-    const sign = delta > 0 ? "+" : "";
-
     return `<div class="statRow">
       <span>${escapeHtml(teamName)} · ${escapeHtml(label)}</span>
-      <strong>${sign}${delta}</strong>
+      <strong>${delta > 0 ? "+" : ""}${delta}</strong>
     </div>`;
   }
 
@@ -297,15 +321,9 @@ function renderHistoryPanel(id) {
     <div class="statsTitle">SON 10 DAKİKADAKİ KAYITLI DEĞİŞİM</div>
     <div class="statsNote">Kayıt sayısı: ${history.length}</div>
     ${rows}
-    <div class="statsNote">
-      İlk kayıt: ${escapeHtml(new Date(first.captured_at).toLocaleString("tr-TR"))}
-    </div>
-    <div class="statsNote">
-      Son kayıt: ${escapeHtml(new Date(last.captured_at).toLocaleString("tr-TR"))}
-    </div>
-    <div class="statsNote">
-      Değerler iki kayıt arasındaki farktır; tek başına gol sinyali değildir.
-    </div>
+    <div class="statsNote">İlk kayıt: ${escapeHtml(new Date(first.captured_at).toLocaleString("tr-TR"))}</div>
+    <div class="statsNote">Son kayıt: ${escapeHtml(new Date(last.captured_at).toLocaleString("tr-TR"))}</div>
+    <div class="statsNote">Değerler kayıtlar arasındaki farktır; tek başına gol sinyali değildir.</div>
     <button class="btn statsButton" data-history-id="${escapeHtml(key)}">Geçmişi yenile</button>
   </div>`;
 }
@@ -318,22 +336,13 @@ async function loadHistory(id) {
   render();
 
   try {
-    const response = await fetch(
-      `/api/match/${encodeURIComponent(key)}/history`,
-      {cache:"no-store"}
-    );
-
+    const response = await fetch(`/api/match/${encodeURIComponent(key)}/history`, {cache:"no-store"});
     const result = await response.json();
-
-    if (!response.ok) {
-      throw new Error(result.error || `Sunucu hatası: ${response.status}`);
-    }
+    if (!response.ok) throw new Error(result.error || `Sunucu hatası: ${response.status}`);
 
     historyCache.set(key, result);
   } catch (error) {
-    historyCache.set(key, {
-      error: `Geçmiş verisi alınamadı: ${error.message}`
-    });
+    historyCache.set(key, {error:`Geçmiş verisi alınamadı: ${error.message}`});
   } finally {
     historyLoading.delete(key);
     render();
@@ -355,13 +364,13 @@ function card(m) {
   let trackButton = "";
 
   if (canLoadStats) {
-    trackButton = `<button
-      class="btn trackButton ${tracked ? "active" : ""}"
+    trackButton = `<button class="btn trackButton ${tracked ? "active" : ""}"
       data-track-id="${escapeHtml(id)}"
-      ${trackingBusy || (!tracked && atLimit) ? "disabled" : ""}
-    >${trackingBusy ? "İşlem yapılıyor…" :
-      tracked ? "✓ Takipte · Takibi bırak" :
-      atLimit ? "Takip sınırı dolu (2/2)" : "+ Takibe al"}</button>`;
+      ${trackingBusy || (!tracked && atLimit) ? "disabled" : ""}>
+      ${trackingBusy ? "İşlem yapılıyor…" :
+        tracked ? "✓ Takipte · Takibi bırak" :
+        atLimit ? "Takip sınırı dolu (2/2)" : "+ Takibe al"}
+    </button>`;
   }
 
   return `<article class="card">
@@ -380,14 +389,10 @@ function card(m) {
     </div>
     ${trackButton}
     ${canLoadStats ? `
-      <button class="btn statsButton" data-stats-id="${escapeHtml(id)}">
-        ${statsCache.has(id) && !statsCache.get(id).error ? "İstatistikleri göster" : "İstatistikleri yükle"}
-      </button>
+      <button class="btn statsButton" data-stats-id="${escapeHtml(id)}">İstatistikleri göster</button>
       ${renderStatsPanel(id)}
       ${tracked ? `
-        <button class="btn statsButton" data-history-id="${escapeHtml(id)}">
-          10 dakikalık veri geçmişi
-        </button>
+        <button class="btn statsButton" data-history-id="${escapeHtml(id)}">10 dakikalık veri geçmişi</button>
         ${renderHistoryPanel(id)}
       ` : ""}
     ` : `<div class="reason">Takip ve istatistik işlemleri için canlı veri modunu aç.</div>`}
@@ -397,7 +402,6 @@ function card(m) {
 function render() {
   const data = liveMode ? liveMatches : demoMatches;
   const filter = $("filter").value;
-
   const filtered = data.filter(m =>
     filter === "all" ||
     (filter === "live" ? getStatus(m) === "live" : getStatus(m) === "finished")
@@ -414,17 +418,10 @@ async function loadTracked() {
   try {
     const response = await fetch("/api/tracked", {cache:"no-store"});
     const result = await response.json();
-
-    if (!response.ok) {
-      throw new Error(result.error || `Sunucu hatası: ${response.status}`);
-    }
+    if (!response.ok) throw new Error(result.error || `Sunucu hatası: ${response.status}`);
 
     trackedMatches.clear();
-
-    for (const match of (result.matches || [])) {
-      trackedMatches.set(String(match.id), match);
-    }
-
+    for (const match of (result.matches || [])) trackedMatches.set(String(match.id), match);
     updateTrackingCount();
     render();
   } catch (error) {
@@ -443,7 +440,6 @@ async function toggleTracking(id) {
   }
 
   const isTracked = trackedMatches.has(key);
-
   if (!isTracked && trackedMatches.size >= 2) {
     setBanner("En fazla 2 maç takip edilebilir. Önce bir maçın takibini bırak.", "error");
     return;
@@ -453,31 +449,20 @@ async function toggleTracking(id) {
   render();
 
   try {
-    const response = await fetch(
-      `/api/match/${encodeURIComponent(key)}/track`,
+    const response = await fetch(`/api/match/${encodeURIComponent(key)}/track`,
       isTracked
         ? {method:"DELETE", cache:"no-store"}
         : {
             method:"POST",
             headers:{"Content-Type":"application/json"},
             body:JSON.stringify({home:match.home,away:match.away})
-          }
-    );
+          });
 
     const result = await response.json();
-
-    if (!response.ok) {
-      throw new Error(result.error || `Sunucu hatası: ${response.status}`);
-    }
+    if (!response.ok) throw new Error(result.error || `Sunucu hatası: ${response.status}`);
 
     await loadTracked();
-
-    setBanner(
-      isTracked
-        ? `${match.home} – ${match.away}: takipten çıkarıldı.`
-        : `${match.home} – ${match.away}: takip listesine eklendi.`,
-      "ok"
-    );
+    setBanner(isTracked ? "Maç takipten çıkarıldı." : "Maç takip listesine eklendi.", "ok");
   } catch (error) {
     setBanner(`Takip işlemi başarısız: ${error.message}`, "error");
   } finally {
@@ -490,36 +475,18 @@ async function loadStats(id) {
   const key = String(id);
   if (!/^\d+$/.test(key) || statsLoading.has(key)) return;
 
-  const cached = statsCache.get(key);
-  if (cached && !cached.error && cached.available && cached.teams?.length) {
-    render();
-    return;
-  }
-
   statsLoading.add(key);
   statsCache.delete(key);
   render();
 
   try {
-    const response = await fetch(`/api/match/${encodeURIComponent(key)}/stats`, {
-      cache:"no-store"
-    });
-
+    const response = await fetch(`/api/match/${encodeURIComponent(key)}/stats`, {cache:"no-store"});
     const result = await response.json();
-
-    if (!response.ok) {
-      throw new Error(result.error || `Sunucu hatası: ${response.status}`);
-    }
-
-    if (!Array.isArray(result.teams)) {
-      throw new Error("İstatistik yanıtının biçimi beklenenden farklı.");
-    }
-
+    if (!response.ok) throw new Error(result.error || `Sunucu hatası: ${response.status}`);
+    if (!Array.isArray(result.teams)) throw new Error("İstatistik yanıtı beklenen biçimde değil.");
     statsCache.set(key, result);
   } catch (error) {
-    statsCache.set(key, {
-      error: `İstatistikler alınamadı: ${error.message}`
-    });
+    statsCache.set(key, {error:`İstatistikler alınamadı: ${error.message}`});
   } finally {
     statsLoading.delete(key);
     render();
@@ -535,31 +502,97 @@ async function loadLive() {
   try {
     const response = await fetch("/api/live", {cache:"no-store"});
     const result = await response.json();
-
-    if (!response.ok) {
-      throw new Error(result.error || `Sunucu hatası: ${response.status}`);
-    }
-
-    if (!Array.isArray(result.matches)) {
-      throw new Error("API yanıtında maç listesi bulunamadı.");
-    }
+    if (!response.ok) throw new Error(result.error || `Sunucu hatası: ${response.status}`);
+    if (!Array.isArray(result.matches)) throw new Error("API yanıtında maç listesi bulunamadı.");
 
     liveMatches = result.matches;
     liveMode = true;
     $("mode").textContent = "Demo moduna dön";
     $("connection").textContent = "API BAĞLI";
-
-    setBanner(
-      `${liveMatches.length} maç kaydı alındı. Kaynak: ${result.source || "Sunucu API'si"}.`,
-      "ok"
-    );
-
+    setBanner(`${liveMatches.length} maç kaydı alındı. Kaynak: ${result.source || "Sunucu API'si"}.`, "ok");
     render();
   } catch (error) {
     $("connection").textContent = "API HATASI";
     setBanner(`Canlı veri alınamadı: ${error.message}`, "error");
   } finally {
     $("mode").disabled = false;
+  }
+}
+
+function showHistoricalError(message) {
+  $("historicalResult").innerHTML = `<div class="statsError">${escapeHtml(message)}</div>`;
+}
+
+async function analyzeHistorical() {
+  const over = Number($("overOdds").value);
+  const under = Number($("underOdds").value);
+  const output = $("historicalResult");
+  const button = $("analyzeHistorical");
+
+  if (!Number.isFinite(over) || !Number.isFinite(under) ||
+      over <= 1 || under <= 1 || over > 100 || under > 100) {
+    showHistoricalError("Lütfen 1.01 ile 100 arasında geçerli iki oran gir.");
+    return;
+  }
+
+  button.disabled = true;
+  button.textContent = "Geçmiş maçlar sorgulanıyor…";
+  output.textContent = "Benzer açılış oranları aranıyor…";
+
+  try {
+    const query = new URLSearchParams({
+      over: over.toFixed(2),
+      under: under.toFixed(2)
+    });
+
+    const response = await fetch(`/api/historical/similar?${query.toString()}`, {
+      cache:"no-store"
+    });
+    const result = await response.json();
+
+    if (!response.ok) throw new Error(result.error || `Sunucu hatası: ${response.status}`);
+
+    const sample = Number(result.sampleSize || 0);
+    const overPct = result.over25Percent == null ? null : Number(result.over25Percent);
+    const underPct = result.under25Percent == null ? null : Number(result.under25Percent);
+    const assessment = sample < 30 ? "UZAK DUR" : (result.assessment || "TUTARSIZ SİNYAL");
+    const assessmentClass = assessment.includes("ÜST") || assessment.includes("ALT") ? "good" : "bad";
+
+    output.innerHTML = `
+      <div class="statsTitle">BENZER TARİHSEL ORAN SONUCU</div>
+      <div class="sub">Girilen oranlar: Üst ${over.toFixed(2)} · Alt ${under.toFixed(2)}</div>
+      <div class="resultStats">
+        <div class="resultBox">
+          <div class="resultLabel">Benzer maç sayısı</div>
+          <div class="bigPercent">${sample}</div>
+        </div>
+        <div class="resultBox">
+          <div class="resultLabel">İncelenen üst sınır</div>
+          <div class="bigPercent">${Number(result.maxSample || 100)}</div>
+        </div>
+        <div class="resultBox">
+          <div class="resultLabel">Geçmişte 2.5 Üst</div>
+          <div class="bigPercent">${overPct == null ? "Veri yok" : `%${overPct.toFixed(2)}`}</div>
+          <div class="statsNote">${result.over25 == null ? "Sonuç sayısı mevcut değil" : `${result.over25} maç`}</div>
+        </div>
+        <div class="resultBox">
+          <div class="resultLabel">Geçmişte 2.5 Alt</div>
+          <div class="bigPercent">${underPct == null ? "Veri yok" : `%${underPct.toFixed(2)}`}</div>
+          <div class="statsNote">${result.under25 == null ? "Sonuç sayısı mevcut değil" : `${result.under25} maç`}</div>
+        </div>
+      </div>
+      <div class="assessment ${assessmentClass}">${escapeHtml(assessment)}</div>
+      <div class="statsNote" style="margin-top:12px">
+        Oran toleransı: ±${Number(result.oddsTolerance || 0.20).toFixed(2)}.
+        Ortalama oran uzaklığı: ${result.averageOddsDistance == null ? "Veri yok" : Number(result.averageOddsDistance).toFixed(3)}.
+      </div>
+      <div class="statsNote">${escapeHtml(result.note || "Bu sonuç tarihsel veriye dayanır; gelecek maç için garanti değildir.")}</div>
+    `;
+  } catch (error) {
+    showHistoricalError(`Tarihsel analiz alınamadı: ${error.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Benzer geçmiş maçları analiz et";
   }
 }
 
@@ -577,12 +610,11 @@ $("matches").addEventListener("click", event => {
   }
 
   const statsButton = event.target.closest("[data-stats-id]");
-  if (statsButton) {
-    loadStats(statsButton.dataset.statsId);
-  }
+  if (statsButton) loadStats(statsButton.dataset.statsId);
 });
 
 $("filter").addEventListener("change", render);
+$("analyzeHistorical").addEventListener("click", analyzeHistorical);
 
 $("refresh").addEventListener("click", () => {
   if (liveMode) {
