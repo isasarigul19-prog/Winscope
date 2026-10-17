@@ -1,6 +1,6 @@
+
 import express from "express";
 import pg from "pg";
-import { parse } from "csv-parse/sync";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -11,16 +11,12 @@ const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_FOOTBALL_KEY;
 const DATABASE_URL = process.env.DATABASE_URL;
 const BASE_URL = "https://v3.football.api-sports.io";
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const HISTORICAL_CSV = path.join(
-  __dirname,
-  "data",
-  "winscope_historical_odds.csv"
-);
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
+const CSV_FILE = path.join(ROOT, "data", "winscope_historical_odds.csv");
 const { Pool } = pg;
 
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(path.join(ROOT, "public")));
 
 const pool = DATABASE_URL
   ? new Pool({
@@ -33,132 +29,91 @@ const pool = DATABASE_URL
   : null;
 
 let dbReady = null;
+let importResult = { status: "not_started", rows: 0 };
 
-function toNumber(value) {
+// CSV satırlarını virgül ve tırnakları koruyarak ayrıştırır.
+function parseCSV(text) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let quoted = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+
+    if (quoted) {
+      if (char === '"' && text[i + 1] === '"') {
+        field += '"';
+        i++;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        field += char;
+      }
+    } else if (char === '"' && field.length === 0) {
+      quoted = true;
+    } else if (char === ",") {
+      row.push(field);
+      field = "";
+    } else if (char === "\n" || char === "\r") {
+      if (char === "\r" && text[i + 1] === "\n") i++;
+      row.push(field);
+
+      if (row.some(value => value.trim() !== "")) rows.push(row);
+
+      row = [];
+      field = "";
+    } else {
+      field += char;
+    }
+  }
+
+  if (field.length > 0 || row.length > 0) {
+    row.push(field);
+    if (row.some(value => value.trim() !== "")) rows.push(row);
+  }
+
+  if (!rows.length) return [];
+
+  const headers = rows[0].map(value =>
+    value.replace(/^\uFEFF/, "").trim()
+  );
+
+  return rows.slice(1).map(values => {
+    const record = {};
+    headers.forEach((header, index) => {
+      record[header] = (values[index] ?? "").trim();
+    });
+    return record;
+  });
+}
+
+function num(value) {
   if (value === undefined || value === null || String(value).trim() === "") {
     return null;
   }
 
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
+  const result = Number(value);
+  return Number.isFinite(result) ? result : null;
 }
 
-function parseDate(value) {
-  const parts = String(value || "").split("/");
-  if (parts.length !== 3) return null;
+function dateValue(value) {
+  const s = String(value || "").trim();
+  if (!s) return null;
 
-  const [day, month, year] = parts;
-  if (!day || !month || !year) return null;
+  // YYYY-MM-DD biçimi
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
 
-  return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  // DD/MM/YYYY biçimi
+  const match = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (match) {
+    return `${match[3]}-${match[2].padStart(2, "0")}-${match[1].padStart(2, "0")}`;
+  }
+
+  return null;
 }
 
-// Geçmiş CSV verisini yalnızca tablo boşken bir kez aktarır.
-async function importHistoricalCsvOnce() {
-  if (!pool) {
-    return { imported: false, reason: "database_not_configured" };
-  }
-
-  if (!existsSync(HISTORICAL_CSV)) {
-    console.log("Geçmiş CSV bulunamadı; aktarım atlandı.");
-    return { imported: false, reason: "csv_not_found" };
-  }
-
-  const existing = await pool.query(
-    "SELECT COUNT(*)::int AS total FROM historical_matches"
-  );
-
-  if (existing.rows[0].total > 0) {
-    console.log(`Geçmiş veri zaten mevcut: ${existing.rows[0].total} maç.`);
-    return {
-      imported: false,
-      reason: "already_imported",
-      rows: existing.rows[0].total
-    };
-  }
-
-  const csvText = await readFile(HISTORICAL_CSV, "utf8");
-  const records = parse(csvText, {
-    columns: true,
-    bom: true,
-    skip_empty_lines: true,
-    trim: true
-  });
-
-  const client = await pool.connect();
-  let inserted = 0;
-
-  try {
-    await client.query("BEGIN");
-
-    for (let start = 0; start < records.length; start += 200) {
-      const batch = records.slice(start, start + 200);
-      const values = [];
-
-      const placeholders = batch.map((row, index) => {
-        const offset = index * 24;
-
-        values.push(
-          row.Div || null,
-          parseDate(row.Date),
-          row.Time || null,
-          row.HomeTeam || "Bilinmiyor",
-          row.AwayTeam || "Bilinmiyor",
-          toNumber(row.HTHG),
-          toNumber(row.HTAG),
-          toNumber(row.FTHG),
-          toNumber(row.FTAG),
-          row.FTR || null,
-          toNumber(row.B365H),
-          toNumber(row.B365D),
-          toNumber(row.B365A),
-          toNumber(row.AvgH),
-          toNumber(row.AvgD),
-          toNumber(row.AvgA),
-          toNumber(row["B365>2.5"]),
-          toNumber(row["B365<2.5"]),
-          toNumber(row["Avg>2.5"]),
-          toNumber(row["Avg<2.5"]),
-          toNumber(row["B365C>2.5"]),
-          toNumber(row["B365C<2.5"]),
-          toNumber(row.TotalGoals),
-          toNumber(row.Over25Result)
-        );
-
-        return `(${Array.from(
-          { length: 24 },
-          (_, i) => `$${offset + i + 1}`
-        ).join(",")})`;
-      });
-
-      await client.query(
-        `INSERT INTO historical_matches (
-          league_code, match_date, match_time, home_team, away_team,
-          ht_home_goals, ht_away_goals, ft_home_goals, ft_away_goals,
-          full_time_result, b365_home, b365_draw, b365_away,
-          avg_home, avg_draw, avg_away, b365_over25, b365_under25,
-          avg_over25, avg_under25, b365_close_over25,
-          b365_close_under25, total_goals, over25_result
-        ) VALUES ${placeholders.join(",")}`,
-        values
-      );
-
-      inserted += batch.length;
-    }
-
-    await client.query("COMMIT");
-    console.log(`Geçmiş veri aktarıldı: ${inserted} maç.`);
-
-    return { imported: true, rows: inserted };
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
-// Tabloları oluştur ve geçmiş veriyi gerektiğinde aktar.
+// Veritabanını kur, tabloları hazırla ve geçmiş veriyi gerekiyorsa aktar.
 async function initDatabase() {
   if (!pool) return false;
 
@@ -210,18 +165,18 @@ async function initDatabase() {
           over25_result INTEGER
         );
 
-        CREATE INDEX IF NOT EXISTS idx_historical_league_date
-        ON historical_matches (league_code, match_date DESC);
+        CREATE INDEX IF NOT EXISTS idx_historical_date
+        ON historical_matches (match_date DESC);
 
-        CREATE INDEX IF NOT EXISTS idx_historical_teams
-        ON historical_matches (home_team, away_team);
+        CREATE INDEX IF NOT EXISTS idx_historical_league
+        ON historical_matches (league_code);
       `);
 
-      await importHistoricalCsvOnce();
+      await importHistoricalOnce();
       return true;
     })().catch(error => {
       dbReady = null;
-      console.error("Veritabanı başlatma hatası:", error.message);
+      console.error("Database initialization error:", error.message);
       throw error;
     });
   }
@@ -229,13 +184,119 @@ async function initDatabase() {
   return dbReady;
 }
 
-// API-Football isteği
-async function apiGet(pathname) {
-  if (!API_KEY) {
-    throw new Error("API_FOOTBALL_KEY ayarlanmamış.");
+// Geçmiş CSV dosyasını sadece tarihsel tablo boşsa aktarır.
+async function importHistoricalOnce() {
+  if (!pool) return;
+
+  const count = await pool.query(
+    "SELECT COUNT(*)::int AS total FROM historical_matches"
+  );
+
+  if (count.rows[0].total > 0) {
+    importResult = {
+      status: "already_imported",
+      rows: count.rows[0].total
+    };
+    console.log("Geçmiş veri zaten yüklü:", importResult.rows);
+    return;
   }
 
-  const response = await fetch(`${BASE_URL}${pathname}`, {
+  if (!existsSync(CSV_FILE)) {
+    importResult = { status: "csv_not_found", rows: 0 };
+    console.log("CSV dosyası bulunamadı:", CSV_FILE);
+    return;
+  }
+
+  const text = await readFile(CSV_FILE, "utf8");
+  const records = parseCSV(text);
+
+  if (!records.length) {
+    importResult = { status: "empty_csv", rows: 0 };
+    return;
+  }
+
+  const client = await pool.connect();
+  let inserted = 0;
+
+  try {
+    await client.query("BEGIN");
+
+    for (let start = 0; start < records.length; start += 100) {
+      const batch = records.slice(start, start + 100);
+      const params = [];
+      const placeholders = [];
+
+      for (let i = 0; i < batch.length; i++) {
+        const r = batch[i];
+        const offset = i * 24;
+
+        params.push(
+          r.Div || null,
+          dateValue(r.Date),
+          r.Time || null,
+          r.HomeTeam || "Bilinmiyor",
+          r.AwayTeam || "Bilinmiyor",
+          num(r.HTHG),
+          num(r.HTAG),
+          num(r.FTHG),
+          num(r.FTAG),
+          r.FTR || null,
+          num(r.B365H),
+          num(r.B365D),
+          num(r.B365A),
+          num(r.AvgH),
+          num(r.AvgD),
+          num(r.AvgA),
+          num(r["B365>2.5"]),
+          num(r["B365<2.5"]),
+          num(r["Avg>2.5"]),
+          num(r["Avg<2.5"]),
+          num(r["B365C>2.5"]),
+          num(r["B365C<2.5"]),
+          num(r.TotalGoals),
+          num(r.Over25Result)
+        );
+
+        const marks = Array.from(
+          { length: 24 },
+          (_, j) => `$${offset + j + 1}`
+        );
+
+        placeholders.push(`(${marks.join(",")})`);
+      }
+
+      await client.query(
+        `INSERT INTO historical_matches (
+          league_code, match_date, match_time, home_team, away_team,
+          ht_home_goals, ht_away_goals, ft_home_goals, ft_away_goals,
+          full_time_result, b365_home, b365_draw, b365_away,
+          avg_home, avg_draw, avg_away, b365_over25, b365_under25,
+          avg_over25, avg_under25, b365_close_over25,
+          b365_close_under25, total_goals, over25_result
+        ) VALUES ${placeholders.join(",")}`,
+        params
+      );
+
+      inserted += batch.length;
+    }
+
+    await client.query("COMMIT");
+    importResult = { status: "imported", rows: inserted };
+    console.log("Geçmiş maçlar aktarıldı:", inserted);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    importResult = { status: "error", rows: 0 };
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+// API-Football isteği
+async function apiGet(endpoint) {
+  if (!API_KEY) throw new Error("API_FOOTBALL_KEY ayarlanmamış.");
+
+  const response = await fetch(`${BASE_URL}${endpoint}`, {
     headers: { "x-apisports-key": API_KEY },
     signal: AbortSignal.timeout(12000)
   });
@@ -243,14 +304,14 @@ async function apiGet(pathname) {
   const payload = await response.json();
 
   if (!response.ok || Object.keys(payload.errors || {}).length > 0) {
-    console.error("API-Football hatası:", payload.errors);
+    console.error("API-Football error:", payload.errors);
     throw new Error("API-Football isteği başarısız.");
   }
 
   return payload.response || [];
 }
 
-// Canlı maç listesi
+// Canlı maçlar
 app.get("/api/live", async (_req, res) => {
   try {
     const fixtures = await apiGet("/fixtures?live=all");
@@ -277,23 +338,21 @@ app.get("/api/live", async (_req, res) => {
       matches
     });
   } catch (error) {
-    console.error("Canlı maç hatası:", error.message);
+    console.error("Live API error:", error.message);
     res.status(502).json({ error: "Canlı maçlar alınamadı." });
   }
 });
 
-// Maç istatistiklerini getir ve kaydet
+// Maç istatistiklerini getir ve snapshot kaydet
 app.get("/api/match/:id/stats", async (req, res) => {
-  const fixtureId = req.params.id;
+  const id = req.params.id;
 
-  if (!/^\d+$/.test(fixtureId)) {
+  if (!/^\d+$/.test(id)) {
     return res.status(400).json({ error: "Geçersiz fikstür ID." });
   }
 
   try {
-    const rows = await apiGet(
-      `/fixtures/statistics?fixture=${fixtureId}`
-    );
+    const rows = await apiGet(`/fixtures/statistics?fixture=${id}`);
 
     const teams = rows.map(row => ({
       team: row.team?.name || "Bilinmiyor",
@@ -304,40 +363,38 @@ app.get("/api/match/:id/stats", async (req, res) => {
 
     let saved = false;
 
-    if (pool && teams.length > 0) {
+    if (pool && teams.length) {
       try {
         await initDatabase();
-
         await pool.query(
           `INSERT INTO match_stat_snapshots (fixture_id, teams)
            VALUES ($1, $2::jsonb)`,
-          [fixtureId, JSON.stringify(teams)]
+          [id, JSON.stringify(teams)]
         );
-
         saved = true;
-      } catch (dbError) {
-        console.error("İstatistik kayıt hatası:", dbError.message);
+      } catch (error) {
+        console.error("Snapshot save error:", error.message);
       }
     }
 
     res.json({
       source: "API-Football",
-      fixtureId: Number(fixtureId),
+      fixtureId: Number(id),
       available: teams.length > 0,
       saved,
       teams
     });
   } catch (error) {
-    console.error("Maç istatistik hatası:", error.message);
+    console.error("Stats API error:", error.message);
     res.status(502).json({ error: "Maç istatistikleri alınamadı." });
   }
 });
 
-// Son 10 dakikanın kaydedilmiş istatistikleri
+// Son 10 dakikanın istatistik kayıtları
 app.get("/api/match/:id/history", async (req, res) => {
-  const fixtureId = req.params.id;
+  const id = req.params.id;
 
-  if (!/^\d+$/.test(fixtureId)) {
+  if (!/^\d+$/.test(id)) {
     return res.status(400).json({ error: "Geçersiz fikstür ID." });
   }
 
@@ -354,25 +411,23 @@ app.get("/api/match/:id/history", async (req, res) => {
        WHERE fixture_id = $1
          AND captured_at >= NOW() - INTERVAL '10 minutes'
        ORDER BY captured_at ASC`,
-      [fixtureId]
+      [id]
     );
 
     res.json({
-      fixtureId: Number(fixtureId),
+      fixtureId: Number(id),
       periodMinutes: 10,
       snapshots: result.rows.length,
       enoughData: result.rows.length >= 2,
       history: result.rows
     });
   } catch (error) {
-    console.error("İstatistik geçmişi hatası:", error.message);
-    res.status(503).json({
-      error: "İstatistik geçmişi şu anda alınamıyor."
-    });
+    console.error("History error:", error.message);
+    res.status(503).json({ error: "İstatistik geçmişi alınamadı." });
   }
 });
 
-// Takip edilen maçlar
+// Takip edilen maçları listele
 app.get("/api/tracked", async (_req, res) => {
   if (!pool) {
     return res.status(503).json({ error: "DATABASE_URL ayarlanmamış." });
@@ -380,11 +435,9 @@ app.get("/api/tracked", async (_req, res) => {
 
   try {
     await initDatabase();
-
     const result = await pool.query(
       `SELECT fixture_id, home_team, away_team, enabled_at
-       FROM tracked_matches
-       ORDER BY enabled_at DESC`
+       FROM tracked_matches ORDER BY enabled_at DESC`
     );
 
     res.json({
@@ -396,18 +449,18 @@ app.get("/api/tracked", async (_req, res) => {
       }))
     });
   } catch (error) {
-    console.error("Takip listesi hatası:", error.message);
+    console.error("Tracked matches error:", error.message);
     res.status(503).json({ error: "Takip listesi alınamadı." });
   }
 });
 
 // Bir maçı takibe al (en fazla 2 maç)
 app.post("/api/match/:id/track", async (req, res) => {
-  const fixtureId = req.params.id;
+  const id = req.params.id;
   const home = req.body?.home;
   const away = req.body?.away;
 
-  if (!/^\d+$/.test(fixtureId)) {
+  if (!/^\d+$/.test(id)) {
     return res.status(400).json({ error: "Geçersiz fikstür ID." });
   }
 
@@ -434,16 +487,12 @@ app.post("/api/match/:id/track", async (req, res) => {
 
     const existing = await client.query(
       "SELECT fixture_id FROM tracked_matches WHERE fixture_id = $1",
-      [fixtureId]
+      [id]
     );
 
-    if (existing.rowCount > 0) {
+    if (existing.rowCount) {
       await client.query("COMMIT");
-      return res.json({
-        success: true,
-        tracked: true,
-        message: "Bu maç zaten takipte."
-      });
+      return res.json({ success: true, tracked: true });
     }
 
     const count = await client.query(
@@ -460,22 +509,17 @@ app.post("/api/match/:id/track", async (req, res) => {
     await client.query(
       `INSERT INTO tracked_matches (fixture_id, home_team, away_team)
        VALUES ($1, $2, $3)`,
-      [fixtureId, home.trim(), away.trim()]
+      [id, home.trim(), away.trim()]
     );
 
     await client.query("COMMIT");
-
-    res.json({
-      success: true,
-      tracked: true,
-      message: "Maç takip listesine eklendi."
-    });
+    res.json({ success: true, tracked: true });
   } catch (error) {
     if (client) {
       try { await client.query("ROLLBACK"); } catch {}
     }
 
-    console.error("Maç takip hatası:", error.message);
+    console.error("Track error:", error.message);
     res.status(503).json({ error: "Maç takibe alınamadı." });
   } finally {
     client?.release();
@@ -484,9 +528,9 @@ app.post("/api/match/:id/track", async (req, res) => {
 
 // Maçı takipten çıkar
 app.delete("/api/match/:id/track", async (req, res) => {
-  const fixtureId = req.params.id;
+  const id = req.params.id;
 
-  if (!/^\d+$/.test(fixtureId)) {
+  if (!/^\d+$/.test(id)) {
     return res.status(400).json({ error: "Geçersiz fikstür ID." });
   }
 
@@ -496,19 +540,10 @@ app.delete("/api/match/:id/track", async (req, res) => {
 
   try {
     await initDatabase();
-
-    await pool.query(
-      "DELETE FROM tracked_matches WHERE fixture_id = $1",
-      [fixtureId]
-    );
-
-    res.json({
-      success: true,
-      tracked: false,
-      message: "Maç takipten çıkarıldı."
-    });
+    await pool.query("DELETE FROM tracked_matches WHERE fixture_id = $1", [id]);
+    res.json({ success: true, tracked: false });
   } catch (error) {
-    console.error("Takipten çıkarma hatası:", error.message);
+    console.error("Untrack error:", error.message);
     res.status(503).json({ error: "Maç takipten çıkarılamadı." });
   }
 });
@@ -531,31 +566,29 @@ app.get("/api/historical/status", async (_req, res) => {
       FROM historical_matches
     `);
 
-    const row = result.rows[0];
-
     res.json({
-      ready: row.total > 0,
-      totalMatches: row.total,
-      over25: row.over25,
-      under25: row.under25,
-      earliestDate: row.earliest_date,
-      latestDate: row.latest_date,
-      sourceFile: "data/winscope_historical_odds.csv"
+      ready: result.rows[0].total > 0,
+      totalMatches: result.rows[0].total,
+      over25: result.rows[0].over25,
+      under25: result.rows[0].under25,
+      earliestDate: result.rows[0].earliest_date,
+      latestDate: result.rows[0].latest_date,
+      import: importResult
     });
   } catch (error) {
-    console.error("Geçmiş veri durumu hatası:", error.message);
+    console.error("Historical status error:", error.message);
     res.status(503).json({ error: "Geçmiş veri durumu alınamadı." });
   }
 });
 
-// Geçmiş oran özeti; örnek: /api/historical/summary?league=EC
+// Geçmiş oran özeti
 app.get("/api/historical/summary", async (req, res) => {
   if (!pool) {
     return res.status(503).json({ error: "DATABASE_URL ayarlanmamış." });
   }
 
   const league = typeof req.query.league === "string"
-    ? req.query.league.trim().slice(0, 12)
+    ? req.query.league.trim().slice(0, 20)
     : "";
 
   try {
@@ -579,30 +612,30 @@ app.get("/api/historical/summary", async (req, res) => {
     `, [league]);
 
     res.json({
-      source: "Imported historical dataset",
+      source: "Historical CSV",
       league: league || null,
-      note: "Geçmiş örneklem oranları canlı maç olasılığı garantisi değildir.",
+      note: "Geçmiş istatistikler canlı maç olasılığı garantisi değildir.",
       summary: result.rows[0]
     });
   } catch (error) {
-    console.error("Geçmiş oran özeti hatası:", error.message);
+    console.error("Historical summary error:", error.message);
     res.status(503).json({ error: "Geçmiş oran özeti alınamadı." });
   }
 });
 
-// Geçmiş maç örnekleri
+// Geçmiş maç kayıtları
 app.get("/api/historical/matches", async (req, res) => {
   if (!pool) {
     return res.status(503).json({ error: "DATABASE_URL ayarlanmamış." });
   }
 
   const league = typeof req.query.league === "string"
-    ? req.query.league.trim().slice(0, 12)
+    ? req.query.league.trim().slice(0, 20)
     : "";
 
-  const requestedLimit = Number.parseInt(req.query.limit, 10);
-  const limit = Number.isFinite(requestedLimit)
-    ? Math.max(1, Math.min(requestedLimit, 100))
+  const requested = Number.parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(requested)
+    ? Math.max(1, Math.min(requested, 100))
     : 20;
 
   try {
@@ -629,7 +662,7 @@ app.get("/api/historical/matches", async (req, res) => {
       matches: result.rows
     });
   } catch (error) {
-    console.error("Geçmiş maç sorgusu hatası:", error.message);
+    console.error("Historical matches error:", error.message);
     res.status(503).json({ error: "Geçmiş maçlar alınamadı." });
   }
 });
@@ -646,10 +679,9 @@ app.get("/api/db-status", async (_req, res) => {
   try {
     await initDatabase();
     await pool.query("SELECT 1");
-
     res.json({ connected: true, database: "PostgreSQL" });
   } catch (error) {
-    console.error("Veritabanı kontrol hatası:", error.message);
+    console.error("Database status error:", error.message);
     res.status(503).json({
       connected: false,
       error: "Veritabanına bağlanılamadı."
