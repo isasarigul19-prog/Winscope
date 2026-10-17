@@ -4,7 +4,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WinScore Live</title>
+<title>WinScope Live</title>
 <style>
 :root{--bg:#071b20;--panel:#102b31;--panel2:#17383e;--text:#f2f7f7;--muted:#9bb3b7;--pink:#ff315d;--green:#5fe0a0;--amber:#ffc857;--red:#ff7185}
 *{box-sizing:border-box}
@@ -37,6 +37,9 @@ h1{font-size:25px;margin:0 0 6px}
 .reason{font-size:12px;color:var(--muted);line-height:1.45;margin-top:12px}
 .tag{display:inline-block;background:#243e43;border:0}
 .statsButton{width:100%;margin-top:14px;border-color:#397b67;color:#b9ffdc;font-weight:750}
+.trackButton{width:100%;margin-top:10px;border-color:#527b86;color:#d5f4fa;font-weight:750}
+.trackButton.active{background:#12392e;border-color:#286d53;color:#a7f5cf}
+.trackButton.limit{opacity:.65}
 .statsPanel{margin-top:12px;padding:12px;background:#091f24;border:1px solid #284a50;border-radius:12px}
 .statsTitle{font-weight:800;margin-bottom:10px;font-size:13px}
 .statTeams{display:grid;grid-template-columns:1fr 1fr;gap:8px}
@@ -56,7 +59,7 @@ footer{color:var(--muted);font-size:12px;line-height:1.5;margin-top:20px}
 <body>
 <header>
   <div>
-    <div class="logo">WIN<span>SCORE</span> LIVE</div>
+    <div class="logo">WIN<span>SCOPE</span> LIVE</div>
     <div class="sub">Canlı maç verileri · temkinli analiz</div>
   </div>
   <div class="pill" id="connection">DEMO VERİSİ</div>
@@ -67,6 +70,7 @@ footer{color:var(--muted);font-size:12px;line-height:1.5;margin-top:20px}
   <div>
     <h1>Gol sinyali mi, maç böyle mi biter?</h1>
     <div class="sub">Gerçek veriler ve temkinli karar</div>
+    <div class="sub" id="trackingCount">Takip edilen maç: 0/2</div>
   </div>
   <div class="controls">
     <select id="filter">
@@ -83,8 +87,9 @@ footer{color:var(--muted);font-size:12px;line-height:1.5;margin-top:20px}
 <section class="grid" id="matches"></section>
 
 <footer>
-  İstatistikler maç seçilerek yüklenir. Sağlayıcı bazı liglerde bazı verileri sunmayabilir.
-  Eksik istatistikler sıfır kabul edilmez ve doğrulanmamış gol sinyali üretilmez.
+  İstatistikler kullanıcı isteğiyle yüklenir. Takip listesi Neon veritabanında saklanır.
+  Otomatik periyodik istatistik toplama henüz etkin değildir.
+  Sağlayıcının sunmadığı veriler sıfır kabul edilmez.
 </footer>
 </main>
 
@@ -98,10 +103,10 @@ let demoMatches = [
    home:"Örnek Ev Sahibi",away:"Örnek Deplasman",homeScore:1,awayScore:0}
 ];
 
-// İstatistikler sadece kullanıcı isteyince alınır.
-// Aynı maçın sonucu bellekte tutulur; gereksiz tekrarlar önlenir.
 const statsCache = new Map();
 const statsLoading = new Set();
+const trackedMatches = new Map();
+const trackLoading = new Set();
 
 function getStatus(m) {
   const s = String(m.status || "").toUpperCase();
@@ -113,6 +118,16 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, c => ({
     "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
   }[c]));
+}
+
+function setBanner(message, type="") {
+  $("banner").className = "banner" + (type ? " " + type : "");
+  $("banner").textContent = message;
+}
+
+function updateTrackingCount() {
+  $("trackingCount").textContent =
+    `Takip edilen maç: ${trackedMatches.size}/2`;
 }
 
 function getStat(stats, names) {
@@ -149,46 +164,67 @@ function renderTeamStats(team) {
 
 function renderStatsPanel(id) {
   const key = String(id);
+
   if (statsLoading.has(key)) {
-    return `<div class="statsPanel" id="stats-${escapeHtml(key)}">
-      İstatistikler yükleniyor…
-    </div>`;
+    return `<div class="statsPanel">İstatistikler yükleniyor…</div>`;
   }
 
   const result = statsCache.get(key);
   if (!result) return "";
 
   if (result.error) {
-    return `<div class="statsPanel" id="stats-${escapeHtml(key)}">
+    return `<div class="statsPanel">
       <div class="statsError">${escapeHtml(result.error)}</div>
       <button class="btn statsButton" data-stats-id="${escapeHtml(key)}">Tekrar dene</button>
     </div>`;
   }
 
   const teams = Array.isArray(result.teams) ? result.teams : [];
+
   if (!result.available || teams.length === 0) {
-    return `<div class="statsPanel" id="stats-${escapeHtml(key)}">
+    return `<div class="statsPanel">
       Bu maç için sağlayıcıdan istatistik gelmedi. Bu durum istatistiklerin sıfır olduğu anlamına gelmez.
       <button class="btn statsButton" data-stats-id="${escapeHtml(key)}">Tekrar kontrol et</button>
     </div>`;
   }
 
-  return `<div class="statsPanel" id="stats-${escapeHtml(key)}">
+  return `<div class="statsPanel">
     <div class="statsTitle">MAÇ İSTATİSTİKLERİ</div>
     <div class="statTeams">${teams.map(renderTeamStats).join("")}</div>
-    <div class="statsNote">Kaynak: API-Football. Eksik alanlar “Veri yok” olarak gösterilir.
-    Bu istatistikler tek başına gol olacağını göstermez.</div>
+    <div class="statsNote">
+      Kaynak: API-Football. Eksik alanlar “Veri yok” olarak gösterilir.
+      Bu istatistikler tek başına gol olacağını göstermez.
+    </div>
   </div>`;
 }
 
 function card(m) {
+  const id = String(m.id ?? "");
   const minute = m.minute == null ? "Dakika bilgisi yok" :
     getStatus(m) === "finished" ? "MAÇ TAMAMLANDI" : `${m.minute}' · CANLI`;
 
   const homeScore = m.homeScore == null ? "–" : m.homeScore;
   const awayScore = m.awayScore == null ? "–" : m.awayScore;
-  const id = String(m.id ?? "");
-  const canLoadStats = /^\d+$/.test(id) && liveMode;
+  const validId = /^\d+$/.test(id);
+  const canLoadStats = validId && liveMode;
+  const tracked = trackedMatches.has(id);
+  const trackingBusy = trackLoading.has(id);
+  const atLimit = trackedMatches.size >= 2 && !tracked;
+
+  let trackButton = "";
+
+  if (canLoadStats) {
+    trackButton = `
+      <button
+        class="btn trackButton ${tracked ? "active" : ""} ${atLimit ? "limit" : ""}"
+        data-track-id="${escapeHtml(id)}"
+        ${trackingBusy || (!tracked && atLimit) ? "disabled" : ""}
+      >
+        ${trackingBusy ? "İşlem yapılıyor…" :
+          tracked ? "✓ Takipte · Takibi bırak" :
+          atLimit ? "Takip sınırı dolu (2/2)" : "+ Takibe al"}
+      </button>`;
+  }
 
   return `<article class="card">
     <div class="matchtop">
@@ -202,34 +238,120 @@ function card(m) {
     </div>
     <div class="metrics">
       <div class="metric"><strong>${escapeHtml(m.status || "Bilinmiyor")}</strong><small>Maç durumu</small></div>
-      <div class="metric"><strong>${escapeHtml(m.id ?? "—")}</strong><small>Fikstür ID</small></div>
+      <div class="metric"><strong>${escapeHtml(id || "—")}</strong><small>Fikstür ID</small></div>
     </div>
+    ${trackButton}
     ${canLoadStats ? `
       <button class="btn statsButton" data-stats-id="${escapeHtml(id)}">
         ${statsCache.has(id) && !statsCache.get(id).error ? "İstatistikleri göster" : "İstatistikleri yükle"}
       </button>
       ${renderStatsPanel(id)}
-    ` : `<div class="reason">İstatistikleri yüklemek için canlı veri modunu aç.</div>`}
+    ` : `<div class="reason">Takip ve istatistik işlemleri için canlı veri modunu aç.</div>`}
   </article>`;
 }
 
 function render() {
   const data = liveMode ? liveMatches : demoMatches;
   const f = $("filter").value;
+
   const filtered = data.filter(m =>
-    f === "all" || (f === "live" ? getStatus(m) === "live" : getStatus(m) === "finished")
+    f === "all" ||
+    (f === "live" ? getStatus(m) === "live" : getStatus(m) === "finished")
   );
 
   $("matches").innerHTML = filtered.length
     ? filtered.map(card).join("")
     : '<div class="empty">Bu filtrede gösterilecek maç yok.</div>';
+
+  updateTrackingCount();
+}
+
+async function loadTracked() {
+  try {
+    const response = await fetch("/api/tracked", {cache:"no-store"});
+    const result = await response.json();
+
+    if (!response.ok) {
+      throw new Error(result.error || `Sunucu hatası: ${response.status}`);
+    }
+
+    trackedMatches.clear();
+
+    for (const match of (result.matches || [])) {
+      trackedMatches.set(String(match.id), match);
+    }
+
+    updateTrackingCount();
+    render();
+  } catch (error) {
+    setBanner(
+      `Takip listesi alınamadı: ${error.message}. Canlı sunucu ve veritabanını kontrol et.`,
+      "error"
+    );
+  }
+}
+
+async function toggleTracking(id) {
+  const key = String(id);
+  if (!/^\d+$/.test(key) || trackLoading.has(key)) return;
+
+  const match = liveMatches.find(m => String(m.id) === key);
+  if (!match) {
+    setBanner("Maç listede bulunamadı. Canlı maçları yenile.", "error");
+    return;
+  }
+
+  const isTracked = trackedMatches.has(key);
+
+  if (!isTracked && trackedMatches.size >= 2) {
+    setBanner("En fazla 2 maç takip edilebilir. Önce bir maçın takibini bırak.", "error");
+    return;
+  }
+
+  trackLoading.add(key);
+  render();
+
+  try {
+    const response = await fetch(
+      `/api/match/${encodeURIComponent(key)}/track`,
+      isTracked
+        ? {method:"DELETE", cache:"no-store"}
+        : {
+            method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({
+              home:match.home,
+              away:match.away
+            })
+          }
+    );
+
+    const result = await response.json();
+
+    if (!response.ok) {
+      throw new Error(result.error || `Sunucu hatası: ${response.status}`);
+    }
+
+    await loadTracked();
+
+    setBanner(
+      isTracked
+        ? `${match.home} – ${match.away}: takipten çıkarıldı.`
+        : `${match.home} – ${match.away}: takip listesine eklendi.`,
+      "ok"
+    );
+  } catch (error) {
+    setBanner(`Takip işlemi başarısız: ${error.message}`, "error");
+  } finally {
+    trackLoading.delete(key);
+    render();
+  }
 }
 
 async function loadStats(id) {
   const key = String(id);
   if (!/^\d+$/.test(key) || statsLoading.has(key)) return;
 
-  // Daha önce başarıyla alınan veriyi tekrar API'den isteme.
   const cached = statsCache.get(key);
   if (cached && !cached.error && cached.available && cached.teams?.length) {
     render();
@@ -242,8 +364,9 @@ async function loadStats(id) {
 
   try {
     const response = await fetch(`/api/match/${encodeURIComponent(key)}/stats`, {
-      cache: "no-store"
+      cache:"no-store"
     });
+
     const result = await response.json();
 
     if (!response.ok) {
@@ -278,42 +401,57 @@ async function loadLive() {
     if (!response.ok) {
       throw new Error(result.error || `Sunucu hatası: ${response.status}`);
     }
+
     if (!Array.isArray(result.matches)) {
       throw new Error("API yanıtında maç listesi bulunamadı.");
     }
 
     liveMatches = result.matches;
     liveMode = true;
+
     $("mode").textContent = "Demo moduna dön";
     $("connection").textContent = "API BAĞLI";
-    $("banner").className = "banner ok";
-    $("banner").textContent =
-      `${liveMatches.length} maç kaydı alındı. Kaynak: ${result.source || "Sunucu API'si"}.`;
+
+    setBanner(
+      `${liveMatches.length} maç kaydı alındı. Kaynak: ${result.source || "Sunucu API'si"}.`,
+      "ok"
+    );
+
     render();
   } catch (error) {
     $("connection").textContent = "API HATASI";
-    $("banner").className = "banner error";
-    $("banner").textContent = `Canlı veri alınamadı: ${error.message}`;
+    setBanner(`Canlı veri alınamadı: ${error.message}`, "error");
   } finally {
     $("mode").disabled = false;
   }
 }
 
-// Tek bir olay dinleyicisi bütün maç kartlarının istatistik düğmelerini yönetir.
+// Takip ve istatistik düğmeleri
 $("matches").addEventListener("click", event => {
-  const button = event.target.closest("[data-stats-id]");
-  if (!button) return;
-  loadStats(button.dataset.statsId);
+  const trackButton = event.target.closest("[data-track-id]");
+
+  if (trackButton) {
+    toggleTracking(trackButton.dataset.trackId);
+    return;
+  }
+
+  const statsButton = event.target.closest("[data-stats-id]");
+
+  if (statsButton) {
+    loadStats(statsButton.dataset.statsId);
+  }
 });
 
 $("filter").addEventListener("change", render);
 
 $("refresh").addEventListener("click", () => {
-  if (liveMode) loadLive();
-  else {
-    $("banner").className = "banner";
-    $("banner").textContent =
-      "Demo verileri gösteriliyor. Gerçek veriler için Canlı veriyi aç düğmesine bas.";
+  if (liveMode) {
+    loadLive();
+    loadTracked();
+  } else {
+    setBanner(
+      "Demo verileri gösteriliyor. Gerçek veriler için Canlı veriyi aç düğmesine bas."
+    );
     render();
   }
 });
@@ -323,15 +461,16 @@ $("mode").addEventListener("click", async () => {
     liveMode = false;
     $("connection").textContent = "DEMO VERİSİ";
     $("mode").textContent = "Canlı veriyi aç";
-    $("banner").className = "banner";
-    $("banner").textContent = "Demo modu açık.";
+    setBanner("Demo modu açık.");
     render();
   } else {
     await loadLive();
+    await loadTracked();
   }
 });
 
 render();
+loadTracked();
 </script>
 </body>
 </html>
