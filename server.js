@@ -275,14 +275,63 @@ async function getOdds(fixtureId, mode) {
   const cached = oddsCache.get(key);
   if (cached && now - cached.at < CACHE_MS[mode]) return { ...cached.data, cached: true };
   if (oddsInFlight.has(key)) return oddsInFlight.get(key);
+
   const task = (async () => {
-    // 5DollarFootballAPI does not provide bookmaker odds in this plan.
+    // Free keys can request Bet365 odds per fixture. Do not request the paid-only
+    // include=odds fixture-list expansion.
+    const payload = await footballDataRequest(`/fixtures/${encodeURIComponent(String(fixtureId))}/odds?bookmakers=bet365`);
+    const dataBlock = payload.data || {};
+    const bookmakers = Array.isArray(dataBlock.bookmakers) ? dataBlock.bookmakers : [];
     const markets = [];
+    const stage = mode === "live" ? "inplay" : "closing";
+
+    function addValues(bookmaker, marketName, quote, stageName) {
+      if (!quote || typeof quote !== "object" || Array.isArray(quote)) return;
+      const line = quote.line;
+      for (const [selection, rawOdd] of Object.entries(quote)) {
+        if (selection === "line") continue;
+        const odd = toNumber(rawOdd);
+        if (odd == null || odd <= 1) continue;
+        markets.push({
+          bookmaker: bookmaker.name || "Bet365",
+          market: `${marketName}${line != null ? ` (${line})` : ""} · ${stageName}`,
+          selection: selection === "yes" ? "KG Var" : selection === "no" ? "KG Yok" : selection,
+          odd, suspended: false, betId: marketName, stage: stageName, line: line ?? null
+        });
+      }
+    }
+
+    for (const bookmaker of bookmakers) {
+      const odds = bookmaker.odds && typeof bookmaker.odds === "object" ? bookmaker.odds : {};
+      for (const [marketName, marketValue] of Object.entries(odds)) {
+        if (Array.isArray(marketValue)) {
+          for (const item of marketValue) {
+            const quote = item?.[stage] || (mode === "prematch" ? item?.opening : null);
+            addValues(bookmaker, `${marketName} ${item?.line ?? ""}`.trim(), quote, quote === item?.opening ? "Açılış" : stage === "inplay" ? "Canlı" : "Kapanış");
+          }
+          continue;
+        }
+        if (!marketValue || typeof marketValue !== "object") continue;
+        let quote = marketValue[stage];
+        let stageName = stage === "inplay" ? "Canlı" : "Kapanış";
+        if (!quote && mode === "prematch") {
+          quote = marketValue.closing || marketValue.opening;
+          stageName = marketValue.closing ? "Kapanış" : "Açılış";
+        }
+        // Some simple line markets are represented as a number at each stage.
+        if (typeof quote === "number") {
+          markets.push({ bookmaker: bookmaker.name || "Bet365", market: marketName, selection: "Çizgi", odd: quote, suspended: false, betId: marketName, stage: stageName });
+        } else addValues(bookmaker, marketName, quote, stageName);
+      }
+    }
+
+    const fetchedAt = new Date().toISOString();
     const data = {
-      fixtureId: Number(fixtureId), mode, source: "5DollarFootballAPI", fetchedAt: new Date().toISOString(),
-      available: false, markets,
-      note: "5DollarFootballAPI bu bağlantıda bahis oranı sağlamıyor; oran uydurulmadı."
+      fixtureId: Number(fixtureId), mode, source: "5DollarFootballAPI · Bet365", fetchedAt,
+      available: markets.length > 0, markets,
+      note: markets.length ? "Oranlar Bet365 verisinden alındı; çizgi ve fiyatlar mevcut veri kapsamına bağlıdır." : "Bu maç/market için seçilen aşamada oran bulunamadı."
     };
+
     if (pool && markets.length) {
       try {
         await initDatabase();
@@ -299,24 +348,21 @@ async function getOdds(fixtureId, mode) {
           await client.query("COMMIT");
         } catch (error) { await client.query("ROLLBACK"); throw error; }
         finally { client.release(); }
+        for (const market of markets) {
+          try {
+            const prev = await pool.query(`SELECT odd, captured_at FROM odds_snapshots
+              WHERE fixture_id=$1 AND mode=$2 AND bookmaker=$3 AND market_name=$4 AND selection=$5
+                AND captured_at < $6::timestamptz ORDER BY captured_at DESC LIMIT 1`,
+              [fixtureId, mode, market.bookmaker, market.market, market.selection, fetchedAt]);
+            if (prev.rows.length) {
+              market.previousOdd = Number(prev.rows[0].odd);
+              market.change = Number((market.odd - market.previousOdd).toFixed(3));
+              market.direction = market.change < 0 ? "DÜŞTÜ" : market.change > 0 ? "YÜKSELDİ" : "SABİT";
+              market.previousCapturedAt = prev.rows[0].captured_at;
+            } else { market.previousOdd = null; market.change = null; market.direction = "İLK KAYIT"; }
+          } catch (error) { console.error("Odds movement query error:", error.message); }
+        }
       } catch (error) { console.error("Odds snapshot save error:", error.message); data.saveWarning = "Oran geldi ancak geçmiş kaydı yapılamadı."; }
-      // Compare each current selection with the immediately previous stored snapshot.
-      for (const market of markets) {
-        try {
-          const prev = await pool.query(`SELECT odd, captured_at FROM odds_snapshots
-            WHERE fixture_id=$1 AND mode=$2 AND bookmaker=$3 AND market_name=$4 AND selection=$5
-              AND captured_at < $6::timestamptz
-            ORDER BY captured_at DESC LIMIT 1`, [fixtureId, mode, market.bookmaker, market.market, market.selection, data.fetchedAt]);
-          if (prev.rows.length) {
-            market.previousOdd = Number(prev.rows[0].odd);
-            market.change = Number((market.odd - market.previousOdd).toFixed(3));
-            market.direction = market.change < 0 ? "DÜŞTÜ" : market.change > 0 ? "YÜKSELDİ" : "SABİT";
-            market.previousCapturedAt = prev.rows[0].captured_at;
-          } else { market.previousOdd = null; market.change = null; market.direction = "İLK KAYIT"; }
-        } catch (error) { console.error("Odds movement query error:", error.message); }
-      }
-    } else {
-      for (const market of markets) { market.previousOdd = null; market.change = null; market.direction = "GEÇMİŞ HAREKET YOK"; }
     }
     oddsCache.set(key, { at: now, data });
     return data;
@@ -477,7 +523,7 @@ app.get("/api/telegram-test", async (_req, res) => {
   }
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Live", odds: false, databaseConfigured: Boolean(pool), apiKeyConfigured: Boolean(API_KEY), dataSource: "5DollarFootballAPI" }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Live", odds: true, databaseConfigured: Boolean(pool), apiKeyConfigured: Boolean(API_KEY), dataSource: "5DollarFootballAPI" }));
 
 app.get("/api/fixtures", async (req, res) => {
   const date = String(req.query.date || "");
