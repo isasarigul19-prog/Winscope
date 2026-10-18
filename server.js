@@ -271,7 +271,7 @@ app.post("/api/telegram-test", async (req, res) => {
           chat_id: chatId,
           text: "⚽ WinScope Telegram bağlantısı başarılı! Test mesajı."
         }),
-        signal: AbortSignal.timeout(10000)
+        signal: AbortSignal.timeout(30000)
       }
     );
 
