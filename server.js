@@ -328,7 +328,7 @@ async function getOdds(fixtureId, mode) {
 async function captureOneMatch(fixtureId) {
   const rows = await apiGet(`/fixtures/statistics?fixture=${encodeURIComponent(String(fixtureId))}`);
   if (!rows.length) return { saved: false, reason: "no_statistics" };
-  const teams = rows.map(row => ({ team: row.team?.name || "Bilinmiyor", statistics: Object.fromEntries((row.statistics || []).map(stat => [stat.type, stat.value])) }));
+  const teams = rows.map(row => ({ team: typeof row.team === "string" ? row.team : (row.team?.name || "Bilinmiyor"), statistics: Array.isArray(row.statistics) ? Object.fromEntries(row.statistics.map(stat => [stat.type, stat.value])) : (row.statistics && typeof row.statistics === "object" ? row.statistics : {}) }));
   await pool.query("INSERT INTO match_stat_snapshots (fixture_id, teams) VALUES ($1, $2::jsonb)", [fixtureId, JSON.stringify(teams)]);
   return { saved: true, teams };
 }
@@ -459,7 +459,7 @@ async function scanTrackedMatchAlarms() {
         const minute = Number(fixture.fixture?.status?.elapsed);
         if (!Number.isFinite(minute) || minute < 20 || minute > 72) continue;
         const statRows = await apiGet(`/fixtures/statistics?fixture=${encodeURIComponent(String(match.fixture_id))}`);
-        const teams = statRows.map(row => ({ team: row.team?.name || "Bilinmiyor", statistics: Object.fromEntries((row.statistics || []).map(stat => [stat.type, stat.value])) }));
+        const teams = statRows.map(row => ({ team: typeof row.team === "string" ? row.team : (row.team?.name || "Bilinmiyor"), statistics: Array.isArray(row.statistics) ? Object.fromEntries(row.statistics.map(stat => [stat.type, stat.value])) : (row.statistics && typeof row.statistics === "object" ? row.statistics : {}) }));
         await evaluateMatchAlarms(match, fixture, teams);
       } catch (error) { console.error(`Alarm tarama hatası (${match.fixture_id}):`, error.message); }
     }
@@ -544,7 +544,7 @@ app.get("/api/match/:id/stats", async (req, res) => {
   if (!/^\d+$/.test(fixtureId)) return res.status(400).json({ error: "Geçersiz fikstür ID." });
   try {
     const rows = await apiGet(`/fixtures/statistics?fixture=${fixtureId}`);
-    const teams = rows.map(row => ({ team: row.team?.name || "Bilinmiyor", statistics: Object.fromEntries((row.statistics || []).map(stat => [stat.type, stat.value])) }));
+    const teams = rows.map(row => ({ team: typeof row.team === "string" ? row.team : (row.team?.name || "Bilinmiyor"), statistics: Array.isArray(row.statistics) ? Object.fromEntries(row.statistics.map(stat => [stat.type, stat.value])) : (row.statistics && typeof row.statistics === "object" ? row.statistics : {}) }));
     let saved = false;
     if (pool && teams.length) {
       try { await initDatabase(); await pool.query("INSERT INTO match_stat_snapshots (fixture_id, teams) VALUES ($1, $2::jsonb)", [fixtureId, JSON.stringify(teams)]); saved = true; }
