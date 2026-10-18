@@ -250,7 +250,50 @@ async function captureTrackedMatches() {
 }
 
 app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Live", odds: true, databaseConfigured: Boolean(pool), apiKeyConfigured: Boolean(API_KEY) }));
+app.post("/api/telegram-test", async (req, res) => {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
 
+  if (!token || !chatId) {
+    return res.status(503).json({
+      ok: false,
+      error: "TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID eksik."
+    });
+  }
+
+  try {
+    const response = await fetch(
+      `https://api.telegram.org/bot${token}/sendMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: "⚽ WinScope Telegram bağlantısı başarılı! Test mesajı."
+        }),
+        signal: AbortSignal.timeout(10000)
+      }
+    );
+
+    const result = await response.json();
+
+    if (!response.ok || !result.ok) {
+      console.error("Telegram test error:", result.description || response.status);
+      return res.status(502).json({
+        ok: false,
+        error: "Telegram mesajı gönderilemedi. Bot ve kanal ayarlarını kontrol et."
+      });
+    }
+
+    res.json({ ok: true, message: "Test mesajı gönderildi." });
+  } catch (error) {
+    console.error("Telegram test failed:", error.message);
+    res.status(502).json({
+      ok: false,
+      error: "Telegram servisine ulaşılamadı."
+    });
+  }
+});
 app.get("/api/live", async (_req, res) => {
   try {
     const fixtures = await apiGet("/fixtures?live=all");
