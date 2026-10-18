@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Java
@@ -27,7 +27,13 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
+      - name: Setup Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
       - name: Create Android project
+        shell: bash
         run: |
           mkdir -p app/src/main/java/com/winscope/app
           mkdir -p app/src/main/res/values
@@ -40,6 +46,7 @@ jobs:
                   gradlePluginPortal()
               }
           }
+
           dependencyResolutionManagement {
               repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
               repositories {
@@ -47,6 +54,7 @@ jobs:
                   mavenCentral()
               }
           }
+
           rootProject.name = "WinScope"
           include ':app'
           EOF
@@ -84,17 +92,21 @@ jobs:
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.INTERNET"/>
+
               <application
                   android:theme="@android:style/Theme.Material.Light.NoActionBar"
                   android:label="WinScope"
                   android:usesCleartextTraffic="false">
+
                   <activity
                       android:name=".MainActivity"
                       android:exported="true">
+
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN"/>
                           <category android:name="android.intent.category.LAUNCHER"/>
                       </intent-filter>
+
                   </activity>
               </application>
           </manifest>
@@ -114,14 +126,18 @@ jobs:
               private WebView webView;
 
               @Override
-              public void onCreate(Bundle state) {
+              protected void onCreate(Bundle state) {
                   super.onCreate(state);
+
                   webView = new WebView(this);
+
                   WebSettings settings = webView.getSettings();
                   settings.setJavaScriptEnabled(true);
                   settings.setDomStorageEnabled(true);
+
                   webView.setWebViewClient(new WebViewClient());
                   webView.setWebChromeClient(new WebChromeClient());
+
                   setContentView(webView);
                   webView.loadUrl("https://winscope-el9n.onrender.com");
               }
@@ -138,14 +154,6 @@ jobs:
           EOF
 
       - name: Build APK
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Install Gradle
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gradle
-
-      - name: Assemble APK
         run: gradle assembleDebug --no-daemon
 
       - name: Upload APK
