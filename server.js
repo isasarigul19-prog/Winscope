@@ -8,9 +8,9 @@ import { fileURLToPath } from "node:url";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.FOOTBALL_DATA_API_KEY;
+const API_KEY = process.env.FIVE_DOLLAR_FOOTBALL_API_KEY;
 const DATABASE_URL = process.env.DATABASE_URL;
-const BASE_URL = "https://api.football-data.org/v4";
+const BASE_URL const BASE_URL = "https://api.football-data.org/v4";
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const HISTORICAL_CSV = path.join(ROOT, "winscope_historical_odds.csv");
 const { Pool } = pg;
