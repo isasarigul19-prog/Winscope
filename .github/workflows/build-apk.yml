@@ -36,7 +36,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p app/src/main/java/com/winscope/app
-          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/drawable
 
           cat > settings.gradle <<'EOF'
           pluginManagement {
@@ -83,10 +83,69 @@ jobs:
                   applicationId 'com.winscope.app'
                   minSdk 24
                   targetSdk 35
-                  versionCode 1
-                  versionName '1.0'
+                  versionCode 2
+                  versionName '2.0'
               }
           }
+          EOF
+
+          cat > app/src/main/res/drawable/winscope_icon.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+
+              <path
+                  android:fillColor="#071B2B"
+                  android:pathData="M0,0 L108,0 L108,108 L0,108 Z"/>
+
+              <path
+                  android:fillColor="#0D3043"
+                  android:pathData="M54,10 A36,36 0,1 0,54 82 A36,36 0,1 0,54 10 Z"/>
+
+              <path
+                  android:strokeColor="#27E0C0"
+                  android:strokeWidth="3"
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M54,23 L69,34 L63,52 L45,52 L39,34 Z"/>
+
+              <path
+                  android:strokeColor="#071B2B"
+                  android:strokeWidth="1.5"
+                  android:fillColor="#071B2B"
+                  android:pathData="M54,28 L63,35 L60,45 L48,45 L45,35 Z"/>
+
+              <path
+                  android:strokeColor="#071B2B"
+                  android:strokeWidth="2"
+                  android:fillColor="#00000000"
+                  android:pathData="M39,34 L29,31 M45,52 L39,64 M63,52 L69,64 M69,34 L79,31 M48,45 L39,34 M60,45 L69,34"/>
+
+              <path
+                  android:fillColor="#27E0C0"
+                  android:pathData="M28,72 L38,72 L38,77 L33,77 L33,82 L28,82 Z"/>
+
+              <path
+                  android:fillColor="#27E0C0"
+                  android:pathData="M43,72 L48,72 L48,82 L43,82 Z"/>
+
+              <path
+                  android:fillColor="#27E0C0"
+                  android:pathData="M53,72 L58,72 L58,82 L53,82 Z"/>
+
+              <path
+                  android:fillColor="#27E0C0"
+                  android:pathData="M63,72 L68,72 L68,82 L63,82 Z"/>
+
+              <path
+                  android:fillColor="#FF477E"
+                  android:pathData="M77,72 L82,72 L82,82 L77,82 Z"/>
+
+              <path
+                  android:fillColor="#FF477E"
+                  android:pathData="M85,72 L90,72 L90,77 L85,77 Z"/>
+          </vector>
           EOF
 
           cat > app/src/main/AndroidManifest.xml <<'EOF'
@@ -96,6 +155,7 @@ jobs:
               <application
                   android:theme="@android:style/Theme.Material.Light.NoActionBar"
                   android:label="WinScope"
+                  android:icon="@drawable/winscope_icon"
                   android:usesCleartextTraffic="false">
 
                   <activity
@@ -121,6 +181,7 @@ jobs:
           import android.webkit.WebViewClient;
           import android.webkit.WebChromeClient;
           import android.webkit.WebSettings;
+          import android.webkit.WebResourceRequest;
 
           public class MainActivity extends Activity {
               private WebView webView;
@@ -135,8 +196,53 @@ jobs:
                   settings.setJavaScriptEnabled(true);
                   settings.setDomStorageEnabled(true);
 
-                  webView.setWebViewClient(new WebViewClient());
+                  webView.setBackgroundColor(0xFF071B2B);
                   webView.setWebChromeClient(new WebChromeClient());
+
+                  webView.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public void onPageFinished(WebView view, String url) {
+                          super.onPageFinished(view, url);
+
+                          String css =
+                              "html,body{background:#071B2B!important;color:#EAF5FF!important;}" +
+                              "header,nav{background:#0B2638!important;color:#EAF5FF!important;}" +
+                              "main,section,article{color:#EAF5FF;}" +
+                              "button{border-radius:10px!important;}" +
+                              "a{color:#27E0C0;}" +
+                              "input,select,textarea{background:#102F43!important;color:#EAF5FF!important;border:1px solid #24546A!important;border-radius:8px!important;}" +
+                              "[class*=card],[class*=match],[class*=fixture],[class*=panel],[class*=score]{" +
+                              "border-color:#1C465B!important;}" +
+                              "[class*=live]{color:#FF477E;}" +
+                              "table{color:#EAF5FF!important;}" +
+                              "th{background:#10364A!important;color:#27E0C0!important;}" +
+                              "td{border-color:#1C465B!important;}";
+
+                          String js =
+                              "(function(){" +
+                              "var old=document.getElementById('winscope-live-theme');" +
+                              "if(old)old.remove();" +
+                              "var s=document.createElement('style');" +
+                              "s.id='winscope-live-theme';" +
+                              "s.textContent=" + org.json.JSONObject.quote(css) + ";" +
+                              "document.head.appendChild(s);" +
+                              "})();";
+
+                          view.evaluateJavascript(js, null);
+                      }
+
+                      @Override
+                      public boolean shouldOverrideUrlLoading(
+                          WebView view, WebResourceRequest request) {
+                          String host = request.getUrl().getHost();
+                          if (host != null &&
+                              (host.equals("winscope-el9n.onrender.com") ||
+                               host.endsWith(".onrender.com"))) {
+                              return false;
+                          }
+                          return false;
+                      }
+                  });
 
                   setContentView(webView);
                   webView.loadUrl("https://winscope-el9n.onrender.com");
