@@ -131,75 +131,117 @@ async function initDatabase() {
   return dbReady;
 }
 
-function mapFootballDataStatus(status) {
-  const value = String(status || "").toUpperCase();
-  if (value === "FINISHED") return "FT";
-  if (value === "PAUSED") return "HT";
-  if (value === "IN_PLAY" || value === "LIVE") return "LIVE";
-  if (["SCHEDULED", "TIMED"].includes(value)) return "NS";
-  if (value === "POSTPONED") return "PST";
-  if (value === "CANCELLED") return "CANC";
-  return value || "NS";
+function mapProviderStatus(status) {
+  const value = String(status || "").toLowerCase();
+  if (/^\d{1,3}$/.test(value)) return Number(value) >= 0 && Number(value) <= 150 ? "LIVE" : "NS";
+  if (["finished", "full", "ft", "after_extra_time", "after_penalties"].includes(value)) return "FT";
+  if (["half", "halftime", "ht", "paused"].includes(value)) return "HT";
+  if (["live", "in_play", "1h", "2h", "extra_time", "penalties"].includes(value)) return "LIVE";
+  if (["scheduled", "not_started", "ns", "upcoming"].includes(value)) return "NS";
+  if (value.includes("postpon")) return "PST";
+  if (value.includes("cancel")) return "CANC";
+  return String(status || "NS").toUpperCase();
 }
 
-function normalizeFootballDataMatch(match) {
+function providerMinute(match) {
+  const raw = match?.status_code ?? match?.minute ?? match?.elapsed ?? null;
+  const n = Number(raw);
+  if (raw != null && String(raw).trim() !== "" && Number.isFinite(n) && n >= 0 && n <= 150) return n;
+  const status = String(raw || match?.status || "").toLowerCase();
+  if (["half", "halftime", "ht"].includes(status)) return 45;
+  return null;
+}
+
+function normalizeProviderMatch(match) {
   return {
     id: Number(match.id),
-    league: match.competition?.name || "Bilinmeyen lig",
-    country: match.area?.name || "",
-    minute: null, // football-data.org free API does not reliably expose the live minute.
-    status: mapFootballDataStatus(match.status),
-    home: match.homeTeam?.name || "Ev sahibi",
-    away: match.awayTeam?.name || "Deplasman",
-    homeScore: match.score?.fullTime?.home ?? match.score?.regularTime?.home ?? null,
-    awayScore: match.score?.fullTime?.away ?? match.score?.regularTime?.away ?? null,
-    homeId: match.homeTeam?.id ?? null,
-    awayId: match.awayTeam?.id ?? null,
-    fixtureDate: match.utcDate || null
+    league: match.league?.name || "Bilinmeyen lig",
+    country: match.country?.name || match.league?.country || "",
+    minute: providerMinute(match),
+    status: mapProviderStatus(match.status_code ?? match.status),
+    home: match.teams?.home?.name || "Ev sahibi",
+    away: match.teams?.away?.name || "Deplasman",
+    homeScore: match.goals?.home ?? null,
+    awayScore: match.goals?.away ?? null,
+    homeId: match.teams?.home?.id ?? null,
+    awayId: match.teams?.away?.id ?? null,
+    fixtureDate: match.kickoff_utc || null
   };
 }
 
 async function footballDataRequest(pathname) {
-  if (!API_KEY) throw new Error("FOOTBALL_DATA_API_KEY ayarlanmamış.");
+  if (!API_KEY) throw new Error("FIVE_DOLLAR_FOOTBALL_API_KEY ayarlanmamış.");
   const response = await fetch(`${BASE_URL}${pathname}`, {
-    headers: { "X-Auth-Token": API_KEY, "Accept": "application/json" },
+    headers: { Authorization: `Bearer ${API_KEY}`, Accept: "application/json" },
     signal: AbortSignal.timeout(12000)
   });
   const text = await response.text();
   let payload;
   try { payload = text ? JSON.parse(text) : {}; }
-  catch { throw new Error(`football-data.org geçerli JSON döndürmedi (HTTP ${response.status}).`); }
-  if (!response.ok) {
-    const detail = payload.message || payload.error || `HTTP ${response.status}`;
-    throw new Error(`football-data.org isteği başarısız: ${detail}`);
+  catch { throw new Error(`5DollarFootballAPI geçerli JSON döndürmedi (HTTP ${response.status}).`); }
+  if (!response.ok || payload.success === 0) {
+    const detail = payload.message || payload.error || payload.detail || `HTTP ${response.status}`;
+    throw new Error(`5DollarFootballAPI isteği başarısız: ${detail}`);
   }
   return payload;
 }
 
-// Compatibility adapter: preserve the existing WinScope frontend response shape.
+function toLegacyFixture(match) {
+  return {
+    fixture: { id: Number(match.id), date: match.kickoff_utc || null,
+      status: { short: mapProviderStatus(match.status_code ?? match.status), elapsed: providerMinute(match) } },
+    league: { name: match.league?.name || "Bilinmeyen lig", country: match.country?.name || match.league?.country || "" },
+    teams: { home: { id: match.teams?.home?.id ?? null, name: match.teams?.home?.name || "Ev sahibi" },
+      away: { id: match.teams?.away?.id ?? null, name: match.teams?.away?.name || "Deplasman" } },
+    goals: { home: match.goals?.home ?? null, away: match.goals?.away ?? null },
+    corners: match.corners || null,
+    raw: match
+  };
+}
+
+function normalizeProviderStats(payload, fixture) {
+  const root = payload?.data || payload;
+  const stats = root?.statistics || root?.stats || {};
+  const homeName = fixture?.teams?.home?.name || "Ev sahibi";
+  const awayName = fixture?.teams?.away?.name || "Deplasman";
+  const pick = (key, side) => stats?.[key]?.[side] ?? stats?.[key === "shots_on_target" ? "shotsOnTarget" : key]?.[side] ?? null;
+  const homeCorners = fixture?.corners?.home ?? stats?.corners?.home ?? null;
+  const awayCorners = fixture?.corners?.away ?? stats?.corners?.away ?? null;
+  const homeShotsOn = pick("shots_on_target", "home");
+  const awayShotsOn = pick("shots_on_target", "away");
+  const homeShotsOff = pick("shots_off_target", "home");
+  const awayShotsOff = pick("shots_off_target", "away");
+  const homeStats = { "Total Shots": homeShotsOn != null && homeShotsOff != null ? Number(homeShotsOn) + Number(homeShotsOff) : null,
+    "Shots on Goal": homeShotsOn, "Corner Kicks": homeCorners,
+    "Dangerous Attacks": stats?.dangerous_attacks?.home ?? null,
+    "Shots off Goal": homeShotsOff, "Ball Possession": stats?.possession?.home ?? null };
+  const awayStats = { "Total Shots": awayShotsOn != null && awayShotsOff != null ? Number(awayShotsOn) + Number(awayShotsOff) : null,
+    "Shots on Goal": awayShotsOn, "Corner Kicks": awayCorners,
+    "Dangerous Attacks": stats?.dangerous_attacks?.away ?? null,
+    "Shots off Goal": awayShotsOff, "Ball Possession": stats?.possession?.away ?? null };
+  return [ { team: homeName, statistics: homeStats }, { team: awayName, statistics: awayStats } ];
+}
+
+// Keep the legacy internal shape so existing WinScope routes and frontend remain compatible.
 async function apiGet(pathname) {
-  if (pathname.startsWith("/fixtures/statistics")) return [];
   if (pathname.startsWith("/odds")) return [];
+  if (pathname.startsWith("/fixtures/statistics")) {
+    const id = new URLSearchParams(pathname.split("?")[1] || "").get("fixture");
+    if (!id) return [];
+    const fixturePayload = await footballDataRequest(`/fixtures/${encodeURIComponent(id)}`);
+    const fixture = toLegacyFixture(fixturePayload.data || fixturePayload);
+    const statPayload = await footballDataRequest(`/fixtures/${encodeURIComponent(id)}/statistics`);
+    return normalizeProviderStats(statPayload, fixture);
+  }
   if (pathname.startsWith("/fixtures?live=all")) {
-    const payload = await footballDataRequest("/matches?status=LIVE");
-    return (payload.matches || []).map(match => ({
-      fixture: { id: Number(match.id), date: match.utcDate, status: { short: mapFootballDataStatus(match.status), elapsed: null } },
-      league: { name: match.competition?.name || "Bilinmeyen lig", country: match.area?.name || "" },
-      teams: { home: { id: match.homeTeam?.id ?? null, name: match.homeTeam?.name || "Ev sahibi" }, away: { id: match.awayTeam?.id ?? null, name: match.awayTeam?.name || "Deplasman" } },
-      goals: { home: match.score?.fullTime?.home ?? match.score?.regularTime?.home ?? null, away: match.score?.fullTime?.away ?? match.score?.regularTime?.away ?? null }
-    }));
+    const payload = await footballDataRequest("/fixtures?status=live&per_page=500");
+    return (payload.data || []).map(toLegacyFixture);
   }
   const idMatch = pathname.match(/^\/fixtures\?id=(\d+)/);
   if (idMatch) {
-    const payload = await footballDataRequest(`/matches/${idMatch[1]}`);
-    const match = payload.match || payload;
-    if (!match?.id) return [];
-    return [{
-      fixture: { id: Number(match.id), date: match.utcDate, status: { short: mapFootballDataStatus(match.status), elapsed: null } },
-      league: { name: match.competition?.name || "Bilinmeyen lig", country: match.area?.name || "" },
-      teams: { home: { id: match.homeTeam?.id ?? null, name: match.homeTeam?.name || "Ev sahibi" }, away: { id: match.awayTeam?.id ?? null, name: match.awayTeam?.name || "Deplasman" } },
-      goals: { home: match.score?.fullTime?.home ?? match.score?.regularTime?.home ?? null, away: match.score?.fullTime?.away ?? match.score?.regularTime?.away ?? null }
-    }];
+    const payload = await footballDataRequest(`/fixtures/${idMatch[1]}`);
+    const match = payload.data || payload;
+    return match?.id ? [toLegacyFixture(match)] : [];
   }
   throw new Error("Bu veri kaynağında istenen uç nokta desteklenmiyor.");
 }
@@ -234,12 +276,12 @@ async function getOdds(fixtureId, mode) {
   if (cached && now - cached.at < CACHE_MS[mode]) return { ...cached.data, cached: true };
   if (oddsInFlight.has(key)) return oddsInFlight.get(key);
   const task = (async () => {
-    // football-data.org does not provide bookmaker odds in this plan.
+    // 5DollarFootballAPI does not provide bookmaker odds in this plan.
     const markets = [];
     const data = {
-      fixtureId: Number(fixtureId), mode, source: "football-data.org", fetchedAt: new Date().toISOString(),
+      fixtureId: Number(fixtureId), mode, source: "5DollarFootballAPI", fetchedAt: new Date().toISOString(),
       available: false, markets,
-      note: "football-data.org bu bağlantıda bahis oranı sağlamıyor; oran uydurulmadı."
+      note: "5DollarFootballAPI bu bağlantıda bahis oranı sağlamıyor; oran uydurulmadı."
     };
     if (pool && markets.length) {
       try {
@@ -283,10 +325,12 @@ async function getOdds(fixtureId, mode) {
   try { return await task; } finally { oddsInFlight.delete(key); }
 }
 
-async function captureOneMatch(_fixtureId) {
-  // football-data.org endpoint/plan used here does not provide the shot/corner statistics
-  // required by WinScope's pressure-based alarms. Do not call the old API-Football endpoint.
-  return { saved: false, reason: "statistics_unavailable_from_provider" };
+async function captureOneMatch(fixtureId) {
+  const rows = await apiGet(`/fixtures/statistics?fixture=${encodeURIComponent(String(fixtureId))}`);
+  if (!rows.length) return { saved: false, reason: "no_statistics" };
+  const teams = rows.map(row => ({ team: row.team?.name || "Bilinmiyor", statistics: Object.fromEntries((row.statistics || []).map(stat => [stat.type, stat.value])) }));
+  await pool.query("INSERT INTO match_stat_snapshots (fixture_id, teams) VALUES ($1, $2::jsonb)", [fixtureId, JSON.stringify(teams)]);
+  return { saved: true, teams };
 }
 
 async function captureTrackedMatches() {
@@ -402,22 +446,25 @@ async function evaluateMatchAlarms(match, fixture, teams) {
 }
 
 async function scanTrackedMatchAlarms() {
-  // Keep Telegram test functionality, but safely disable minute/stat-based alerts until
-  // the selected provider exposes live minutes plus shots-on-target/corners.
   if (!pool || alarmScanRunning || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
   alarmScanRunning = true;
   try {
     await initDatabase();
-    const tracked = await pool.query("SELECT COUNT(*)::int AS total FROM tracked_matches");
-    if (tracked.rows[0].total > 0 && !scanTrackedMatchAlarms.warned) {
-      console.log("Dakika bazlı Telegram alarmları beklemede: football-data.org bağlantısı canlı dakika ve şut/korner istatistikleri sağlamıyor.");
-      scanTrackedMatchAlarms.warned = true;
+    const tracked = await pool.query("SELECT fixture_id, home_team, away_team FROM tracked_matches ORDER BY enabled_at ASC LIMIT 2");
+    for (const match of tracked.rows) {
+      try {
+        const fixtures = await apiGet(`/fixtures?id=${encodeURIComponent(String(match.fixture_id))}`);
+        if (!fixtures.length) continue;
+        const fixture = fixtures[0];
+        const minute = Number(fixture.fixture?.status?.elapsed);
+        if (!Number.isFinite(minute) || minute < 20 || minute > 72) continue;
+        const statRows = await apiGet(`/fixtures/statistics?fixture=${encodeURIComponent(String(match.fixture_id))}`);
+        const teams = statRows.map(row => ({ team: row.team?.name || "Bilinmiyor", statistics: Object.fromEntries((row.statistics || []).map(stat => [stat.type, stat.value])) }));
+        await evaluateMatchAlarms(match, fixture, teams);
+      } catch (error) { console.error(`Alarm tarama hatası (${match.fixture_id}):`, error.message); }
     }
-  } catch (error) {
-    console.error("Alarm durum kontrolü hatası:", error.message);
-  } finally {
-    alarmScanRunning = false;
-  }
+  } catch (error) { console.error("Alarm tarama döngüsü hatası:", error.message); }
+  finally { alarmScanRunning = false; }
 }
 
 app.get("/api/telegram-test", async (_req, res) => {
@@ -430,16 +477,18 @@ app.get("/api/telegram-test", async (_req, res) => {
   }
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Live", odds: false, minuteAlertsAvailable: false, databaseConfigured: Boolean(pool), apiKeyConfigured: Boolean(API_KEY), dataSource: "football-data.org", note: "Bu sağlayıcıda dakika ve şut/korner verileri bulunmadığından Telegram dakika alarmları devre dışıdır; Telegram test endpointi kullanılabilir." }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Live", odds: false, databaseConfigured: Boolean(pool), apiKeyConfigured: Boolean(API_KEY), dataSource: "5DollarFootballAPI" }));
 
 app.get("/api/fixtures", async (req, res) => {
   const date = String(req.query.date || "");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "Geçerli bir tarih gerekli: YYYY-MM-DD." });
   try {
-    const payload = await footballDataRequest(`/matches?dateFrom=${encodeURIComponent(date)}&dateTo=${encodeURIComponent(date)}`);
-    const matches = (payload.matches || []).map(normalizeFootballDataMatch);
-    res.json({ source: "football-data.org", fetchedAt: new Date().toISOString(), results: matches.length, matches,
-      note: "Ücretsiz planda yalnızca sağlayıcının desteklediği organizasyonlar görünür. Bahis oranları, canlı dakika ve şut/korner istatistikleri bu API yanıtında garanti edilmez." });
+    const start = Math.floor(new Date(`${date}T00:00:00Z`).getTime() / 1000);
+    const end = start + 86400;
+    const payload = await footballDataRequest(`/fixtures?start_time=${start}&end_time=${end}&per_page=100`);
+    const matches = (payload.data || []).map(normalizeProviderMatch);
+    res.json({ source: "5DollarFootballAPI", fetchedAt: new Date().toISOString(), results: matches.length, matches,
+      note: "Fikstürler 5DollarFootballAPI üzerinden alınır. Oranlar yalnızca desteklenen endpoint ve kapsamda sunulur." });
   } catch (error) {
     console.error("Fixture API error:", error.message);
     res.status(502).json({ error: "Maç bülteni alınamadı.", detail: error.message });
@@ -456,7 +505,7 @@ app.get("/api/live", async (_req, res) => {
       homeScore: item.goals.home, awayScore: item.goals.away,
       homeId: item.teams.home.id, awayId: item.teams.away.id, fixtureDate: item.fixture.date
     }));
-    res.json({ source: "football-data.org", fetchedAt: new Date().toISOString(), results: matches.length, matches, note: "Ücretsiz kaynak canlı dakika ve şut/korner istatistiklerini sağlamayabilir; bu nedenle istatistik tabanlı dakika alarmları doğrulanamaz." });
+    res.json({ source: "5DollarFootballAPI", fetchedAt: new Date().toISOString(), results: matches.length, matches, note: "Canlı maç dakikası sağlayıcının status_code alanından okunur; şut/korner verisi istatistik endpointinden alınır." });
   } catch (error) {
     console.error("Live API error:", error.message);
     res.status(502).json({ error: "Canlı maçlar alınamadı.", detail: error.message });
@@ -501,7 +550,7 @@ app.get("/api/match/:id/stats", async (req, res) => {
       try { await initDatabase(); await pool.query("INSERT INTO match_stat_snapshots (fixture_id, teams) VALUES ($1, $2::jsonb)", [fixtureId, JSON.stringify(teams)]); saved = true; }
       catch (error) { console.error("Snapshot save error:", error.message); }
     }
-    res.json({ source: "football-data.org", fixtureId: Number(fixtureId), available: teams.length > 0, saved, teams });
+    res.json({ source: "5DollarFootballAPI", fixtureId: Number(fixtureId), available: teams.length > 0, saved, teams });
   } catch (error) { console.error("Stats API error:", error.message); res.status(502).json({ error: "Maç istatistikleri alınamadı.", detail: error.message }); }
 });
 
@@ -642,7 +691,7 @@ app.get("/api/auto-capture/status", async (_req, res) => {
 
 app.listen(PORT, () => {
   console.log(`WinScope Live running on port ${PORT}`);
-  console.log("football-data.org: fikstür/canlı skor. Oran ve şut/korner verisi yok; dakika bazlı alarmlar güvenli şekilde devre dışı.");
+  console.log("5DollarFootballAPI bağlantısı: canlı skor/fikstür. Oran ve şut/korner istatistikleri desteklenmediği için bu kaynakla dakika bazlı alarmlar devre dışı kalır.");
   captureTrackedMatches().catch(error => console.error("İlk otomatik kayıt başarısız:", error.message));
   scanTrackedMatchAlarms().catch(error => console.error("İlk alarm taraması başarısız:", error.message));
   const captureTimer = setInterval(() => captureTrackedMatches().catch(error => console.error("Otomatik kayıt döngüsü başarısız:", error.message)), 60_000);
