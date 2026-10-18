@@ -180,8 +180,9 @@ async function footballDataRequest(pathname) {
   try { payload = text ? JSON.parse(text) : {}; }
   catch { throw new Error(`5DollarFootballAPI geçerli JSON döndürmedi (HTTP ${response.status}).`); }
   if (!response.ok || payload.success === 0) {
-    const detail = payload.message || payload.error || payload.detail || `HTTP ${response.status}`;
-    throw new Error(`5DollarFootballAPI isteği başarısız: ${detail}`);
+    const rawDetail = payload.message ?? payload.error ?? payload.detail ?? payload.errors ?? `HTTP ${response.status}`;
+    const detail = typeof rawDetail === "string" ? rawDetail : JSON.stringify(rawDetail);
+    throw new Error(`5DollarFootballAPI isteği başarısız (HTTP ${response.status}): ${detail}`);
   }
   return payload;
 }
@@ -543,18 +544,20 @@ app.get("/api/fixtures", async (req, res) => {
 
 app.get("/api/live", async (_req, res) => {
   try {
-    const fixtures = await apiGet("/fixtures?live=all");
-    const matches = fixtures.map(item => ({
-      id: item.fixture.id, league: item.league.name, country: item.league.country,
-      minute: item.fixture.status.elapsed, status: item.fixture.status.short,
-      home: item.teams.home.name, away: item.teams.away.name,
-      homeScore: item.goals.home, awayScore: item.goals.away,
-      homeId: item.teams.home.id, awayId: item.teams.away.id, fixtureDate: item.fixture.date
-    }));
-    res.json({ source: "5DollarFootballAPI", fetchedAt: new Date().toISOString(), results: matches.length, matches, note: "Canlı maç dakikası sağlayıcının status_code alanından okunur; şut/korner verisi istatistik endpointinden alınır." });
+    // 5DollarFootballAPI uses status=live; do not call the old API-Football helper here.
+    const payload = await footballDataRequest("/fixtures?status=live");
+    const rows = Array.isArray(payload.data) ? payload.data : [];
+    const matches = rows.map(normalizeProviderMatch);
+    res.json({
+      source: "5DollarFootballAPI",
+      fetchedAt: new Date().toISOString(),
+      results: matches.length,
+      matches,
+      note: "Canlı maçlar 5DollarFootballAPI üzerinden alındı. İstatistikler ve oranlar sağlayıcının maç kapsamına bağlıdır."
+    });
   } catch (error) {
-    console.error("Live API error:", error.message);
-    res.status(502).json({ error: "Canlı maçlar alınamadı.", detail: error.message });
+    console.error("Live API error:", error.stack || error.message || error);
+    res.status(502).json({ error: "Canlı maçlar alınamadı.", detail: error.message || String(error) });
   }
 });
 
