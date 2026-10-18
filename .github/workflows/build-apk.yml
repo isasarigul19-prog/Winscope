@@ -1,1 +1,49 @@
 
+name: Build WinScope APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare WinScope
+        run: |
+          mkdir -p build
+          cat > build/index.html <<'EOF'
+          <!doctype html>
+          <html lang="tr">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <meta http-equiv="refresh" content="0;url=https://winscope-el9n.onrender.com">
+            <title>WinScope</title>
+          </head>
+          <body>
+            <p>WinScope açılıyor...</p>
+            <a href="https://winscope-el9n.onrender.com">WinScope'u aç</a>
+          </body>
+          </html>
+          EOF
+
+      - name: Build Android APK
+        uses: darkshredder/web-to-app-action@main
+        with:
+          build-folder-path: build
+          app-name: WinScope
+          output-folder-path: my-apks
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: WinScope-APK
+          path: my-apks/*.apk
+
