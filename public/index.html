@@ -42,4 +42,31 @@ async function similar(){const over=Number(el('overOdds').value),under=Number(el
 async function checkStatus(){const out=el('systemStatus');out.textContent='Kontrol ediliyor…';const results=[];for(const [name,url] of [['Sunucu','/api/health'],['Veritabanı','/api/db-status'],['Geçmiş veri','/api/historical/status'],['Takip listesi','/api/tracked']]){try{const r=await fetch(url),j=await r.json();results.push(`${name}: ${r.ok?'OK':'HATA'} — ${name==='Geçmiş veri'?`${j.totalMatches??0} maç`:name==='Takip listesi'?`${j.matches?.length??0} takipte`:j.error||j.service||j.database||''}`);}catch(e){results.push(`${name}: HATA — ${e.message}`);}}out.innerHTML=results.map(esc).join('<br>');}
 const today=new Date();el('bulletinDate').value=`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;el('loadBulletin').addEventListener('click',loadBulletin);el('refresh').addEventListener('click',refreshMatches);el('filter').addEventListener('change',render);el('similarBtn').addEventListener('click',similar);el('statusBtn').addEventListener('click',checkStatus);window.loadBulletin=loadBulletin;window.loadOdds=loadOdds;window.trackMatch=trackMatch;window.loadStats=loadStats;checkStatus();
 </script>
+<section class="panel">
+  <h2 class="section-title">Telegram bağlantısı</h2>
+  <button class="btn primary" id="telegramTestBtn">Telegram Test Et</button>
+  <div id="telegramTestResult" class="result">Henüz test yapılmadı.</div>
+</section>
+
+<script>
+document.getElementById("telegramTestBtn").addEventListener("click", async function () {
+  const result = document.getElementById("telegramTestResult");
+  this.disabled = true;
+  result.textContent = "Gönderiliyor...";
+  try {
+    const r = await fetch("/api/telegram-test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({})
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || "Gönderilemedi");
+    result.textContent = "✅ " + j.message;
+  } catch (e) {
+    result.textContent = "❌ " + e.message;
+  } finally {
+    this.disabled = false;
+  }
+});
+</script>
 </body></html>
