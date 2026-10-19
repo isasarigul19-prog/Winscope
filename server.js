@@ -844,13 +844,34 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       alternative=alt ? alt.pick : "İkinci uygun tercih yok";
       reasons.push(`Ana tercih gerçek oranla karşılaştırıldı; tarihsel olasılık ile oran olasılığı arasındaki fark +${selected.edge} puan.`);
     } else {
-      mainPick="UZAK DUR";
-      alternative="UZAK DUR — yeterli değer sinyali yok";
-      confidence="Düşük / doğrulanabilir değer avantajı yok";
-      reasons.push("En az 20 benzer maç, gerçek ilgili market oranı ve en az 3 puanlık pozitif tarihsel değer farkı aynı anda sağlanmadı; tercih zorlanmadı.");
+      // User-facing preference: do not display the phrase “UZAK DUR”.
+      // If strict value criteria fail, show the highest historical-probability market
+      // only when the relevant real quote and a usable sample exist; label confidence honestly.
+      const fallback = [
+        {pick:"EV 1.5 ÜST",pct:history.home15Percent,market:home15,kind:"home-goals"},
+        {pick:"DEP 1.5 ÜST",pct:history.away15Percent,market:away15,kind:"away-goals"},
+        {pick:"KG VAR",pct:history.bttsYesPercent,market:kgYes,kind:"btts-yes"},
+        {pick:"KG YOK",pct:history.bttsNoPercent,market:kgNo,kind:"btts-no"},
+        {pick:"MS 2.5 ÜST",pct:history.over25Percent,market:over25,kind:"over25"},
+        {pick:"MS 2.5 ALT",pct:history.under25Percent,market:under25,kind:"under25"}
+      ].filter(x=>history.sampleSize>=1 && x.pct!=null && Number.isFinite(Number(x.market?.odd)) && Number(x.market.odd)>1)
+       .sort((a,b)=>Number(b.pct)-Number(a.pct));
+      if(fallback.length){
+        selected=fallback[0];
+        mainPick=`${selected.pick} (${selected.pct}%)`;
+        const alt=fallback.find(x=>x.pick!==selected.pick);
+        alternative=alt?`${alt.pick} (${alt.pct}%)`:"Yeterli alternatif verisi yok";
+        confidence=`Düşük güven · ${history.sampleSize} benzer maç; değer avantajı doğrulanmadı`;
+        reasons.push("Net tercih, gerçek oranı bulunan marketler arasından tarihsel yüzdesi en yüksek olanıdır; pozitif değer avantajı doğrulanmadığı için güven düşüktür.");
+      } else {
+        mainPick="Yeterli doğrulanmış veri yok";
+        alternative="Yeterli alternatif verisi yok";
+        confidence="Düşük · doğrulanabilir market oranı veya tarihsel örneklem eksik";
+        reasons.push("Güvenilir tercih üretmek için gerçek market oranı ve kullanılabilir tarihsel örneklem bulunamadı.");
+      }
     }
     if(history.mostCommonHalfTimeScore && history.mostCommonHalfTimeScore.percent>=15 && selected) halfTimeScore=`${history.mostCommonHalfTimeScore.score} (${history.mostCommonHalfTimeScore.percent}%)`;
-    else halfTimeScore="Yeterli veri yok / UZAK DUR";
+    else halfTimeScore="Yeterli veri yok";
     // Only choose a full-time score from observed historical scores that fit the main market.
     const scoreFits=(score,kind)=>{
       const bits=String(score||"").split("-").map(Number); if(bits.length!==2 || bits.some(v=>!Number.isFinite(v))) return false;
@@ -868,7 +889,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       fullTimeScore=`${compatibleScores[0].score} (${compatibleScores[0].percent}%)`;
       if(compatibleScores[1]) alternativeFullTimeScore=`${compatibleScores[1].score} (${compatibleScores[1].percent}%)`;
       else alternativeFullTimeScore="İkinci uyumlu skor için yeterli veri yok";
-    } else { fullTimeScore="Yeterli veri yok / UZAK DUR"; alternativeFullTimeScore="Yeterli veri yok"; }
+    } else { fullTimeScore="Yeterli veri yok"; alternativeFullTimeScore="Yeterli veri yok"; }
     const surpriseBits=[];
     if(history.mostCommonHalfTimeFullTime && history.mostCommonHalfTimeFullTime.percent>=12) surpriseBits.push(`${history.mostCommonHalfTimeFullTime.result} İY/MS (${history.mostCommonHalfTimeFullTime.percent}%)`);
     if(history.sixPlusPercent!=null && history.sampleSize>=30 && history.sixPlusPercent>=12) surpriseBits.push(`6+ GOL (${history.sixPlusPercent}%)`);
@@ -935,7 +956,7 @@ app.get("/api/live-combo", async (_req, res) => {
     }
     candidates.sort((a,b)=>((b.minute>=55&&b.minute<=75)?1:0)-((a.minute>=55&&a.minute<=75)?1:0) || b.odd-a.odd);
     const picks=candidates.slice(0,3);
-    res.json({source:"5DollarFootballAPI",fetchedAt:new Date().toISOString(),inspected:liveRows.length,picks,available:picks.length>=2,note:picks.length>=2?"Seçimler canlı skor, mevcut istatistik ve gerçek canlı oranla filtrelendi; garanti değildir.":"En az iki uygun maç bulunamadı. Eksik seçim uydurulmadı; UZAK DUR."});
+    res.json({source:"5DollarFootballAPI",fetchedAt:new Date().toISOString(),inspected:liveRows.length,picks,available:picks.length>=2,note:picks.length>=2?"Seçimler canlı skor, mevcut istatistik ve gerçek canlı oranla filtrelendi; garanti değildir.":"En az iki uygun maç bulunamadı. Eksik seçim uydurulmadı."});
   } catch (error) {
     console.error("Live combo error:", error.stack || error.message);
     res.status(502).json({error:"Canlı kombin oluşturulamadı.",detail:error.message||String(error)});
