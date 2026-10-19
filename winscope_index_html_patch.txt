@@ -1,0 +1,42 @@
+WINSCOPE public/index.html — KÜÇÜK EKLEME PAKETİ
+
+1) CSS ekle:
+Mevcut <style> bloğunun sonundaki </style> satırından hemen önce şunu ekle:
+
+.live-combo-btn{background:var(--green);border-color:var(--green);color:#04191e;font-weight:900}.live-combo-pick{border:1px solid var(--line);background:#06242a;padding:11px;border-radius:11px;margin:8px 0}.live-combo-pick strong{display:block;margin:5px 0}.live-combo-note{margin-top:8px;color:var(--m);font-size:12px;line-height:1.45}
+
+2) Canlı maçlar butonunu bul:
+<button class="primary" id="refresh">↻ Canlı maçlar</button>
+
+Hemen arkasına şunu ekle:
+<button id="liveCombo" class="live-combo-btn">⚡ Canlı Kombin</button>
+
+3) Şu satırı bul:
+<section id="matches"><div class="empty">Maçlar yükleniyor…</div></section>
+
+Hemen öncesine şunu ekle:
+<section class="panel hidden" id="liveComboPanel"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><h3 style="margin:2px 0">⚡ CANLI KOMBİN</h3><button id="closeLiveCombo">Kapat</button></div><div id="liveComboResult" class="small" style="margin-top:10px">Canlı veriler kontrol edildiğinde adaylar burada gösterilir.</div></section>
+
+4) JavaScript ekle:
+<script> bloğunda, mevcut function renderCoupon(d){...} fonksiyonundan önce veya sonra (başka bir fonksiyonun içine değil) aşağıdaki fonksiyonu ekle:
+
+async function makeLiveCombo(){
+ const panel=$('liveComboPanel'),box=$('liveComboResult'),btn=$('liveCombo');
+ panel.classList.remove('hidden');box.innerHTML='<div class="empty">Canlı skor, istatistik ve mevcut oranlar kontrol ediliyor…</div>';
+ btn.disabled=true;btn.textContent='Kontrol ediliyor…';
+ try{
+  const r=await fetch('/api/live-combo');const d=await r.json();
+  if(!r.ok)throw Error(d.detail||d.error||'Canlı kombin alınamadı.');
+  if(!Array.isArray(d.picks)||d.picks.length<2){box.innerHTML=`<div class="err"><b>UZAK DUR — yeterli uygun maç bulunamadı.</b></div><div class="live-combo-note">${esc(d.note||'Yeterli doğrulanabilir sinyal yok.')} İncelenen maç: ${esc(d.inspected??0)}. Eksik seçim oluşturulmadı.</div>`;return;}
+  box.innerHTML=`<div class="small">${esc(d.picks.length)} uygun maç · ${esc(new Date(d.fetchedAt||Date.now()).toLocaleTimeString('tr-TR'))}</div>${d.picks.map((p,i)=>`<div class="live-combo-pick"><div class="head"><span>${esc(p.league||'')}</span><span>${esc(p.minute)}'</span></div><strong>${esc(p.home)} VS ${esc(p.away)}</strong><div class="statline"><span>Canlı skor</span><b>${esc(p.score)}</b></div><div class="statline"><span>Tercih</span><b>${esc(p.market)}</b></div><div class="live-combo-note">${esc(p.activity||'Canlı istatistik mevcut.')}</div></div>`).join('')}<div class="live-combo-note">${esc(d.note||'Gerçek canlı oran ve istatistiklerle filtrelendi. Garanti değildir; bahis risk içerir.')}</div>`;
+ }catch(e){box.innerHTML=`<div class="err">${esc(e.message)}</div>`;}
+ finally{btn.disabled=false;btn.textContent='⚡ Canlı Kombin';}
+}
+
+5) Dosyanın en altındaki mevcut event bağlantılarını bul:
+window.analyze=analyze;window.stats=stats;window.odds=odds;$('refresh').onclick=live;
+
+Aynı satırda $('refresh').onclick=live; ifadesinden hemen sonra şunları ekle:
+$('liveCombo').onclick=makeLiveCombo;$('closeLiveCombo').onclick=()=>$('liveComboPanel').classList.add('hidden');
+
+NOT: Sunucu dosyası da değiştirilmelidir. Bu arayüz tek başına /api/live-combo endpoint'i olmadan çalışmaz. Hazırlanan server_winscope_fixed.js dosyasında bu endpoint ve analiz düzeltmeleri bulunur.
