@@ -17,6 +17,15 @@ const { Pool } = pg;
 
 app.use(express.json({ limit: "100kb" }));
 app.use(express.static(path.join(ROOT, "public")));
+app.use((req, res, next) => {
+  const started = Date.now();
+  res.on("finish", () => {
+    if (/^\/api\/(coupon|live-combo|match|fixtures|live)/.test(req.path)) {
+      console.log(`[HTTP] ${req.method} ${req.path} -> ${res.statusCode} ${Date.now()-started}ms`);
+    }
+  });
+  next();
+});
 
 const pool = DATABASE_URL ? new Pool({
   connectionString: DATABASE_URL,
@@ -1205,6 +1214,7 @@ app.get("/api/live-combo", async (_req, res) => {
 // Daily coupon drafts are generated only from real provider odds and the historical DB.
 const dailyCouponDrafts = new Map();
 app.get("/api/coupon/daily", async (req, res) => {
+  const requestStartedAt = Date.now();
   const turkeyToday = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Istanbul", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
   const date = String(req.query.date || turkeyToday);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "Geçerli tarih gerekli: YYYY-MM-DD." });
@@ -1216,7 +1226,7 @@ app.get("/api/coupon/daily", async (req, res) => {
     const fixtures = (payload.data || []).map(normalizeProviderMatch)
       .filter(m => m.status === "NS" && m.fixtureDate && new Date(m.fixtureDate).getTime() > Date.now())
       .sort((a,b) => new Date(a.fixtureDate) - new Date(b.fixtureDate));
-    if (!fixtures.length) return res.json({ date, draftId: null, picks: [], message: "Bu tarihte başlamamış maç bulunamadı.", source: "API-Football + historical_matches" });
+    if (!fixtures.length) return res.json({ date, draftId: null, picks: [], inspected: [], inspectedCount: 0, candidateFixtureCount: 0, durationMs: Date.now()-requestStartedAt, message: "Bu tarihte başlamamış maç bulunamadı.", source: "API-Football + historical_matches" });
 
     const historyQuery = await pool.query(`SELECT ft_home_goals, ft_away_goals, b365_home, b365_draw, b365_away, b365_over25, b365_under25
       FROM historical_matches WHERE ft_home_goals IS NOT NULL AND ft_away_goals IS NOT NULL
@@ -1276,13 +1286,13 @@ app.get("/api/coupon/daily", async (req, res) => {
       if (chosen.length === 3) break;
     }
     const draftId = `${date}-${Date.now()}`;
-    const draft = { draftId, date, status: "PENDING_APPROVAL", picks: chosen, generatedAt: new Date().toISOString(), inspected, inspectedCount: inspected.length, candidateFixtureCount: Math.min(fixtures.length, 8), note: chosen.length ? "Taslak kupondur. Kullanıcı onayı olmadan yayımlanmaz. Seçim üretilemeyen maçlar atlanır; oran veya istatistik uydurulmaz." : "Uygun seçim bulunamadı. inspected alanı, oran/örneklem/filtre nedeniyle atlanan maçları gösterir; veri uydurulmaz." };
+    const draft = { draftId, date, status: "PENDING_APPROVAL", picks: chosen, generatedAt: new Date().toISOString(), inspected, inspectedCount: inspected.length, candidateFixtureCount: Math.min(fixtures.length, 8), durationMs: Date.now()-requestStartedAt, note: chosen.length ? "Taslak kupondur. Kullanıcı onayı olmadan yayımlanmaz. Seçim üretilemeyen maçlar atlanır; oran veya istatistik uydurulmaz." : "Uygun seçim bulunamadı. inspected alanı, oran/örneklem/filtre nedeniyle atlanan maçları gösterir; veri uydurulmaz." };
     dailyCouponDrafts.set(draftId, draft);
     // Keep the in-memory draft map bounded.
     if (dailyCouponDrafts.size > 20) dailyCouponDrafts.delete(dailyCouponDrafts.keys().next().value);
     res.json(draft);
   } catch (error) {
-    console.error("Daily coupon error:", error.stack || error.message);
+    console.error(`Daily coupon error after ${Date.now()-requestStartedAt}ms:`, error.stack || error.message);
     res.status(502).json({ error: "Günün kuponu gerçek verilerle oluşturulamadı.", detail: error.message });
   }
 });
