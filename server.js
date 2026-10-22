@@ -176,6 +176,18 @@ async function initDatabase() {
           id BIGSERIAL PRIMARY KEY, fixture_id BIGINT NOT NULL, alarm_key TEXT NOT NULL,
           sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE (fixture_id, alarm_key)
         );
+        CREATE TABLE IF NOT EXISTS approved_analyses (
+          id BIGSERIAL PRIMARY KEY, fixture_id BIGINT NOT NULL, match_date TEXT,
+          home_team TEXT NOT NULL, away_team TEXT NOT NULL, analysis JSONB NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_approved_analyses_created ON approved_analyses (created_at DESC);
+        CREATE TABLE IF NOT EXISTS approved_coupons (
+          id BIGSERIAL PRIMARY KEY, draft_id TEXT UNIQUE NOT NULL, match_date TEXT,
+          picks JSONB NOT NULL, combined_odd NUMERIC, status TEXT NOT NULL DEFAULT 'PENDING',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
       `);
       await importHistoricalCsvOnce();
       return true;
@@ -1441,14 +1453,71 @@ app.get("/api/coupon/daily", async (req, res) => {
   }
 });
 
-app.post("/api/coupon/approve", express.json(), (req, res) => {
+app.post("/api/coupon/approve", express.json(), async (req, res) => {
   const draftId = String(req.body?.draftId || "");
   const draft = dailyCouponDrafts.get(draftId);
   if (!draft) return res.status(404).json({ error: "Kupon taslağı bulunamadı veya sunucu yeniden başladı. Lütfen yeniden oluştur." });
   if (!Array.isArray(draft.picks) || draft.picks.length < 2 || draft.picks.length > 3) return res.status(422).json({ error: "Onay için 2 veya 3 uygun seçim bulunmalı. Veri yetersizse kupon zorlanmaz." });
   draft.status = "APPROVED";
   draft.approvedAt = new Date().toISOString();
-  res.json({ ...draft, approved: true, message: "Kupon kullanıcı tarafından onaylandı. Uygulama dışında otomatik paylaşım yapılmadı." });
+  try {
+    await initDatabase();
+    const combinedOdd = draft.picks.reduce((v, p) => v * Number(p.odd || 1), 1);
+    await pool.query(
+      `INSERT INTO approved_coupons (draft_id, match_date, picks, combined_odd, status)
+       VALUES ($1,$2,$3::jsonb,$4,'PENDING')
+       ON CONFLICT (draft_id) DO NOTHING`,
+      [String(draft.draftId || draftId), String(draft.date || ""), JSON.stringify(draft.picks), combinedOdd]
+    );
+    res.json({ ...draft, approved: true, message: "Kupon kalıcı olarak kaydedildi. Otomatik dış paylaşım yapılmadı." });
+  } catch (error) {
+    console.error("Coupon save failed:", error.message);
+    return res.status(500).json({ error: "Kupon onaylandı ancak veritabanına kaydedilemedi. Tekrar deneyin." });
+  }
+});
+
+
+// WinScope: kalıcı arşiv. Sadece kullanıcının onayladığı analizler/kuponlar kaydedilir.
+app.post("/api/analyses/approve", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "DATABASE_URL ayarlanmamış." });
+  const { fixtureId, matchDate, home, away, analysis } = req.body || {};
+  if (!Number.isFinite(Number(fixtureId)) || !home || !away || !analysis || typeof analysis !== "object")
+    return res.status(400).json({ error: "Analiz kaydı için maç ve analiz bilgileri gerekli." });
+  try {
+    await initDatabase();
+    const r = await pool.query(
+      `INSERT INTO approved_analyses (fixture_id, match_date, home_team, away_team, analysis)
+       VALUES ($1,$2,$3,$4,$5::jsonb) RETURNING id, created_at`,
+      [Number(fixtureId), String(matchDate || ""), String(home), String(away), JSON.stringify(analysis)]
+    );
+    res.json({ ok: true, record: r.rows[0] });
+  } catch (e) { console.error("Analysis archive save failed:", e.message); res.status(500).json({ error: "Analiz arşive kaydedilemedi." }); }
+});
+
+app.get("/api/archives", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "DATABASE_URL ayarlanmamış." });
+  try {
+    await initDatabase();
+    const [a, c] = await Promise.all([
+      pool.query("SELECT id, fixture_id, match_date, home_team, away_team, analysis, created_at FROM approved_analyses ORDER BY created_at DESC LIMIT 500"),
+      pool.query("SELECT id, draft_id, match_date, picks, combined_odd, status, created_at, updated_at FROM approved_coupons ORDER BY created_at DESC LIMIT 500")
+    ]);
+    res.json({ ok: true, analyses: a.rows, coupons: c.rows });
+  } catch (e) { console.error("Archive load failed:", e.message); res.status(500).json({ error: "Arşiv yüklenemedi." }); }
+});
+
+app.delete("/api/archives/:type/:id", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "DATABASE_URL ayarlanmamış." });
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1 || !["analysis", "coupon"].includes(req.params.type))
+    return res.status(400).json({ error: "Geçersiz kayıt." });
+  try {
+    await initDatabase();
+    const table = req.params.type === "analysis" ? "approved_analyses" : "approved_coupons";
+    const r = await pool.query(`DELETE FROM ${table} WHERE id=$1 RETURNING id`, [id]);
+    if (!r.rowCount) return res.status(404).json({ error: "Kayıt bulunamadı." });
+    res.json({ ok: true, deletedId: id });
+  } catch (e) { console.error("Archive delete failed:", e.message); res.status(500).json({ error: "Kayıt silinemedi." }); }
 });
 
 app.get("/api/historical/similar", async (req, res) => {
