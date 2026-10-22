@@ -1335,9 +1335,13 @@ app.get("/api/coupon/daily", async (req, res) => {
           Number(m.odd) >= 1.25 && Number(m.odd) <= 2.10 &&
           Number.isFinite(Number(m.odd)) && Number(m.odd) > 1
         );
-        // Prefer Bet365 when its quote exists; otherwise use a real bookmaker
-        // returned for this fixture by API-Football. Never synthesize a quote.
-        return matches.find(m => /bet\s*365|bet365/i.test(String(m.bookmaker || ""))) || matches[0] || null;
+        // Prefer Bet365 when available. If it is absent, choose the best real
+        // price among the bookmakers returned by API-Football, not whichever
+        // bookmaker happens to appear first in the provider response.
+        // Never synthesize a quote; keep the selected bookmaker attached to the pick.
+        const bet365 = matches.find(m => /bet\s*365|bet365/i.test(String(m.bookmaker || "")));
+        if (bet365) return bet365;
+        return matches.sort((a, b) => Number(b.odd) - Number(a.odd))[0] || null;
       };
       const available = [
         { label: "MS 2.5 ÜST", field: "b365_over25", market: marketPick(/over.*2\.?\s*5|2\.?\s*5.*over|goal line fixed.*2\.?\s*5|goal line.*2\.?\s*5/, /over|ust/) },
@@ -1385,7 +1389,10 @@ app.get("/api/coupon/daily", async (req, res) => {
           picks.push({ fixtureId: fixture.id, home: fixture.home, away: fixture.away, league: fixture.league, kickoff: fixture.fixtureDate, market: item.label, odd, historicalProbability: item.probability, impliedProbability: Number(implied.toFixed(1)), edge, sampleSize: item.sampleSize, bookmaker: bookmakerSource, source: `${bookmakerSource} · API-Football + historical_matches` });
         } else {
           couponDiag.probabilityOrEdgeRejected++;
-          console.log(`[COUPON_FILTER] fixture=${fixture.id} market="${item.label}" reason=probability_or_edge probability=${item.probability} edge=${edge} sample=${item.sampleSize} odd=${odd}`);
+          const rejectionReasons = [];
+          if (item.probability < 62) rejectionReasons.push("probability_below_62");
+          if (edge < 2) rejectionReasons.push("edge_below_2");
+          console.log(`[COUPON_FILTER] fixture=${fixture.id} market="${item.label}" reason=${rejectionReasons.join("+") || "threshold"} probability=${item.probability} edge=${edge} sample=${item.sampleSize} odd=${odd} bookmaker=${String(item.market.bookmaker || "unknown")}`);
         }
       }
       inspected.push({
