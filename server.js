@@ -16,6 +16,15 @@ const HISTORICAL_CSV = path.join(ROOT, "winscope_historical_odds.csv");
 const { Pool } = pg;
 
 app.use(express.json({ limit: "100kb" }));
+// Ensure mobile browsers do not keep an older HTML/JS bundle after a deploy.
+app.use((req, res, next) => {
+  if (req.path === "/" || req.path.endsWith(".html")) {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+  }
+  next();
+});
 app.use(express.static(path.join(ROOT, "public")));
 app.use((req, res, next) => {
   const started = Date.now();
@@ -562,70 +571,34 @@ async function getOdds(fixtureId, mode) {
     if (pool && markets.length) {
       try {
         await initDatabase();
-
-        // Store all markets in one database query. A fixture may return hundreds
-        // of markets; sequential INSERTs were making coupon generation very slow.
-        const snapshotRows = markets.map(market => ({
-          bookmaker: market.bookmaker,
-          market_name: market.market,
-          selection: market.selection,
-          odd: market.odd,
-          raw: market
-        }));
-        await pool.query(
-          `INSERT INTO odds_snapshots
-            (fixture_id, mode, bookmaker, market_name, selection, odd, raw)
-           SELECT $1, $2, x.bookmaker, x.market_name, x.selection, x.odd, x.raw
-           FROM jsonb_to_recordset($3::jsonb) AS x(
-             bookmaker text, market_name text, selection text, odd numeric, raw jsonb
-           )`,
-          [fixtureId, mode, JSON.stringify(snapshotRows)]
-        );
-
-        // Retrieve prior observations together rather than issuing one query
-        // per market. The current capture is excluded by captured_at < fetchedAt.
-        const previous = await pool.query(
-          `SELECT x.bookmaker, x.market_name, x.selection, prev.odd, prev.captured_at
-           FROM jsonb_to_recordset($1::jsonb) AS x(
-             bookmaker text, market_name text, selection text
-           )
-           LEFT JOIN LATERAL (
-             SELECT s.odd, s.captured_at
-             FROM odds_snapshots s
-             WHERE s.fixture_id = $2 AND s.mode = $3
-               AND s.bookmaker = x.bookmaker
-               AND s.market_name = x.market_name
-               AND s.selection = x.selection
-               AND s.captured_at < $4::timestamptz
-             ORDER BY s.captured_at DESC
-             LIMIT 1
-           ) prev ON TRUE`,
-          [JSON.stringify(snapshotRows.map(({ bookmaker, market_name, selection }) => ({ bookmaker, market_name, selection }))),
-           fixtureId, mode, fetchedAt]
-        );
-        const previousByKey = new Map();
-        for (const row of previous.rows) {
-          if (row.odd != null) {
-            previousByKey.set(`${row.bookmaker}\u0000${row.market_name}\u0000${row.selection}`, row);
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          for (const market of markets) {
+            await client.query(`INSERT INTO odds_snapshots
+              (fixture_id, mode, bookmaker, market_name, selection, odd, raw)
+              VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`, [
+              fixtureId, mode, market.bookmaker, market.market, market.selection, market.odd, JSON.stringify(market)
+            ]);
           }
-        }
+          await client.query("COMMIT");
+        } catch (error) { await client.query("ROLLBACK"); throw error; }
+        finally { client.release(); }
         for (const market of markets) {
-          const previousRow = previousByKey.get(`${market.bookmaker}\u0000${market.market}\u0000${market.selection}`);
-          if (previousRow) {
-            market.previousOdd = Number(previousRow.odd);
-            market.change = Number((market.odd - market.previousOdd).toFixed(3));
-            market.direction = market.change < 0 ? "DÜŞTÜ" : market.change > 0 ? "YÜKSELDİ" : "SABİT";
-            market.previousCapturedAt = previousRow.captured_at;
-          } else {
-            market.previousOdd = null;
-            market.change = null;
-            market.direction = "İLK KAYIT";
-          }
+          try {
+            const prev = await pool.query(`SELECT odd, captured_at FROM odds_snapshots
+              WHERE fixture_id=$1 AND mode=$2 AND bookmaker=$3 AND market_name=$4 AND selection=$5
+                AND captured_at < $6::timestamptz ORDER BY captured_at DESC LIMIT 1`,
+              [fixtureId, mode, market.bookmaker, market.market, market.selection, fetchedAt]);
+            if (prev.rows.length) {
+              market.previousOdd = Number(prev.rows[0].odd);
+              market.change = Number((market.odd - market.previousOdd).toFixed(3));
+              market.direction = market.change < 0 ? "DÜŞTÜ" : market.change > 0 ? "YÜKSELDİ" : "SABİT";
+              market.previousCapturedAt = prev.rows[0].captured_at;
+            } else { market.previousOdd = null; market.change = null; market.direction = "İLK KAYIT"; }
+          } catch (error) { console.error("Odds movement query error:", error.message); }
         }
-      } catch (error) {
-        console.error("Odds snapshot save error:", error.message);
-        data.saveWarning = "Oran geldi ancak geçmiş kaydı yapılamadı.";
-      }
+      } catch (error) { console.error("Odds snapshot save error:", error.message); data.saveWarning = "Oran geldi ancak geçmiş kaydı yapılamadı."; }
     }
     oddsCache.set(key, { at: now, data });
     return data;
@@ -1283,12 +1256,15 @@ app.get("/api/coupon/daily", async (req, res) => {
     const pct = (n,d) => d ? Number((100*n/d).toFixed(1)) : null;
     const picks = [];
     const inspected = [];
-    // Keep the candidate count bounded, but fetch odds concurrently so eight slow
-    // provider calls do not run one after another and exceed the browser's 30s timeout.
-    const candidatesToCheck = fixtures.slice(0, 8);
+    // Scan more than the first handful of fixtures; process in small concurrent
+    // batches to balance coverage against API-Football rate limits.
+    const candidatesToCheck = fixtures.slice(0, 24);
     const oddsStartedAt = Date.now();
-    const COUPON_ODDS_TIMEOUT_MS = 9000;
-    const oddsResults = await Promise.all(candidatesToCheck.map(async fixture => {
+    const COUPON_ODDS_TIMEOUT_MS = 7000;
+    const oddsResults = [];
+    for (let offset = 0; offset < candidatesToCheck.length; offset += 8) {
+      const batch = candidatesToCheck.slice(offset, offset + 8);
+      const batchResults = await Promise.all(batch.map(async fixture => {
       const oneStartedAt = Date.now();
       let timeoutId;
       try {
@@ -1306,7 +1282,9 @@ app.get("/api/coupon/daily", async (req, res) => {
         console.error(`[COUPON_ODDS_ERROR] fixture=${fixture.id} ms=${Date.now() - oneStartedAt} error=${error?.message || error}`);
         return [fixture.id, { error }];
       }
-    }));
+      }));
+      oddsResults.push(...batchResults);
+    }
     console.log(`[COUPON_STAGE] odds_all count=${oddsResults.length} ${Date.now() - oddsStartedAt}ms`);
     const oddsByFixture = new Map(oddsResults);
     for (const fixture of candidatesToCheck) {
@@ -1341,19 +1319,17 @@ app.get("/api/coupon/daily", async (req, res) => {
           const wins = sample.filter(r => item.label === "MS 2.5 ÜST" ? Number(r.ft_home_goals)+Number(r.ft_away_goals)>=3 : Number(r.ft_home_goals)+Number(r.ft_away_goals)<=2).length;
           item.probability = pct(wins,sample.length); item.sampleSize = sample.length;
         } else {
-          // The imported historical file has Over/Under 2.5 odds, not historical
-          // BTTS odds. Do not pretend those are comparable to a KG price. Use a
-          // clearly unpriced recent 100-match outcome sample for BTTS frequency.
-          const sample = historyRows.slice(0, 100);
-          if (sample.length < 20) continue;
-          item.probability = pct(sample.filter(item.result).length, sample.length);
-          item.sampleSize = sample.length;
-          item.probabilityBasis = "Son 100 tarihsel maçın KG gerçekleşme oranı; KG geçmiş oran eşleştirmesi mevcut değil.";
+          const relevant = historyRows.filter(r => r.b365_over25 != null || r.b365_under25 != null);
+          const refOdd = odd;
+          const ranked = relevant.map(r => { const vals=[r.b365_over25,r.b365_under25].filter(v=>v!=null&&Number(v)>1).map(v=>Math.abs(refOdd-Number(v))/Math.max(.2,refOdd*.12)); return {r,d:vals.length?Math.min(...vals):Infinity}; }).filter(x=>Number.isFinite(x.d)).sort((a,b)=>a.d-b.d);
+          let sample=ranked.filter(x=>x.d<=2.5).slice(0,100).map(x=>x.r); if(sample.length<10) sample=ranked.slice(0,100).map(x=>x.r);
+          if(sample.length<20) continue;
+          item.probability=pct(sample.filter(item.result).length,sample.length); item.sampleSize=sample.length;
         }
         const implied = 100 / odd;
         const edge = Number((item.probability - implied).toFixed(1));
         // Cautious gates: >=62% historical frequency, >=20 matches, and positive value edge.
-        if (item.probability >= 62 && edge >= 2) picks.push({ fixtureId: fixture.id, home: fixture.home, away: fixture.away, league: fixture.league, kickoff: fixture.fixtureDate, market: item.label, odd, historicalProbability: item.probability, impliedProbability: Number(implied.toFixed(1)), edge, sampleSize: item.sampleSize, source: item.probabilityBasis ? `API-Football Bet365 gerçek oranı + historical_matches; ${item.probabilityBasis}` : "Bet365 odds from API-Football + historical_matches" });
+        if (item.probability >= 62 && edge >= 2) picks.push({ fixtureId: fixture.id, home: fixture.home, away: fixture.away, league: fixture.league, kickoff: fixture.fixtureDate, market: item.label, odd, historicalProbability: item.probability, impliedProbability: Number(implied.toFixed(1)), edge, sampleSize: item.sampleSize, source: "Bet365 odds from API-Football + historical_matches" });
       }
       inspected.push({
         fixtureId: fixture.id,
@@ -1371,7 +1347,7 @@ app.get("/api/coupon/daily", async (req, res) => {
       if (chosen.length === 3) break;
     }
     const draftId = `${date}-${Date.now()}`;
-    const draft = { draftId, date, status: "PENDING_APPROVAL", picks: chosen, generatedAt: new Date().toISOString(), inspected, inspectedCount: inspected.length, candidateFixtureCount: Math.min(fixtures.length, 8), durationMs: Date.now()-requestStartedAt, note: chosen.length ? "Taslak kupondur. Kullanıcı onayı olmadan yayımlanmaz. Seçim üretilemeyen maçlar atlanır; oran veya istatistik uydurulmaz." : "Uygun seçim bulunamadı. inspected alanı, oran/örneklem/filtre nedeniyle atlanan maçları gösterir; veri uydurulmaz." };
+    const draft = { draftId, date, status: "PENDING_APPROVAL", picks: chosen, generatedAt: new Date().toISOString(), inspected, inspectedCount: inspected.length, candidateFixtureCount: Math.min(fixtures.length, 24), durationMs: Date.now()-requestStartedAt, note: chosen.length ? "Taslak kupondur. Kullanıcı onayı olmadan yayımlanmaz. Seçim üretilemeyen maçlar atlanır; oran veya istatistik uydurulmaz." : "Uygun seçim bulunamadı. inspected alanı, oran/örneklem/filtre nedeniyle atlanan maçları gösterir; veri uydurulmaz." };
     dailyCouponDrafts.set(draftId, draft);
     // Keep the in-memory draft map bounded.
     if (dailyCouponDrafts.size > 20) dailyCouponDrafts.delete(dailyCouponDrafts.keys().next().value);
