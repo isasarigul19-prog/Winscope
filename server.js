@@ -181,31 +181,35 @@ async function initDatabase() {
           home_team TEXT NOT NULL, away_team TEXT NOT NULL, analysis JSONB NOT NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
-        -- Older deployments may already have these tables without timestamp columns.
-        -- Add missing columns safely before creating indexes or querying the archive.
-        ALTER TABLE approved_analyses
-          ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
-        CREATE INDEX IF NOT EXISTS idx_approved_analyses_created ON approved_analyses (created_at DESC);
         CREATE TABLE IF NOT EXISTS approved_coupons (
           id BIGSERIAL PRIMARY KEY, draft_id TEXT UNIQUE NOT NULL, match_date TEXT,
           picks JSONB NOT NULL, combined_odd NUMERIC, status TEXT NOT NULL DEFAULT 'PENDING',
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
-        -- Upgrade older archive tables in place; preserve existing rows.
-        ALTER TABLE approved_coupons
-          ADD COLUMN IF NOT EXISTS draft_id TEXT;
-        ALTER TABLE approved_coupons
-          ADD COLUMN IF NOT EXISTS match_date TEXT;
-        ALTER TABLE approved_coupons
-          ADD COLUMN IF NOT EXISTS picks JSONB;
-        ALTER TABLE approved_coupons
-          ADD COLUMN IF NOT EXISTS combined_odd NUMERIC;
-        ALTER TABLE approved_coupons
-          ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'PENDING';
-        ALTER TABLE approved_coupons
-          ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
-        ALTER TABLE approved_coupons
-          ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+        -- Idempotent migrations: CREATE TABLE IF NOT EXISTS does not change older tables.
+        ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS fixture_id BIGINT;
+        ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS match_date TEXT;
+        ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS home_team TEXT;
+        ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS away_team TEXT;
+        ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS analysis JSONB;
+        ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+
+        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS draft_id TEXT;
+        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS match_date TEXT;
+        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS picks JSONB;
+        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS combined_odd NUMERIC;
+        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'PENDING';
+        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+
+        UPDATE approved_analyses SET created_at = NOW() WHERE created_at IS NULL;
+        UPDATE approved_coupons SET status = 'PENDING' WHERE status IS NULL;
+        UPDATE approved_coupons SET created_at = NOW() WHERE created_at IS NULL;
+        UPDATE approved_coupons SET updated_at = created_at WHERE updated_at IS NULL;
+
+        CREATE INDEX IF NOT EXISTS idx_approved_analyses_created ON approved_analyses (created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_approved_coupons_draft_id ON approved_coupons (draft_id);
 
       `);
       await importHistoricalCsvOnce();
