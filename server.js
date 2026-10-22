@@ -181,23 +181,31 @@ async function initDatabase() {
           home_team TEXT NOT NULL, away_team TEXT NOT NULL, analysis JSONB NOT NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        -- Older deployments may already have these tables without timestamp columns.
+        -- Add missing columns safely before creating indexes or querying the archive.
+        ALTER TABLE approved_analyses
+          ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
         CREATE INDEX IF NOT EXISTS idx_approved_analyses_created ON approved_analyses (created_at DESC);
         CREATE TABLE IF NOT EXISTS approved_coupons (
           id BIGSERIAL PRIMARY KEY, draft_id TEXT UNIQUE NOT NULL, match_date TEXT,
           picks JSONB NOT NULL, combined_odd NUMERIC, status TEXT NOT NULL DEFAULT 'PENDING',
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
-
         -- Upgrade older archive tables in place; preserve existing rows.
-        ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS match_date TEXT;
-        ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
-        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS match_date TEXT;
-        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS picks JSONB;
-        UPDATE approved_coupons SET picks = '[]'::jsonb WHERE picks IS NULL;
-        ALTER TABLE approved_coupons ALTER COLUMN picks SET DEFAULT '[]'::jsonb;
-        ALTER TABLE approved_coupons ALTER COLUMN picks SET NOT NULL;
-        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
-        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+        ALTER TABLE approved_coupons
+          ADD COLUMN IF NOT EXISTS draft_id TEXT;
+        ALTER TABLE approved_coupons
+          ADD COLUMN IF NOT EXISTS match_date TEXT;
+        ALTER TABLE approved_coupons
+          ADD COLUMN IF NOT EXISTS picks JSONB;
+        ALTER TABLE approved_coupons
+          ADD COLUMN IF NOT EXISTS combined_odd NUMERIC;
+        ALTER TABLE approved_coupons
+          ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'PENDING';
+        ALTER TABLE approved_coupons
+          ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+        ALTER TABLE approved_coupons
+          ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
       `);
       await importHistoricalCsvOnce();
