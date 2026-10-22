@@ -186,32 +186,39 @@ async function initDatabase() {
           picks JSONB NOT NULL, combined_odd NUMERIC, status TEXT NOT NULL DEFAULT 'PENDING',
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
-
-        -- Idempotent migrations: CREATE TABLE IF NOT EXISTS does not change older tables.
-        ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS fixture_id BIGINT;
-        ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS match_date TEXT;
-        ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS home_team TEXT;
-        ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS away_team TEXT;
-        ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS analysis JSONB;
-        ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
-
-        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS draft_id TEXT;
-        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS match_date TEXT;
-        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS picks JSONB;
-        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS combined_odd NUMERIC;
-        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'PENDING';
-        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
-        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
-
-        UPDATE approved_analyses SET created_at = NOW() WHERE created_at IS NULL;
-        UPDATE approved_coupons SET status = 'PENDING' WHERE status IS NULL;
-        UPDATE approved_coupons SET created_at = NOW() WHERE created_at IS NULL;
-        UPDATE approved_coupons SET updated_at = created_at WHERE updated_at IS NULL;
-
-        CREATE INDEX IF NOT EXISTS idx_approved_analyses_created ON approved_analyses (created_at DESC);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_approved_coupons_draft_id ON approved_coupons (draft_id);
-
       `);
+      // Apply archive migrations separately. Existing production tables may predate
+      // these fields; every change is additive and preserves existing rows.
+      const archiveMigrations = [
+        "ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS fixture_id BIGINT",
+        "ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS match_date TEXT",
+        "ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS home_team TEXT",
+        "ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS away_team TEXT",
+        "ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS league TEXT",
+        "ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS kickoff TEXT",
+        "ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS analysis JSONB",
+        "ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()",
+        "ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS draft_id TEXT",
+        "ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS match_date TEXT",
+        "ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS picks JSONB",
+        "ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS combined_odd NUMERIC",
+        "ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'PENDING'",
+        "ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()",
+        "ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()"
+      ];
+      for (const migration of archiveMigrations) await pool.query(migration);
+      await pool.query("UPDATE approved_analyses SET created_at = NOW() WHERE created_at IS NULL");
+      await pool.query("UPDATE approved_coupons SET status = 'PENDING' WHERE status IS NULL");
+      await pool.query("UPDATE approved_coupons SET created_at = NOW() WHERE created_at IS NULL");
+      await pool.query("UPDATE approved_coupons SET updated_at = created_at WHERE updated_at IS NULL");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_approved_analyses_created ON approved_analyses (created_at DESC)");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_approved_analyses_date ON approved_analyses (match_date)");
+      try {
+        await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_approved_coupons_draft_id ON approved_coupons (draft_id) WHERE draft_id IS NOT NULL");
+      } catch (indexError) {
+        // Do not block the whole app if legacy rows contain duplicate draft IDs.
+        console.error("Coupon archive draft_id index warning:", indexError.message);
+      }
       await importHistoricalCsvOnce();
       return true;
     })().catch(error => { dbReady = null; console.error("Database initialization error:", error.message); throw error; });
@@ -1481,17 +1488,17 @@ app.post("/api/coupon/approve", express.json(), async (req, res) => {
   const draft = dailyCouponDrafts.get(draftId);
   if (!draft) return res.status(404).json({ error: "Kupon taslağı bulunamadı veya sunucu yeniden başladı. Lütfen yeniden oluştur." });
   if (!Array.isArray(draft.picks) || draft.picks.length < 2 || draft.picks.length > 3) return res.status(422).json({ error: "Onay için 2 veya 3 uygun seçim bulunmalı. Veri yetersizse kupon zorlanmaz." });
-  draft.status = "APPROVED";
-  draft.approvedAt = new Date().toISOString();
   try {
     await initDatabase();
     const combinedOdd = draft.picks.reduce((v, p) => v * Number(p.odd || 1), 1);
     await pool.query(
       `INSERT INTO approved_coupons (draft_id, match_date, picks, combined_odd, status)
-       VALUES ($1,$2,$3::jsonb,$4,'PENDING')
-       ON CONFLICT (draft_id) DO NOTHING`,
+       SELECT $1,$2,$3::jsonb,$4,'PENDING'
+       WHERE NOT EXISTS (SELECT 1 FROM approved_coupons WHERE draft_id=$1)`,
       [String(draft.draftId || draftId), String(draft.date || ""), JSON.stringify(draft.picks), combinedOdd]
     );
+    draft.status = "APPROVED";
+    draft.approvedAt = new Date().toISOString();
     res.json({ ...draft, approved: true, message: "Kupon kalıcı olarak kaydedildi. Otomatik dış paylaşım yapılmadı." });
   } catch (error) {
     console.error("Coupon save failed:", error.message);
@@ -1515,6 +1522,63 @@ app.post("/api/analyses/approve", async (req, res) => {
     );
     res.json({ ok: true, record: r.rows[0] });
   } catch (e) { console.error("Analysis archive save failed:", e.message); res.status(500).json({ error: "Analiz arşive kaydedilemedi." }); }
+});
+
+// Frontend-compatible daily analysis archive routes.
+app.post("/api/analysis/daily", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "DATABASE_URL ayarlanmamış." });
+  const body = req.body || {};
+  const fixtureId = Number(body.fixtureId);
+  if (!Number.isFinite(fixtureId) || fixtureId <= 0 || !body.home || !body.away || !body.analysis || typeof body.analysis !== "object") {
+    return res.status(400).json({ error: "Analiz kaydı için maç ve analiz bilgileri gerekli." });
+  }
+  try {
+    await initDatabase();
+    const result = await pool.query(
+      `INSERT INTO approved_analyses (fixture_id, match_date, home_team, away_team, league, kickoff, analysis)
+       VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING id, created_at`,
+      [fixtureId, String(body.date || ""), String(body.home), String(body.away), String(body.league || ""), body.kickoff ? String(body.kickoff) : null, JSON.stringify(body.analysis)]
+    );
+    res.json({ ok: true, record: result.rows[0] });
+  } catch (error) {
+    console.error("Daily analysis archive save failed:", error.message);
+    res.status(500).json({ error: "Analiz arşive kaydedilemedi." });
+  }
+});
+
+app.get("/api/analysis/daily", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "DATABASE_URL ayarlanmamış." });
+  const date = String(req.query.date || "").slice(0, 10);
+  try {
+    await initDatabase();
+    const result = await pool.query(
+      `SELECT id, fixture_id AS "fixtureId", match_date AS date, home_team AS home, away_team AS away,
+              league, kickoff, analysis, created_at AS "updatedAt"
+       FROM approved_analyses WHERE ($1 = '' OR match_date = $1) ORDER BY created_at DESC LIMIT 500`, [date]
+    );
+    res.json({ ok: true, analyses: result.rows });
+  } catch (error) {
+    console.error("Daily analysis archive load failed:", error.message);
+    res.status(500).json({ error: "Günün analizleri yüklenemedi." });
+  }
+});
+
+// Frontend-compatible coupon archive route. It reads only user-approved coupons.
+app.get("/api/coupon/archive", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "DATABASE_URL ayarlanmamış." });
+  const date = String(req.query.date || "").slice(0, 10);
+  try {
+    await initDatabase();
+    const result = await pool.query(
+      `SELECT id, draft_id AS "draftId", match_date AS date, picks, combined_odd AS "combinedOdd",
+              status, created_at AS "approvedAt", updated_at AS "updatedAt"
+       FROM approved_coupons WHERE ($1 = '' OR match_date = $1) ORDER BY created_at DESC LIMIT 500`, [date]
+    );
+    res.json({ ok: true, coupons: result.rows });
+  } catch (error) {
+    console.error("Coupon archive load failed:", error.message);
+    res.status(500).json({ error: "Kupon arşivi yüklenemedi." });
+  }
 });
 
 app.get("/api/archives", async (req, res) => {
