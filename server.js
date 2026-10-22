@@ -1260,10 +1260,11 @@ app.get("/api/coupon/daily", async (req, res) => {
     if (!fixtures.length) return res.json({ date, draftId: null, picks: [], inspected: [], inspectedCount: 0, candidateFixtureCount: 0, durationMs: Date.now()-requestStartedAt, message: "Bu tarihte başlamamış maç bulunamadı.", source: "API-Football + historical_matches" });
 
     const historyStartedAt = Date.now();
-    const historyQuery = await pool.query(`SELECT ft_home_goals, ft_away_goals, b365_home, b365_draw, b365_away, b365_over25, b365_under25
+    const historyQuery = await pool.query(`SELECT match_date, league_code, home_team, away_team,
+      ft_home_goals, ft_away_goals, b365_home, b365_draw, b365_away, b365_over25, b365_under25
       FROM historical_matches WHERE ft_home_goals IS NOT NULL AND ft_away_goals IS NOT NULL
       AND (b365_home IS NOT NULL OR b365_draw IS NOT NULL OR b365_away IS NOT NULL OR b365_over25 IS NOT NULL OR b365_under25 IS NOT NULL)
-      ORDER BY id DESC LIMIT 10000`);
+      ORDER BY match_date DESC NULLS LAST, id DESC LIMIT 10000`);
     const historyRows = historyQuery.rows;
     console.log(`[COUPON_STAGE] history_query rows=${historyRows.length} ${Date.now() - historyStartedAt}ms`);
     const pct = (n,d) => d ? Number((100*n/d).toFixed(1)) : null;
@@ -1335,13 +1336,9 @@ app.get("/api/coupon/daily", async (req, res) => {
           Number(m.odd) >= 1.25 && Number(m.odd) <= 2.10 &&
           Number.isFinite(Number(m.odd)) && Number(m.odd) > 1
         );
-        // Prefer Bet365 when available. If it is absent, choose the best real
-        // price among the bookmakers returned by API-Football, not whichever
-        // bookmaker happens to appear first in the provider response.
-        // Never synthesize a quote; keep the selected bookmaker attached to the pick.
-        const bet365 = matches.find(m => /bet\s*365|bet365/i.test(String(m.bookmaker || "")));
-        if (bet365) return bet365;
-        return matches.sort((a, b) => Number(b.odd) - Number(a.odd))[0] || null;
+        // Prefer Bet365 when its quote exists; otherwise use a real bookmaker
+        // returned for this fixture by API-Football. Never synthesize a quote.
+        return matches.find(m => /bet\s*365|bet365/i.test(String(m.bookmaker || ""))) || matches[0] || null;
       };
       const available = [
         { label: "MS 2.5 ÜST", field: "b365_over25", market: marketPick(/over.*2\.?\s*5|2\.?\s*5.*over|goal line fixed.*2\.?\s*5|goal line.*2\.?\s*5/, /over|ust/) },
@@ -1354,45 +1351,65 @@ app.get("/api/coupon/daily", async (req, res) => {
         const odd = Number(item.market.odd);
         const field = item.field;
         if (field) {
-          const ranked = historyRows.map(r => ({ r, d: r[field] != null && Number(r[field]) > 1 ? Math.abs(odd - Number(r[field])) / Math.max(.2, odd * .12) : Infinity }))
-            .filter(x => Number.isFinite(x.d)).sort((a,b) => a.d-b.d);
-          let sample = ranked.filter(x => x.d <= 2.5).slice(0,100).map(x=>x.r);
-          if (sample.length < 10) sample = ranked.slice(0,100).map(x=>x.r);
-          if (sample.length < 20) {
+          // Compare historical B365 over/under odds as a pair when both current
+          // sides are available. If one side is missing, fall back to the target
+          // side only. These are historical analogues, not a claim that the
+          // current bookmaker is Bet365.
+          const currentOver = available.find(x => x.label === "MS 2.5 ÜST")?.market;
+          const currentUnder = available.find(x => x.label === "MS 2.5 ALT")?.market;
+          const hasPair = Number(currentOver?.odd) > 1 && Number(currentUnder?.odd) > 1;
+          const ranked = historyRows.map(r => {
+            const over = Number(r.b365_over25), under = Number(r.b365_under25);
+            if (hasPair && over > 1 && under > 1) {
+              const dOver = Math.abs(Number(currentOver.odd) - over) / Math.max(.2, Number(currentOver.odd) * .12);
+              const dUnder = Math.abs(Number(currentUnder.odd) - under) / Math.max(.2, Number(currentUnder.odd) * .12);
+              return { r, d: dOver + dUnder };
+            }
+            const historicalOdd = Number(r[field]);
+            return { r, d: historicalOdd > 1 ? Math.abs(odd - historicalOdd) / Math.max(.2, odd * .12) : Infinity };
+          }).filter(x => Number.isFinite(x.d)).sort((a,b) => a.d-b.d);
+          const sample = ranked.slice(0, 100).map(x => x.r);
+          if (sample.length < 50) {
             couponDiag.insufficientHistory++;
-            console.log(`[COUPON_FILTER] fixture=${fixture.id} market="${item.label}" reason=insufficient_history sample=${sample.length}`);
+            console.log(`[COUPON_FILTER] fixture=${fixture.id} market="${item.label}" reason=insufficient_history sample=${sample.length} required=50`);
             continue;
           }
           const wins = sample.filter(r => item.label === "MS 2.5 ÜST" ? Number(r.ft_home_goals)+Number(r.ft_away_goals)>=3 : Number(r.ft_home_goals)+Number(r.ft_away_goals)<=2).length;
           item.probability = pct(wins,sample.length); item.sampleSize = sample.length;
+          item.probabilityMethod = hasPair ? "nearest_historical_over_under_odds_pair" : "nearest_historical_side_odds";
         } else {
-          // Historical table has no dedicated BTTS odds columns. Never compare
-          // BTTS odds with Over/Under 2.5 odds; use observed completed-match outcomes.
-          const sample = historyRows
-            .filter(r => r.ft_home_goals != null && r.ft_away_goals != null)
-            .slice(0, 100);
-          if (sample.length < 20) {
+          // Estimate BTTS from the two teams' own completed historical matches,
+          // not an unrelated slice of the database and never from O/U odds.
+          const normalizeTeam = v => String(v || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+          const homeName = normalizeTeam(fixture.home), awayName = normalizeTeam(fixture.away);
+          const homeMatches = historyRows.filter(r => normalizeTeam(r.home_team) === homeName || normalizeTeam(r.away_team) === homeName);
+          const awayMatches = historyRows.filter(r => normalizeTeam(r.home_team) === awayName || normalizeTeam(r.away_team) === awayName);
+          const bttsRate = rows => pct(rows.filter(r => Number(r.ft_home_goals) > 0 && Number(r.ft_away_goals) > 0).length, rows.length);
+          if (homeMatches.length < 5 || awayMatches.length < 5 || homeMatches.length + awayMatches.length < 20) {
             couponDiag.insufficientHistory++;
-            console.log(`[COUPON_FILTER] fixture=${fixture.id} market="${item.label}" reason=insufficient_history sample=${sample.length}`);
+            console.log(`[COUPON_FILTER] fixture=${fixture.id} market="${item.label}" reason=insufficient_team_history homeSample=${homeMatches.length} awaySample=${awayMatches.length}`);
             continue;
           }
-          item.probability = pct(sample.filter(item.result).length, sample.length);
-          item.sampleSize = sample.length;
-          console.log(`[COUPON_HISTORY] fixture=${fixture.id} market="${item.label}" method=recent_completed_matches sample=${sample.length} probability=${item.probability}`);
+          item.probability = Number(((bttsRate(homeMatches) + bttsRate(awayMatches)) / 2).toFixed(1));
+          item.sampleSize = homeMatches.length + awayMatches.length;
+          item.probabilityMethod = "average_team_btts_frequency";
+          console.log(`[COUPON_HISTORY] fixture=${fixture.id} market="${item.label}" method=${item.probabilityMethod} homeSample=${homeMatches.length} awaySample=${awayMatches.length} probability=${item.probability}`);
         }
         const implied = 100 / odd;
         const edge = Number((item.probability - implied).toFixed(1));
-        // Cautious gates: >=62% historical frequency, >=20 matches, and positive value edge.
-        if (item.probability >= 62 && edge >= 2) {
+        // Value-based gate: require at least a 2 percentage-point estimated edge.
+        // Sample-size requirements above provide the minimum evidence; no arbitrary
+        // absolute probability floor is used. This can still correctly yield zero picks.
+        const minEdge = 2;
+        if (edge >= minEdge) {
           couponDiag.acceptedCandidates++;
           const bookmakerSource = String(item.market.bookmaker || "Bilinmeyen sağlayıcı");
-          picks.push({ fixtureId: fixture.id, home: fixture.home, away: fixture.away, league: fixture.league, kickoff: fixture.fixtureDate, market: item.label, odd, historicalProbability: item.probability, impliedProbability: Number(implied.toFixed(1)), edge, sampleSize: item.sampleSize, bookmaker: bookmakerSource, source: `${bookmakerSource} · API-Football + historical_matches` });
+          picks.push({ fixtureId: fixture.id, home: fixture.home, away: fixture.away, league: fixture.league, kickoff: fixture.fixtureDate, market: item.label, odd, historicalProbability: item.probability, impliedProbability: Number(implied.toFixed(1)), edge, sampleSize: item.sampleSize, probabilityMethod: item.probabilityMethod || "historical_frequency", bookmaker: bookmakerSource, source: `${bookmakerSource} · API-Football + historical_matches` });
         } else {
           couponDiag.probabilityOrEdgeRejected++;
           const rejectionReasons = [];
-          if (item.probability < 62) rejectionReasons.push("probability_below_62");
-          if (edge < 2) rejectionReasons.push("edge_below_2");
-          console.log(`[COUPON_FILTER] fixture=${fixture.id} market="${item.label}" reason=${rejectionReasons.join("+") || "threshold"} probability=${item.probability} edge=${edge} sample=${item.sampleSize} odd=${odd} bookmaker=${String(item.market.bookmaker || "unknown")}`);
+          if (edge < minEdge) rejectionReasons.push("edge_below_2");
+          console.log(`[COUPON_FILTER] fixture=${fixture.id} market="${item.label}" reason=${rejectionReasons.join("+") || "threshold"} probability=${item.probability} edge=${edge} sample=${item.sampleSize} method=${item.probabilityMethod || "unknown"} odd=${odd} bookmaker=${String(item.market.bookmaker || "unknown")}`);
         }
       }
       inspected.push({
