@@ -192,6 +192,10 @@ async function initDatabase() {
         ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS match_date TEXT;
         ALTER TABLE approved_analyses ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
         ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS match_date TEXT;
+        ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS picks JSONB;
+        UPDATE approved_coupons SET picks = '[]'::jsonb WHERE picks IS NULL;
+        ALTER TABLE approved_coupons ALTER COLUMN picks SET DEFAULT '[]'::jsonb;
+        ALTER TABLE approved_coupons ALTER COLUMN picks SET NOT NULL;
         ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
         ALTER TABLE approved_coupons ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 
