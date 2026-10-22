@@ -562,34 +562,53 @@ async function getOdds(fixtureId, mode) {
     if (pool && markets.length) {
       try {
         await initDatabase();
-        const client = await pool.connect();
+        // Save every market in one PostgreSQL statement instead of one INSERT per market.
+        // The old per-market loop could make a single analysis wait for dozens/hundreds of round trips.
+        const snapshotRows = markets.map(market => ({
+          bookmaker: market.bookmaker,
+          market_name: market.market,
+          selection: market.selection,
+          odd: market.odd,
+          raw: market
+        }));
+        await pool.query(`INSERT INTO odds_snapshots
+          (fixture_id, mode, bookmaker, market_name, selection, odd, raw)
+          SELECT $1, $2, x.bookmaker, x.market_name, x.selection, x.odd, x.raw
+          FROM jsonb_to_recordset($3::jsonb) AS x(
+            bookmaker text, market_name text, selection text, odd numeric, raw jsonb
+          )`, [fixtureId, mode, JSON.stringify(snapshotRows)]);
+
+        // Fetch the previous value for all markets in one query, not one query per market.
         try {
-          await client.query("BEGIN");
+          const previous = await pool.query(`SELECT DISTINCT ON (bookmaker, market_name, selection)
+              bookmaker, market_name, selection, odd, captured_at
+            FROM odds_snapshots
+            WHERE fixture_id=$1 AND mode=$2 AND captured_at < $3::timestamptz
+            ORDER BY bookmaker, market_name, selection, captured_at DESC`,
+            [fixtureId, mode, fetchedAt]);
+          const previousByKey = new Map(previous.rows.map(row => [
+            `${row.bookmaker}\u0000${row.market_name}\u0000${row.selection}`, row
+          ]));
           for (const market of markets) {
-            await client.query(`INSERT INTO odds_snapshots
-              (fixture_id, mode, bookmaker, market_name, selection, odd, raw)
-              VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`, [
-              fixtureId, mode, market.bookmaker, market.market, market.selection, market.odd, JSON.stringify(market)
-            ]);
-          }
-          await client.query("COMMIT");
-        } catch (error) { await client.query("ROLLBACK"); throw error; }
-        finally { client.release(); }
-        for (const market of markets) {
-          try {
-            const prev = await pool.query(`SELECT odd, captured_at FROM odds_snapshots
-              WHERE fixture_id=$1 AND mode=$2 AND bookmaker=$3 AND market_name=$4 AND selection=$5
-                AND captured_at < $6::timestamptz ORDER BY captured_at DESC LIMIT 1`,
-              [fixtureId, mode, market.bookmaker, market.market, market.selection, fetchedAt]);
-            if (prev.rows.length) {
-              market.previousOdd = Number(prev.rows[0].odd);
+            const prior = previousByKey.get(`${market.bookmaker}\u0000${market.market}\u0000${market.selection}`);
+            if (prior) {
+              market.previousOdd = Number(prior.odd);
               market.change = Number((market.odd - market.previousOdd).toFixed(3));
               market.direction = market.change < 0 ? "DÜŞTÜ" : market.change > 0 ? "YÜKSELDİ" : "SABİT";
-              market.previousCapturedAt = prev.rows[0].captured_at;
-            } else { market.previousOdd = null; market.change = null; market.direction = "İLK KAYIT"; }
-          } catch (error) { console.error("Odds movement query error:", error.message); }
+              market.previousCapturedAt = prior.captured_at;
+            } else {
+              market.previousOdd = null;
+              market.change = null;
+              market.direction = "İLK KAYIT";
+            }
+          }
+        } catch (error) {
+          console.error("Odds movement batch query error:", error.message);
         }
-      } catch (error) { console.error("Odds snapshot save error:", error.message); data.saveWarning = "Oran geldi ancak geçmiş kaydı yapılamadı."; }
+      } catch (error) {
+        console.error("Odds snapshot batch save error:", error.message);
+        data.saveWarning = "Oran geldi ancak geçmiş kaydı yapılamadı.";
+      }
     }
     oddsCache.set(key, { at: now, data });
     return data;
