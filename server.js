@@ -1176,40 +1176,50 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       reasons.push(`Ana tercih tarihsel olasılık, gizli güncel oran ve skor senaryosu uyumuyla seçildi; değer farkı +${selected.edge} puan, sık görülen skorlarla uyum ${selected.scoreCoverage}%.`);
       if(selected.kind==="home-goals" && selected.resilienceBonus) reasons.push("Ev 1.5 Üst, ev sahibinin 2+ gol attığı ve rakibin de gol bulabildiği skor senaryolarında KG Yok'a göre daha dayanıklı bulundu.");
     } else {
-      // Scoreline-led fallback requested for WinScope: when the leading historical
-      // score is 2-0 (or another home 2+ goal score), EV 1.5 ÜST is more resilient
-      // than KG YOK if the opponent scores a surprise goal. Keep the missing-value
-      // warning explicit; do not claim that odds value was verified.
-      const modal = Array.isArray(history.fullTimeScoreDistribution)
-        ? history.fullTimeScoreDistribution[0] : null;
-      const modalBits = String(modal?.score || "").split("-").map(Number);
-      const homeScoreSupports15 = modalBits.length === 2 && modalBits.every(Number.isFinite)
-        && modalBits[0] >= 2 && Number(modal?.percent) >= 10;
-      const home15HistorySupports = Number(history.home15Percent) >= 45;
-      if (history.sampleSize >= 20 && homeScoreSupports15 && home15HistorySupports) {
-        selected = {
-          pick: "EV 1.5 ÜST", pct: Number(history.home15Percent), kind: "home-goals",
-          odd: Number(home15?.odd) || null, edge: null,
-          scoreCoverage: scoreCoverageFor("home-goals").coverage,
-          resilienceBonus: 0, modalScoreBonus: 0, decisionScore: 0,
-          fallback: true
-        };
-        mainPick = "EV 1.5 ÜST";
-        alternative = "Değer avantajı doğrulanmadı";
-        confidence = `Skor senaryosu uyumlu · ${history.sampleSize} maç · güncel oran/değer avantajı doğrulanmadı`;
-        reasons.push(`En sık skor ${modal.score} (${modal.percent}%) ve tarihsel Ev 1.5 Üst gerçekleşmesi %${history.home15Percent}; KG Yok yerine sürpriz rakip golüne daha dayanıklı Ev 1.5 Üst gösterildi. Güncel değer avantajı doğrulanmış değildir.`);
-      } else {
-        // Do not force a pick when neither market-value nor scoreline support is adequate.
-        mainPick = history.sampleSize >= 20
-          ? "TUTARSIZ SİNYAL · net tercih yok"
-          : "Yeterli tarihsel örneklem yok";
-        alternative = "Değer avantajı doğrulanmadı";
-        confidence = history.sampleSize >= 20
-          ? `${history.matchSpecificSample ? `${history.sampleSize} oran-benzer maç` : `${history.sampleSize} maçlık genel referans; sıkı eşleşme ${history.matchSampleSize || 0} maç`} incelendi; yeterli güncel oran/değer avantajı bulunamadı`
-          : `Yeterli tarihsel örneklem yok (${history.sampleSize} maç)`;
-        reasons.push("Güncel oran/değer avantajı doğrulanamadı ve skor senaryosu da güvenilir bir yedek tercih için yeterli değildi; sistem zorla seçim üretmedi.");
-      }
+      // Do not force a market pick when a current quote, sample, or positive value edge is missing.
+      mainPick = history.sampleSize >= 20
+        ? "TUTARSIZ SİNYAL · net tercih yok"
+        : "Yeterli tarihsel örneklem yok";
+      alternative = "Değer avantajı doğrulanmadı";
+      confidence = history.sampleSize >= 20
+        ? `${history.matchSpecificSample ? `${history.sampleSize} oran-benzer maç` : `${history.sampleSize} maçlık genel referans; sıkı eşleşme ${history.matchSampleSize || 0} maç`} incelendi; yeterli güncel oran/değer avantajı bulunamadı`
+        : `Yeterli tarihsel örneklem yok (${history.sampleSize} maç)`;
+      reasons.push("Güvenilir bir ana tercih için güncel gerçek oran ve en az +3 puanlık tarihsel değer farkı doğrulanamadı; sistem zorla seçim üretmedi.");
     }
+    // SCORE-ALIGNED TEAM TOTAL RULE:
+    // If the leading observed full-time score has 2+ home goals (e.g. 2-0, 2-1)
+    // and the historical home-team 1.5+ rate supports it, prefer EV 1.5 ÜST over
+    // KG YOK. A single late away goal does not invalidate the home-team total.
+    // When no real current home-team-total quote is available, do not invent one:
+    // retain the score-aligned historical pick but explicitly disclose the missing
+    // odds/value verification in the confidence/reasons.
+    const modalForAlignment = Array.isArray(history.fullTimeScoreDistribution)
+      ? history.fullTimeScoreDistribution[0] : null;
+    const modalAlignmentBits = String(modalForAlignment?.score || "").split("-").map(Number);
+    const supportsHome15FromScore = history.sampleSize >= 20
+      && modalAlignmentBits.length === 2
+      && modalAlignmentBits.every(Number.isFinite)
+      && modalAlignmentBits[0] >= 2
+      && Number(modalForAlignment?.percent) >= 10
+      && Number(history.home15Percent) >= 45;
+    if (supportsHome15FromScore && (!selected || selected.kind === "btts-no")) {
+      const existingHome15 = candidates.find(c => c.kind === "home-goals");
+      selected = existingHome15 || {
+        pick: "EV 1.5 ÜST", pct: Number(history.home15Percent), kind: "home-goals",
+        odd: null, edge: null, scoreCoverage: scoreCoverageFor("home-goals").coverage,
+        resilienceBonus: 0, modalScoreBonus: 0, decisionScore: 0, oddsUnverified: true
+      };
+      mainPick = "EV 1.5 ÜST";
+      if (selected.oddsUnverified) {
+        confidence = `${history.matchSpecificSample ? "Maça özel örneklem" : "100 maçlık genel referans"} · ${history.sampleSize} maç · skor senaryosu EV 1.5 ÜST'ü destekliyor; güncel market oranı/değer doğrulanamadı`;
+        reasons.push("Skor senaryosu en az 2 ev sahibi golünü desteklediği ve tarihsel Ev 1.5 Üst oranı yeterli olduğu için KG Yok yerine Ev 1.5 Üst öne alındı. Güncel gerçek market oranı bulunmadığından değer avantajı doğrulanmış sayılmaz.");
+      } else {
+        confidence = `${history.matchSpecificSample ? "Maça özel örneklem" : "100 maçlık genel referans"} · ${history.sampleSize} maç · skor senaryosu EV 1.5 ÜST önceliği`;
+        reasons.push("Skor senaryosu 2-0 / 2-1 benzeri ev sahibinin en az 2 gol attığı sonuçları desteklediğinden KG Yok yerine Ev 1.5 Üst önceliklendirildi.");
+      }
+      alternative = candidates.find(c => c.kind !== "home-goals")?.pick || "İkinci uygun tercih yok";
+    }
+
     // Score predictions must describe a possible match timeline, not independent modal scores.
     const parseScore = score => {
       const bits = String(score || "").split("-").map(Number);
