@@ -1079,18 +1079,18 @@ app.get("/api/match/:id/analyze", async (req, res) => {
           {key:"MS 2.5 ÜST",now:over25?.odd,field:"b365_over25"},{key:"MS 2.5 ALT",now:under25?.odd,field:"b365_under25"}
         ].filter(d => Number(d.now)>1);
         const ranked = rows.map(r => { const ds=dims.filter(d=>r[d.field]!=null&&Number(r[d.field])>1).map(d=>Math.abs(Number(d.now)-Number(r[d.field]))/Math.max(.2,Number(d.now)*.12)); return {r,n:ds.length,d:ds.length?ds.reduce((a,b)=>a+b,0)/ds.length:Infinity}; }).filter(x=>x.n>=Math.min(2,dims.length)&&Number.isFinite(x.d)).sort((a,b)=>a.d-b.d);
-        // Use one consistent sample for BOTH the displayed percentages and the
-        // decision/score engine: the 100 closest historical matches ranked by
-        // available current odds. Keep the stricter threshold as a quality signal,
-        // not as a gate that makes the UI show percentages while the engine ignores them.
+        // Prefer genuinely comparable odds. If fewer than 20 pass the strict
+        // threshold, display a transparent 100-match reference sample instead of
+        // presenting a tiny sample (e.g. 1 draw = 100%) as a reliable distribution.
+        // Reference samples are descriptive only and MUST NOT drive picks or scores.
         const near=ranked.filter(x=>x.d<=2.5).slice(0,100);
-        const nearest=ranked.slice(0,100);
-        let sample=(dims.length ? nearest.map(x=>x.r) : rows.slice(0,100))
-          .filter(r=>r.ft_home_goals!=null&&r.ft_away_goals!=null).slice(0,100);
-        const matchSpecificSample=dims.length>0 && sample.length>=20;
-        const sampleType=matchSpecificSample
-          ? "100 maçlık en yakın oran eşleşmeli örneklem"
-          : "100 maçlık genel referans örneklemi";
+        const matchSpecificSample=near.length>=20;
+        let sample=near.map(x=>x.r);
+        let sampleType=matchSpecificSample ? "Maça özel oran benzerliği" : "100 maçlık genel referans örneklemi";
+        if (!matchSpecificSample) {
+          const fallback = (ranked.length ? ranked.slice(0,100).map(x=>x.r) : rows.slice(0,100));
+          sample = fallback.filter(r=>r.ft_home_goals!=null&&r.ft_away_goals!=null).slice(0,100);
+        }
         const valid=sample.filter(r=>r.ft_home_goals!=null&&r.ft_away_goals!=null), n=valid.length;
         const pct=(count,total)=>total?Number((100*count/total).toFixed(1)):null;
         const overN=valid.filter(r=>Number(r.ft_home_goals)+Number(r.ft_away_goals)>=3).length;
@@ -1111,20 +1111,43 @@ app.get("/api/match/:id/analyze", async (req, res) => {
         // compatible observed scores even when the globally top five are incompatible.
         const scoreDistribution=(items,total)=>items.slice(0,20).map(([score,count])=>({score,count,percent:pct(count,total)}));
         const htftDistribution=scoreDistribution(htftFreq,htftRows.length).map(x=>({result:x.score,count:x.count,percent:x.percent}));
-        history={available:sample.length>0,scannedMatches:rows.length,sampleSize:sample.length,matchSampleSize:near.length,matchSpecificSample,sampleType,matchedMarkets:dims.map(d=>d.key),resultDistribution:Object.fromEntries(resFreq.map(([k,v])=>[k,{count:v,percent:pct(v,n)}])),over25Percent:pct(overN,n),under25Percent:pct(n-overN,n),bttsYesPercent:pct(kgN,n),bttsNoPercent:pct(n-kgN,n),home15Percent:pct(home15N,n),away15Percent:pct(away15N,n),htOver05Percent:pct(ht05N,htValid.length),htUnder05Percent:pct(htUnder05N,htValid.length),ht05OverPercent:pct(ht05N,htValid.length),ht05UnderPercent:pct(htUnder05N,htValid.length),halfTimeScoreDistribution:scoreDistribution(htFreq,htValid.length),fullTimeScoreDistribution:scoreDistribution(ftFreq,n),halfTimeFullTimeDistribution:htftDistribution,sixPlusPercent:pct(sixN,n),mostCommonHalfTimeScore:htFreq[0]?{score:htFreq[0][0],count:htFreq[0][1],percent:pct(htFreq[0][1],htValid.length)}:null,mostCommonFullTimeScore:ftFreq[0]?{score:ftFreq[0][0],count:ftFreq[0][1],percent:pct(ftFreq[0][1],n)}:null,alternativeFullTimeScore:ftFreq[1]?{score:ftFreq[1][0],count:ftFreq[1][1],percent:pct(ftFreq[1][1],n)}:null,mostCommonHalfTimeFullTime:htftFreq[0]?{result:htftFreq[0][0],count:htftFreq[0][1],percent:pct(htftFreq[0][1],htftRows.length)}:null,note:matchSpecificSample?`${sample.length} maç, mevcut oranlara yakınlığına göre sıralanarak kullanıldı; ${near.length} maç sıkı benzerlik eşiğini de geçti.`:!dims.length?`Güncel karşılaştırılabilir oran yok. Gösterilen ${sample.length} maç yalnızca genel referanstır; maça özel tercih üretilemez.`:`Mevcut oranlarla ${sample.length} tarihsel maç sıralandı; ancak sıkı benzerlik eşiğini yalnızca ${near.length} maç geçti. Yüzdeler en yakın örneklemi özetler; güven daha düşüktür.`};
-        if(history.sampleSize) reasons.push(`${rows.length} tarihsel maç tarandı; mevcut oranlarla sıralanabilen ${ranked.length} maçtan en yakın ${sample.length} maç kullanıldı; sıkı benzerlik eşiğini ${near.length} maç geçti (${sampleType}).`);
+        history={available:sample.length>0,scannedMatches:rows.length,sampleSize:sample.length,matchSampleSize:near.length,matchSpecificSample,sampleType,matchedMarkets:dims.map(d=>d.key),resultDistribution:Object.fromEntries(resFreq.map(([k,v])=>[k,{count:v,percent:pct(v,n)}])),over25Percent:pct(overN,n),under25Percent:pct(n-overN,n),bttsYesPercent:pct(kgN,n),bttsNoPercent:pct(n-kgN,n),home15Percent:pct(home15N,n),away15Percent:pct(away15N,n),htOver05Percent:pct(ht05N,htValid.length),htUnder05Percent:pct(htUnder05N,htValid.length),ht05OverPercent:pct(ht05N,htValid.length),ht05UnderPercent:pct(htUnder05N,htValid.length),halfTimeScoreDistribution:scoreDistribution(htFreq,htValid.length),fullTimeScoreDistribution:scoreDistribution(ftFreq,n),halfTimeFullTimeDistribution:htftDistribution,sixPlusPercent:pct(sixN,n),mostCommonHalfTimeScore:htFreq[0]?{score:htFreq[0][0],count:htFreq[0][1],percent:pct(htFreq[0][1],htValid.length)}:null,mostCommonFullTimeScore:ftFreq[0]?{score:ftFreq[0][0],count:ftFreq[0][1],percent:pct(ftFreq[0][1],n)}:null,alternativeFullTimeScore:ftFreq[1]?{score:ftFreq[1][0],count:ftFreq[1][1],percent:pct(ftFreq[1][1],n)}:null,mostCommonHalfTimeFullTime:htftFreq[0]?{result:htftFreq[0][0],count:htftFreq[0][1],percent:pct(htftFreq[0][1],htftRows.length)}:null,note:matchSpecificSample?`Oran benzerliği eşiğini geçen ${near.length} maç kullanıldı.`:!dims.length?`Güncel karşılaştırılabilir oran bulunamadı. Gösterilen ${sample.length} maç genel referanstır; maça özel tahmin üretmek için kullanılmaz.`:`Oran eşiğini yalnızca ${near.length} maç geçti. Yanıltıcı küçük örneklem yerine ${sample.length} maçlık genel referans gösteriliyor; bu dağılım maça özel tahmin değildir.`};
+        if(history.sampleSize) reasons.push(`${rows.length} tarihsel maç tarandı; oran eşiğini ${near.length} maç geçti; gösterilen örneklem ${sample.length} maç (${sampleType}).`);
       } catch(e) { history.note=`Tarihsel analiz yapılamadı: ${e.message}`; }
     } else history.note="DATABASE_URL yapılandırılmadığı için tarihsel analiz yapılamadı.";
     const p = v => Number.isFinite(Number(v)) ? Number(v) : null;
-    // Risk-first selection: only preferred goal/BTTS markets are candidates. A real
-    // current quote and a positive historical-vs-implied edge are required; no 1/X/2 picks.
+    // Market selection combines historical value with scoreline compatibility.
+    // Team-goals markets can survive a late opponent goal: e.g. 2-1 still wins
+    // EV 1.5 ÜST, while KG YOK loses. Odds stay internal and are never returned to UI.
     const candidates=[];
+    const scoreCoverageFor=(kind)=>{
+      const scores=Array.isArray(history.fullTimeScoreDistribution)?history.fullTimeScoreDistribution.slice(0,10):[];
+      let total=0, covered=0, homeTwoAndConcede=0;
+      for(const item of scores){
+        const bits=String(item.score||"").split("-").map(Number);
+        if(bits.length!==2 || !bits.every(Number.isFinite)) continue;
+        const [h,a]=bits, count=Number(item.count)||0;
+        total+=count;
+        const fits=kind==="home-goals"?h>=2:kind==="away-goals"?a>=2:kind==="btts-yes"?h>0&&a>0:kind==="btts-no"?(h===0||a===0):kind==="over25"?h+a>=3:kind==="under25"?h+a<=2:false;
+        if(fits) covered+=count;
+        if(kind==="home-goals" && h>=2 && a>=1) homeTwoAndConcede+=count;
+      }
+      return {coverage:total?Number((100*covered/total).toFixed(1)):0, homeTwoAndConcede:total?Number((100*homeTwoAndConcede/total).toFixed(1)):0};
+    };
     const addCandidate=(pick,pct,market,kind)=>{
       const odd=Number(market?.odd);
       if (history.matchSpecificSample && history.sampleSize>=20 && pct!=null && Number.isFinite(odd) && odd>1) {
         const implied=100/odd;
         const edge=Number((Number(pct)-implied).toFixed(1));
-        if (Number(pct)>=52 && edge>=3) candidates.push({pick,pct:Number(pct),kind,odd,edge});
+        const scoreFit=scoreCoverageFor(kind);
+        // EV 1.5 ÜST may qualify from 45% when the observed score profile supports
+        // two-plus home goals; other markets retain the stricter 52% threshold.
+        const probabilityFloor=kind==="home-goals" && scoreFit.coverage>=40 ? 45 : 52;
+        if (Number(pct)>=probabilityFloor && edge>=3) {
+          const resilienceBonus=kind==="home-goals" && scoreFit.homeTwoAndConcede>=15 ? 3 : 0;
+          const decisionScore=Number((edge+scoreFit.coverage*0.18+resilienceBonus).toFixed(2));
+          candidates.push({pick,pct:Number(pct),kind,odd,edge,scoreCoverage:scoreFit.coverage,resilienceBonus,decisionScore});
+        }
       }
     };
     addCandidate("EV 1.5 ÜST",history.home15Percent,home15,"home-goals");
@@ -1133,7 +1156,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     addCandidate("KG YOK",history.bttsNoPercent,kgNo,"btts-no");
     addCandidate("MS 2.5 ÜST",history.over25Percent,over25,"over25");
     addCandidate("MS 2.5 ALT",history.under25Percent,under25,"under25");
-    candidates.sort((a,b)=>b.edge-a.edge || b.pct-a.pct);
+    candidates.sort((a,b)=>b.decisionScore-a.decisionScore || b.edge-a.edge || b.pct-a.pct);
     let selected=null;
     if(candidates.length){
       selected=candidates[0];
@@ -1141,7 +1164,8 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       confidence=`Tarihsel örneklem ${history.sampleSize} maç · değer farkı +${selected.edge} puan`;
       const alt=candidates.find(c=>c.pick!==selected.pick && c.kind!==selected.kind) || candidates.find(c=>c.pick!==selected.pick);
       alternative=alt ? alt.pick : "İkinci uygun tercih yok";
-      reasons.push(`Ana tercih gerçek oranla karşılaştırıldı; tarihsel olasılık ile oran olasılığı arasındaki fark +${selected.edge} puan.`);
+      reasons.push(`Ana tercih tarihsel olasılık, gizli güncel oran ve skor senaryosu uyumuyla seçildi; değer farkı +${selected.edge} puan, sık görülen skorlarla uyum ${selected.scoreCoverage}%.`);
+      if(selected.kind==="home-goals" && selected.resilienceBonus) reasons.push("Ev 1.5 Üst, ev sahibinin 2+ gol attığı ve rakibin de gol bulabildiği skor senaryolarında KG Yok'a göre daha dayanıklı bulundu.");
     } else {
       // Do not force a market pick when a current quote, sample, or positive value edge is missing.
       mainPick = history.matchSpecificSample && history.sampleSize >= 20
@@ -1173,7 +1197,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     // historical sample. They do not depend on whether a betting market was selected.
     // Without a selected pick, show the most frequent observed score as a historical
     // scenario, not as a guaranteed prediction.
-    const allObservedScores=history.sampleSize>=20 && history.matchedMarkets?.length ? (history.fullTimeScoreDistribution||[]) : [];
+    const allObservedScores=history.matchSpecificSample && history.sampleSize>=20 ? (history.fullTimeScoreDistribution||[]) : [];
     const compatibleScores=selected
       ? allObservedScores.filter(x=>scoreFits(x.score,selected.kind))
       : allObservedScores;
