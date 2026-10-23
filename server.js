@@ -268,6 +268,7 @@ async function evaluateMatchAdvanced(fixtureId) {
           ht05Pct: Number((100 * ht05Count / total).toFixed(1)),
           ht05UnderPct: Number((100 * (total - ht05Count) / total).toFixed(1)),
           ht15Pct: Number((100 * ht15Count / total).toFixed(1)),
+          ht15UnderPct: Number((100 * (total - ht15Count) / total).toFixed(1)),
           home15Pct: Number((100 * home15Count / total).toFixed(1)),
           away15Pct: Number((100 * away15Count / total).toFixed(1)),
           ms1Pct: Number((100 * ranked.filter(r => r.ft_home_goals > r.ft_away_goals).length / total).toFixed(1)),
@@ -282,9 +283,10 @@ async function evaluateMatchAdvanced(fixtureId) {
   if (!historyData) {
     historyData = {
       total: 100, over25Pct: 57, under25Pct: 43, bttsPct: 57, bttsNoPct: 43,
-      ht05Pct: 72, ht05UnderPct: 28, ht15Pct: 45, home15Pct: 54, away15Pct: 42,
+      ht05Pct: 72, ht05UnderPct: 28, ht15Pct: 45, ht15UnderPct: 55, home15Pct: 54, away15Pct: 42,
       ms1Pct: 46, ms2Pct: 30, msXPct: 24,
-      ftScores: [["2-1", 20], ["1-1", 15]], htScores: [["0-0", 41], ["1-0", 25]]
+      ftScores: [["2-1", 22], ["1-1", 18], ["1-0", 15], ["2-0", 12], ["0-1", 10]],
+      htScores: [["0-0", 41], ["1-0", 25], ["0-1", 18], ["1-1", 16]]
     };
   }
 
@@ -365,9 +367,14 @@ app.get("/api/match/:id/analyze", async (req, res) => {
         bttsNoPercent: historyData.bttsNoPct,
         iy05OverPercent: isSecondHalf ? "-" : historyData.ht05Pct,
         iy05UnderPercent: isSecondHalf ? "-" : historyData.ht05UnderPct,
+        iy15OverPercent: isSecondHalf ? "-" : historyData.ht15Pct,
+        iy15UnderPercent: isSecondHalf ? "-" : historyData.ht15UnderPct,
         home15Percent: historyData.home15Pct,
         away15Percent: historyData.away15Pct,
         halfTimeScoreDistribution: historyData.htScores.map(([score, count]) => ({
+          score, percent: Number((100 * count / historyData.total).toFixed(1))
+        })),
+        fullTimeScoreDistribution: historyData.ftScores.map(([score, count]) => ({
           score, percent: Number((100 * count / historyData.total).toFixed(1))
         })),
         halfTimeFullTimeDistribution: [
@@ -383,14 +390,13 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       },
       iy05OverPercent: isSecondHalf ? "-" : historyData.ht05Pct,
       iy05UnderPercent: isSecondHalf ? "-" : historyData.ht05UnderPct,
+      iy15OverPercent: isSecondHalf ? "-" : historyData.ht15Pct,
       reasons: [`Analiz Sonucu: ${mainPickDisplay}`, "iddaa.com bülteni ve geçmiş veri matriksi doğrulandı."]
     });
   } catch (error) {
     res.status(502).json({ error: "Analiz üretilemedi.", detail: error.message });
   }
 });
-
-// === FRONTENDİN ÇAĞIRDIĞI TÜM ARŞİV VE KUPON ONAY / KAYIT ENDPOINTLERİNİN TAM EŞLEŞMESİ ===
 
 async function generateCouponLogic(dateStr) {
   try {
@@ -434,8 +440,7 @@ async function generateCouponLogic(dateStr) {
       date: dateStr,
       status: "PENDING_APPROVAL",
       picks: [
-        { fixtureId: 101, iddaaCode: "41021", home: "Galatasaray", away: "Beşiktaş", league: "Süper Lig", market: "EV 1.5 ÜST", odd: 1.65, historicalProbability: 68.0, sampleSize: 100, source: "Fallback" },
-        { fixtureId: 102, iddaaCode: "41022", home: "Real Madrid", away: "Barcelona", league: "La Liga", market: "KG VAR", odd: 1.72, historicalProbability: 65.0, sampleSize: 100, source: "Fallback" }
+        { fixtureId: 101, iddaaCode: "41021", home: "Galatasaray", away: "Beşiktaş", league: "Süper Lig", market: "EV 1.5 ÜST", odd: 1.65, historicalProbability: 68.0, sampleSize: 100, source: "Fallback" }
       ],
       inspected: [],
       note: "Fallback kupon"
@@ -443,7 +448,6 @@ async function generateCouponLogic(dateStr) {
   }
 }
 
-// 1. Günün Kuponu Taslağı Üretme
 app.get("/api/coupon/daily", async (req, res) => {
   const date = String(req.query.date || new Date().toISOString().split("T")[0]);
   const couponData = await generateCouponLogic(date);
@@ -457,7 +461,6 @@ app.post("/api/coupon/daily", async (req, res) => {
   res.json(couponData);
 });
 
-// 2. Kupon Onaylama (/api/coupon/approve)
 app.post("/api/coupon/approve", async (req, res) => {
   const { draftId } = req.body || {};
   let coupon = savedCoupons.get(draftId);
@@ -479,7 +482,6 @@ app.post("/api/coupon/approve", async (req, res) => {
   res.json(coupon);
 });
 
-// 3. Arşivler (/api/archives ve frontend'in aradığı diğer varyasyonlar)
 async function getAllArchives() {
   let analyses = Array.from(savedAnalyses.values());
   let coupons = Array.from(savedCoupons.values()).filter(c => c.status === "APPROVED" || c.approvedAt);
@@ -512,7 +514,6 @@ app.get("/api/analysis/daily", async (req, res) => {
   res.json({ success: true, analyses: data.analyses });
 });
 
-// 4. Analiz Onaylama ve Kaydetme (/api/analyses/approve)
 app.post("/api/analyses/approve", async (req, res) => {
   const data = req.body || {};
   const id = `analysis-${data.fixtureId || Date.now()}`;
@@ -538,7 +539,6 @@ app.post("/api/analyses/approve", async (req, res) => {
   res.json({ success: true, message: "Analiz başarıyla kaydedildi.", record });
 });
 
-// 5. Arşiv Kaydı Silme (/api/archives/:type/:id)
 app.delete("/api/archives/:type/:id", async (req, res) => {
   const { type, id } = req.params;
   if (type === 'analysis') {
@@ -588,8 +588,8 @@ app.get("/api/live", async (_req, res) => {
   }
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Full Harmonized", databaseConfigured: Boolean(pool) }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Perfect All in One", databaseConfigured: Boolean(pool) }));
 
 app.listen(PORT, () => {
-  console.log(`WinScope Full Harmonized running on port ${PORT}`);
+  console.log(`WinScope Perfect All in One running on port ${PORT}`);
 });
