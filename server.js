@@ -1083,7 +1083,11 @@ app.get("/api/match/:id/analyze", async (req, res) => {
         // threshold, display a transparent 100-match reference sample instead of
         // presenting a tiny sample (e.g. 1 draw = 100%) as a reliable distribution.
         // Reference samples are descriptive only and MUST NOT drive picks or scores.
-        const near=ranked.filter(x=>x.d<=2.5).slice(0,100);
+        // Tighten odds similarity: the old 2.5 threshold allowed broad, overlapping
+        // pools, making unrelated fixtures inherit almost identical score distributions.
+        // If the stricter pool is too small, generic reference data must not be treated
+        // as fixture-specific evidence.
+        const near=ranked.filter(x=>x.d<=1.0).slice(0,100);
         const matchSpecificSample=near.length>=20;
         let sample=near.map(x=>x.r);
         let sampleType=matchSpecificSample ? "Maça özel oran benzerliği" : "100 maçlık genel referans örneklemi";
@@ -1222,6 +1226,33 @@ app.get("/api/match/:id/analyze", async (req, res) => {
         reasons.push("Skor senaryosu 2-0 / 2-1 benzeri ev sahibinin en az 2 gol attığı sonuçları desteklediğinden KG Yok yerine Ev 1.5 Üst önceliklendirildi.");
       }
       alternative = candidates.find(c => c.kind !== "home-goals")?.pick || "İkinci uygun tercih yok";
+    }
+
+    // SCORE-ALIGNED AWAY TEAM TOTAL RULE:
+    // If the leading fixture-specific score has 2+ away goals (e.g. 0-2, 0-3, 1-2),
+    // DEP 1.5 ÜST should be considered ahead of KG YOK. A home goal does not cancel
+    // the away team's 1.5+ goal market. If no real quote exists, disclose that value
+    // was not verified instead of inventing odds.
+    const modalAwayBits = String(modalForAlignment?.score || "").split("-").map(Number);
+    const supportsAway15FromScore = history.matchSpecificSample && history.sampleSize >= 20
+      && modalAwayBits.length === 2
+      && modalAwayBits.every(Number.isFinite)
+      && modalAwayBits[1] >= 2
+      && Number(modalForAlignment?.percent) >= 10
+      && Number(history.away15Percent) >= 45;
+    if (supportsAway15FromScore && (!selected || selected.kind === "btts-no" || selected.kind === "btts-yes")) {
+      const existingAway15 = candidates.find(c => c.kind === "away-goals");
+      selected = existingAway15 || {
+        pick: "DEP 1.5 ÜST", pct: Number(history.away15Percent), kind: "away-goals",
+        odd: null, edge: null, scoreCoverage: scoreCoverageFor("away-goals").coverage,
+        resilienceBonus: 0, modalScoreBonus: 0, decisionScore: 0, oddsUnverified: true
+      };
+      mainPick = "DEP 1.5 ÜST";
+      confidence = `${history.sampleSize} maça özel oran-benzer maç · skor senaryosu DEP 1.5 ÜST'ü destekliyor${selected.oddsUnverified ? "; güncel market oranı/değer doğrulanamadı" : ""}`;
+      reasons.push(selected.oddsUnverified
+        ? "En sık görülen maça özel skor deplasmanın en az 2 golünü destekliyor. KG Yok yerine Dep 1.5 Üst senaryosu öne alındı; güncel gerçek market oranı bulunmadığından değer avantajı doğrulanmış sayılmaz."
+        : "En sık görülen maça özel skor deplasmanın en az 2 golünü destekliyor; deplasman takım gol marketi KG Yok'tan daha uyumlu bulundu.");
+      alternative = candidates.find(c => c.kind !== "away-goals")?.pick || "İkinci uygun tercih yok";
     }
 
     // Score predictions must describe a possible match timeline, not independent modal scores.
