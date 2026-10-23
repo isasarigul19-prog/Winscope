@@ -143,16 +143,14 @@ function mapProviderStatus(status) {
 function normalizeProviderMatch(match) {
   return {
     id: Number(match.id ?? match.fixture?.id),
-    league: match.league?.name || "Bilinmeyen lig",
-    country: match.country?.name || match.league?.country || "",
+    league: typeof match.league === "object" ? match.league?.name : (match.league || "Bilinmeyen lig"),
+    country: typeof match.country === "object" ? match.country?.name : (match.country || match.league?.country || ""),
     minute: match.fixture?.status?.elapsed ?? match.minute ?? null,
     status: mapProviderStatus(match.status_code ?? match.status ?? match.fixture?.status?.short),
-    home: match.teams?.home?.name || "Ev sahibi",
-    away: match.teams?.away?.name || "Deplasman",
+    home: typeof match.teams?.home === "object" ? match.teams?.home?.name : (match.home || match.teams?.home || "Ev sahibi"),
+    away: typeof match.teams?.away === "object" ? match.teams?.away?.name : (match.away || match.teams?.away || "Deplasman"),
     homeScore: match.goals?.home ?? 0,
     awayScore: match.goals?.away ?? 0,
-    htHomeScore: match.score?.halftime?.home ?? null,
-    htAwayScore: match.score?.halftime?.away ?? null,
     fixtureDate: match.kickoff_utc || match.fixture?.date || null
   };
 }
@@ -186,7 +184,7 @@ function generateOrFetchOdds(fixtureId) {
   const draw = Number((3.10 + hash(2) * 1.20).toFixed(2));
   const awayWin = Number((1.90 + hash(3) * 4.50).toFixed(2));
   const over25 = Number((1.55 + hash(4) * 0.85).toFixed(2));
-  return { homeWin, draw, awayWin, over25, bookmaker: "Bet365" };
+  return { homeWin, draw, awayWin, over25 };
 }
 
 async function evaluateMatchAdvanced(fixtureId) {
@@ -200,7 +198,6 @@ async function evaluateMatchAdvanced(fixtureId) {
     minute: fRaw.fixture?.status?.elapsed,
     teams: fRaw.teams,
     goals: fRaw.goals,
-    score: fRaw.score,
     kickoff_utc: fRaw.fixture?.date
   });
 
@@ -257,16 +254,13 @@ async function evaluateMatchAdvanced(fixtureId) {
     };
   }
 
-  // CANLI İSTATİSTİKLERİ ÇEK (İstatistik sekmesinin açılması için)
   let liveStats = [];
-  if (isLive) {
-    try {
-      const statsRes = await apiGet(`/fixtures/statistics?fixture=${fixtureId}`);
-      if (Array.isArray(statsRes) && statsRes.length > 0) {
-        liveStats = statsRes;
-      }
-    } catch (e) {}
-  }
+  try {
+    const statsRes = await apiGet(`/fixtures/statistics?fixture=${fixtureId}`);
+    if (Array.isArray(statsRes) && statsRes.length > 0) {
+      liveStats = statsRes;
+    }
+  } catch (e) {}
 
   return { matchInfo, isLive, odds, historyData, liveStats };
 }
@@ -300,7 +294,6 @@ app.get("/api/match/:id/analyze", async (req, res) => {
         under25Percent: historyData.under25Percent,
         bttsYesPercent: historyData.bttsPct,
         bttsNoPercent: historyData.bttsNoPct,
-        // ÖN YÜZÜN DOĞRUDAN OKUDUĞU İY 0.5 ÜST / ALT ALANLARI (Tire kalmaması için hem kökte hem history'de veriyoruz)
         iy05OverPercent: historyData.ht05Pct,
         iy05UnderPercent: historyData.ht05UnderPct,
         halfTimeScoreDistribution: historyData.htScores.map(([score, count]) => ({
@@ -317,7 +310,6 @@ app.get("/api/match/:id/analyze", async (req, res) => {
           "MS 2": { percent: historyData.ms2Pct }
         }
       },
-      // Ön yüzün doğrudan root seviyesinde aradığı olası İY yüzdeleri
       iy05OverPercent: historyData.ht05Pct,
       iy05UnderPercent: historyData.ht05UnderPct,
       reasons: ["Oran hareketleri ve geçmiş benzer maçlar doğrulandı."]
@@ -331,7 +323,7 @@ app.get("/api/match/:id/stats", async (req, res) => {
   const fixtureId = req.params.id;
   try {
     const data = await apiGet(`/fixtures/statistics?fixture=${fixtureId}`);
-    res.json({ success: true, stats: data });
+    res.json({ success: true, stats: Array.isArray(data) ? data : [] });
   } catch (e) {
     res.json({ success: true, stats: [] });
   }
@@ -341,7 +333,9 @@ app.get("/api/fixtures", async (req, res) => {
   const date = String(req.query.date || "");
   try {
     const payload = await cachedProviderRequest(`fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 5 * 60_000);
-    res.json({ source: "API-Football", results: payload.response?.length || 0, fixtures: payload.response || [], matches: payload.response || [] });
+    const rawMatches = payload.response || [];
+    const matches = rawMatches.map(m => normalizeProviderMatch(m));
+    res.json({ source: "API-Football", results: matches.length, fixtures: matches, data: matches, matches });
   } catch (error) {
     res.status(502).json({ error: "Maç bülteni alınamadı." });
   }
@@ -350,14 +344,16 @@ app.get("/api/fixtures", async (req, res) => {
 app.get("/api/live", async (_req, res) => {
   try {
     const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 30_000);
-    res.json({ source: "API-Football", results: payload.response?.length || 0, fixtures: payload.response || [], matches: payload.response || [] });
+    const rawMatches = payload.response || [];
+    const matches = rawMatches.map(m => normalizeProviderMatch(m));
+    res.json({ source: "API-Football", results: matches.length, fixtures: matches, data: matches, matches });
   } catch (error) {
     res.status(502).json({ error: "Canlı maçlar alınamadı." });
   }
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Ultimate Fix", databaseConfigured: Boolean(pool) }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Absolute Clean", databaseConfigured: Boolean(pool) }));
 
 app.listen(PORT, () => {
-  console.log(`WinScope Ultimate Fix running on port ${PORT}`);
+  console.log(`WinScope Absolute Clean running on port ${PORT}`);
 });
