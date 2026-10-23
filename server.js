@@ -285,6 +285,7 @@ function apiFootballFixtureToLegacy(item) {
       away: { id: item?.teams?.away?.id ?? null, name: item?.teams?.away?.name || "Deplasman" }
     },
     goals: { home: item?.goals?.home ?? null, away: item?.goals?.away ?? null },
+    score: { halftime: item?.score?.halftime || null, fulltime: item?.score?.fulltime || null },
     corners: null,
     raw: item
   };
@@ -435,7 +436,8 @@ async function footballDataRequest(pathname) {
 function toLegacyFixture(match) {
   return {
     fixture: { id: Number(match.id), date: match.kickoff_utc || null,
-      status: { short: mapProviderStatus(match.status_code ?? match.status), elapsed: providerMinute(match) } },
+      status: { short: mapProviderStatus(match.status_code ?? match.status), elapsed: providerMinute(match) },
+      score: match.score || { halftime: match.raw?.score?.halftime || null, fulltime: match.raw?.score?.fulltime || null } },
     league: { name: match.league?.name || "Bilinmeyen lig", country: match.country?.name || match.league?.country || "" },
     teams: { home: { id: match.teams?.home?.id ?? null, name: match.teams?.home?.name || "Ev sahibi" },
       away: { id: match.teams?.away?.id ?? null, name: match.teams?.away?.name || "Deplasman" } },
@@ -1078,14 +1080,9 @@ app.get("/api/match/:id/analyze", async (req, res) => {
         ].filter(d => Number(d.now)>1);
         const ranked = rows.map(r => { const ds=dims.filter(d=>r[d.field]!=null&&Number(r[d.field])>1).map(d=>Math.abs(Number(d.now)-Number(r[d.field]))/Math.max(.2,Number(d.now)*.12)); return {r,n:ds.length,d:ds.length?ds.reduce((a,b)=>a+b,0)/ds.length:Infinity}; }).filter(x=>x.n>=Math.min(2,dims.length)&&Number.isFinite(x.d)).sort((a,b)=>a.d-b.d);
         let near=ranked.filter(x=>x.d<=2.5).slice(0,100); const expanded=near.length<10; if(expanded) near=ranked.slice(0,100);
-        let sample=near.map(x=>x.r);
-        let generalHistoricalFallback=false;
-        // A live fixture may not have live odds available from the provider. Do not let that
-        // erase all historical percentages: use a transparent recent-results sample instead.
-        if (!sample.length && dims.length === 0) {
-          sample = rows.slice(0,100);
-          generalHistoricalFallback = sample.length > 0;
-        }
+        // Only use history matched against this fixture's available real market odds.
+        // A generic last-100 fallback makes unrelated fixtures share identical percentages.
+        const sample=near.map(x=>x.r);
         const valid=sample.filter(r=>r.ft_home_goals!=null&&r.ft_away_goals!=null), n=valid.length;
         const pct=(count,total)=>total?Number((100*count/total).toFixed(1)):null;
         const overN=valid.filter(r=>Number(r.ft_home_goals)+Number(r.ft_away_goals)>=3).length;
@@ -1106,7 +1103,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
         // compatible observed scores even when the globally top five are incompatible.
         const scoreDistribution=(items,total)=>items.slice(0,20).map(([score,count])=>({score,count,percent:pct(count,total)}));
         const htftDistribution=scoreDistribution(htftFreq,htftRows.length).map(x=>({result:x.score,count:x.count,percent:x.percent}));
-        history={available:sample.length>0,scannedMatches:rows.length,sampleSize:sample.length,matchedMarkets:dims.map(d=>d.key),resultDistribution:Object.fromEntries(resFreq.map(([k,v])=>[k,{count:v,percent:pct(v,n)}])),over25Percent:pct(overN,n),under25Percent:pct(n-overN,n),bttsYesPercent:pct(kgN,n),bttsNoPercent:pct(n-kgN,n),home15Percent:pct(home15N,n),away15Percent:pct(away15N,n),htOver05Percent:pct(ht05N,htValid.length),htUnder05Percent:pct(htUnder05N,htValid.length),ht05OverPercent:pct(ht05N,htValid.length),ht05UnderPercent:pct(htUnder05N,htValid.length),halfTimeScoreDistribution:scoreDistribution(htFreq,htValid.length),fullTimeScoreDistribution:scoreDistribution(ftFreq,n),halfTimeFullTimeDistribution:htftDistribution,sixPlusPercent:pct(sixN,n),mostCommonHalfTimeScore:htFreq[0]?{score:htFreq[0][0],count:htFreq[0][1],percent:pct(htFreq[0][1],htValid.length)}:null,mostCommonFullTimeScore:ftFreq[0]?{score:ftFreq[0][0],count:ftFreq[0][1],percent:pct(ftFreq[0][1],n)}:null,alternativeFullTimeScore:ftFreq[1]?{score:ftFreq[1][0],count:ftFreq[1][1],percent:pct(ftFreq[1][1],n)}:null,mostCommonHalfTimeFullTime:htftFreq[0]?{result:htftFreq[0][0],count:htftFreq[0][1],percent:pct(htftFreq[0][1],htftRows.length)}:null,note:generalHistoricalFallback?"Güncel oranla benzerlik kurulamadı; son tarihsel sonuçlardan genel 100 maçlık örneklem kullanıldı.":expanded?"Yakın oran eşleşmesi az; en yakın 100 kayıt kullanıldı.":"Oran benzerliğine göre seçilmiş tarihsel örneklem."};
+        history={available:sample.length>0,scannedMatches:rows.length,sampleSize:sample.length,matchedMarkets:dims.map(d=>d.key),resultDistribution:Object.fromEntries(resFreq.map(([k,v])=>[k,{count:v,percent:pct(v,n)}])),over25Percent:pct(overN,n),under25Percent:pct(n-overN,n),bttsYesPercent:pct(kgN,n),bttsNoPercent:pct(n-kgN,n),home15Percent:pct(home15N,n),away15Percent:pct(away15N,n),htOver05Percent:pct(ht05N,htValid.length),htUnder05Percent:pct(htUnder05N,htValid.length),ht05OverPercent:pct(ht05N,htValid.length),ht05UnderPercent:pct(htUnder05N,htValid.length),halfTimeScoreDistribution:scoreDistribution(htFreq,htValid.length),fullTimeScoreDistribution:scoreDistribution(ftFreq,n),halfTimeFullTimeDistribution:htftDistribution,sixPlusPercent:pct(sixN,n),mostCommonHalfTimeScore:htFreq[0]?{score:htFreq[0][0],count:htFreq[0][1],percent:pct(htFreq[0][1],htValid.length)}:null,mostCommonFullTimeScore:ftFreq[0]?{score:ftFreq[0][0],count:ftFreq[0][1],percent:pct(ftFreq[0][1],n)}:null,alternativeFullTimeScore:ftFreq[1]?{score:ftFreq[1][0],count:ftFreq[1][1],percent:pct(ftFreq[1][1],n)}:null,mostCommonHalfTimeFullTime:htftFreq[0]?{result:htftFreq[0][0],count:htftFreq[0][1],percent:pct(htftFreq[0][1],htftRows.length)}:null,note:!dims.length?"Güncel karşılaştırılabilir oran bulunmadı; genel örneklem kullanılmadı.":!sample.length?"Bu maçın oranlarına uygun tarihsel örneklem bulunamadı.":expanded?"Yakın oran eşleşmesi az; en yakın 100 kayıt kullanıldı.":"Oran benzerliğine göre seçilmiş tarihsel örneklem."};
         if(history.sampleSize) reasons.push(`${rows.length} tarihsel maç tarandı; en yakın ${sample.length} maç hesaplandı.`);
       } catch(e) { history.note=`Tarihsel analiz yapılamadı: ${e.message}`; }
     } else history.note="DATABASE_URL yapılandırılmadığı için tarihsel analiz yapılamadı.";
@@ -1201,6 +1198,19 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     if(selected && history.sixPlusPercent!=null && history.sampleSize>=30 && history.sixPlusPercent>=15 && ["over25","home-goals","away-goals","btts-yes"].includes(selected.kind)) surpriseBits.push(`6+ GOL (${history.sixPlusPercent}%)`);
     if(selected && history.mostCommonFullTimeScore && history.sampleSize>=30 && history.mostCommonFullTimeScore.percent>=12 && Number(history.mostCommonFullTimeScore.score.split("-")[0])+Number(history.mostCommonFullTimeScore.score.split("-")[1])>=4 && scoreFits(history.mostCommonFullTimeScore.score,selected.kind)) surpriseBits.push(`Yüksek skor ${history.mostCommonFullTimeScore.score}`);
     surprise=surpriseBits.join(" · ") || "Yeterli destek yok";
+    if (finishedStatuses.includes(status) && scoreHome != null && scoreAway != null) {
+      const halftime = fixture.fixture?.score?.halftime;
+      const htHome = halftime?.home, htAway = halftime?.away;
+      mainPick = "MAÇ TAMAMLANDI";
+      alternative = "Tahmin değil, gerçekleşen sonuç gösteriliyor";
+      fullTimeScore = `${scoreHome}-${scoreAway} (GERÇEKLEŞEN)`;
+      halfTimeScore = htHome != null && htAway != null
+        ? `${htHome}-${htAway} (GERÇEKLEŞEN)`
+        : "İY skoru sağlayıcı verisinde yok";
+      alternativeFullTimeScore = "Maç tamamlandı";
+      surprise = "Maç tamamlandı";
+      confidence = "Gerçekleşen sonuç";
+    }
     const moves=[homeWin,draw,awayWin,over25,under25,kgYes,kgNo].filter(x=>x?.direction).map(x=>`${x.selection}: ${x.direction}`);
     marketDirection=moves.length?moves.join(" · "):markets.length?"İlk kayıt / hareket ölçülemiyor":"Oran hareketi verisi yok";
     if(!markets.length) reasons.push("Mevcut sağlayıcı oran döndürmedi; oran gerektiren seçimler zorlanmadı.");
