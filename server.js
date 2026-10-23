@@ -1162,10 +1162,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     addCandidate("EV 1.5 ÜST",history.home15Percent,home15,"home-goals");
     addCandidate("DEP 1.5 ÜST",history.away15Percent,away15,"away-goals");
     addCandidate("KG VAR",history.bttsYesPercent,kgYes,"btts-yes");
-    // KG YOK is intentionally not eligible as the main recommendation:
-    // a single unexpected opponent goal loses the market. When a 2-0-like
-    // score scenario is supported, EV 1.5 ÜST is more resilient to 2-1.
-    // KG YOK remains visible in historical percentages, but not as a pick.
+    addCandidate("KG YOK",history.bttsNoPercent,kgNo,"btts-no");
     addCandidate("MS 2.5 ÜST",history.over25Percent,over25,"over25");
     addCandidate("MS 2.5 ALT",history.under25Percent,under25,"under25");
     candidates.sort((a,b)=>b.decisionScore-a.decisionScore || b.edge-a.edge || b.pct-a.pct);
@@ -1179,15 +1176,39 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       reasons.push(`Ana tercih tarihsel olasılık, gizli güncel oran ve skor senaryosu uyumuyla seçildi; değer farkı +${selected.edge} puan, sık görülen skorlarla uyum ${selected.scoreCoverage}%.`);
       if(selected.kind==="home-goals" && selected.resilienceBonus) reasons.push("Ev 1.5 Üst, ev sahibinin 2+ gol attığı ve rakibin de gol bulabildiği skor senaryolarında KG Yok'a göre daha dayanıklı bulundu.");
     } else {
-      // Do not force a market pick when a current quote, sample, or positive value edge is missing.
-      mainPick = history.sampleSize >= 20
-        ? "TUTARSIZ SİNYAL · net tercih yok"
-        : "Yeterli tarihsel örneklem yok";
-      alternative = "Değer avantajı doğrulanmadı";
-      confidence = history.sampleSize >= 20
-        ? `${history.matchSpecificSample ? `${history.sampleSize} oran-benzer maç` : `${history.sampleSize} maçlık genel referans; sıkı eşleşme ${history.matchSampleSize || 0} maç`} incelendi; yeterli güncel oran/değer avantajı bulunamadı`
-        : `Yeterli tarihsel örneklem yok (${history.sampleSize} maç)`;
-      reasons.push("Güvenilir bir ana tercih için güncel gerçek oran ve en az +3 puanlık tarihsel değer farkı doğrulanamadı; sistem zorla seçim üretmedi.");
+      // Scoreline-led fallback requested for WinScope: when the leading historical
+      // score is 2-0 (or another home 2+ goal score), EV 1.5 ÜST is more resilient
+      // than KG YOK if the opponent scores a surprise goal. Keep the missing-value
+      // warning explicit; do not claim that odds value was verified.
+      const modal = Array.isArray(history.fullTimeScoreDistribution)
+        ? history.fullTimeScoreDistribution[0] : null;
+      const modalBits = String(modal?.score || "").split("-").map(Number);
+      const homeScoreSupports15 = modalBits.length === 2 && modalBits.every(Number.isFinite)
+        && modalBits[0] >= 2 && Number(modal?.percent) >= 10;
+      const home15HistorySupports = Number(history.home15Percent) >= 45;
+      if (history.sampleSize >= 20 && homeScoreSupports15 && home15HistorySupports) {
+        selected = {
+          pick: "EV 1.5 ÜST", pct: Number(history.home15Percent), kind: "home-goals",
+          odd: Number(home15?.odd) || null, edge: null,
+          scoreCoverage: scoreCoverageFor("home-goals").coverage,
+          resilienceBonus: 0, modalScoreBonus: 0, decisionScore: 0,
+          fallback: true
+        };
+        mainPick = "EV 1.5 ÜST";
+        alternative = "Değer avantajı doğrulanmadı";
+        confidence = `Skor senaryosu uyumlu · ${history.sampleSize} maç · güncel oran/değer avantajı doğrulanmadı`;
+        reasons.push(`En sık skor ${modal.score} (${modal.percent}%) ve tarihsel Ev 1.5 Üst gerçekleşmesi %${history.home15Percent}; KG Yok yerine sürpriz rakip golüne daha dayanıklı Ev 1.5 Üst gösterildi. Güncel değer avantajı doğrulanmış değildir.`);
+      } else {
+        // Do not force a pick when neither market-value nor scoreline support is adequate.
+        mainPick = history.sampleSize >= 20
+          ? "TUTARSIZ SİNYAL · net tercih yok"
+          : "Yeterli tarihsel örneklem yok";
+        alternative = "Değer avantajı doğrulanmadı";
+        confidence = history.sampleSize >= 20
+          ? `${history.matchSpecificSample ? `${history.sampleSize} oran-benzer maç` : `${history.sampleSize} maçlık genel referans; sıkı eşleşme ${history.matchSampleSize || 0} maç`} incelendi; yeterli güncel oran/değer avantajı bulunamadı`
+          : `Yeterli tarihsel örneklem yok (${history.sampleSize} maç)`;
+        reasons.push("Güncel oran/değer avantajı doğrulanamadı ve skor senaryosu da güvenilir bir yedek tercih için yeterli değildi; sistem zorla seçim üretmedi.");
+      }
     }
     // Score predictions must describe a possible match timeline, not independent modal scores.
     const parseScore = score => {
