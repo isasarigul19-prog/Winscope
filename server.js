@@ -1140,20 +1140,32 @@ app.get("/api/match/:id/analyze", async (req, res) => {
         const implied=100/odd;
         const edge=Number((Number(pct)-implied).toFixed(1));
         const scoreFit=scoreCoverageFor(kind);
+        // Align the pick with the most common full-time score, not just a market's
+        // raw percentage. If 2-0 (or another home 2+ score) is the leading scenario,
+        // EV 1.5 ÜST remains valid even if the away team may also score (e.g. 2-1).
+        const modalScore=Array.isArray(history.fullTimeScoreDistribution)
+          ? history.fullTimeScoreDistribution[0] : null;
+        const modalBits=String(modalScore?.score || "").split("-").map(Number);
+        const modalHomeTwo=modalBits.length===2 && modalBits.every(Number.isFinite)
+          && modalBits[0]>=2 && Number(modalScore?.percent)>=10;
         // EV 1.5 ÜST may qualify from 45% when the observed score profile supports
         // two-plus home goals; other markets retain the stricter 52% threshold.
         const probabilityFloor=kind==="home-goals" && scoreFit.coverage>=40 ? 45 : 52;
         if (Number(pct)>=probabilityFloor && edge>=3) {
-          const resilienceBonus=kind==="home-goals" && scoreFit.homeTwoAndConcede>=15 ? 3 : 0;
-          const decisionScore=Number((edge+scoreFit.coverage*0.18+resilienceBonus).toFixed(2));
-          candidates.push({pick,pct:Number(pct),kind,odd,edge,scoreCoverage:scoreFit.coverage,resilienceBonus,decisionScore});
+          const resilienceBonus=kind==="home-goals" && scoreFit.homeTwoAndConcede>=15 ? 6 : 0;
+          const modalScoreBonus=kind==="home-goals" && modalHomeTwo ? 10 : 0;
+          const decisionScore=Number((edge+scoreFit.coverage*0.18+resilienceBonus+modalScoreBonus).toFixed(2));
+          candidates.push({pick,pct:Number(pct),kind,odd,edge,scoreCoverage:scoreFit.coverage,resilienceBonus,modalScoreBonus,decisionScore});
         }
       }
     };
     addCandidate("EV 1.5 ÜST",history.home15Percent,home15,"home-goals");
     addCandidate("DEP 1.5 ÜST",history.away15Percent,away15,"away-goals");
     addCandidate("KG VAR",history.bttsYesPercent,kgYes,"btts-yes");
-    addCandidate("KG YOK",history.bttsNoPercent,kgNo,"btts-no");
+    // KG YOK is intentionally not eligible as the main recommendation:
+    // a single unexpected opponent goal loses the market. When a 2-0-like
+    // score scenario is supported, EV 1.5 ÜST is more resilient to 2-1.
+    // KG YOK remains visible in historical percentages, but not as a pick.
     addCandidate("MS 2.5 ÜST",history.over25Percent,over25,"over25");
     addCandidate("MS 2.5 ALT",history.under25Percent,under25,"under25");
     candidates.sort((a,b)=>b.decisionScore-a.decisionScore || b.edge-a.edge || b.pct-a.pct);
