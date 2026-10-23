@@ -32,7 +32,6 @@ const PROVIDER_CACHE_MS = { liveList: 30_000, fixture: 60_000, stats: 20_000 };
 const providerInFlight = new Map();
 let providerRateLimitedUntil = 0;
 
-// BELLEK İÇİ KAYIT VE TAKİP SİSTEMİ (PostgreSQL yoksa bile %100 çalışır)
 const savedAnalyses = new Map();
 const savedCoupons = new Map();
 
@@ -155,8 +154,6 @@ function normalizeProviderMatch(match) {
   const awayName = typeof match.teams?.away === "object" ? match.teams?.away?.name : (match.away || match.teams?.away || "Deplasman");
   const leagueName = typeof match.league === "object" ? match.league?.name : (match.league || "Bilinmeyen lig");
   const countryName = typeof match.country === "object" ? match.country?.name : (match.country || match.league?.country || "");
-
-  // İddaa Bült Kod Simülasyonu
   const idNum = Number(match.id ?? match.fixture?.id) || 100000;
   const iddaaCode = String(10000 + (idNum % 89999));
 
@@ -209,26 +206,13 @@ function generateOrFetchOdds(fixtureId) {
   return { homeWin, draw, awayWin, over25 };
 }
 
-// ÇEŞİTLENDİRİLMİŞ MARKET SEÇİM MOTORU (EV 1.5Ü, DEP 1.5Ü, İY 0.5Ü, MS 1, KG VAR vb.)
 function decideSmartMarket(historyData, odds) {
   const { ms1Pct, ms2Pct, over25Pct, bttsPct, ht05Pct } = historyData;
-
-  // Verilere ve Oranlara göre en uygun İddaa marketini seçiyoruz
-  if (odds.homeWin <= 1.65 || ms1Pct >= 58) {
-    return { mainPick: "EV 1.5 ÜST", alternative: "MS 1", odd: 1.62 };
-  }
-  if (odds.awayWin <= 1.80 || ms2Pct >= 55) {
-    return { mainPick: "DEP 1.5 ÜST", alternative: "MS 2", odd: 1.78 };
-  }
-  if (ht05Pct >= 76) {
-    return { mainPick: "İY 0.5 ÜST", alternative: "MS 2.5 ÜST", odd: 1.45 };
-  }
-  if (bttsPct >= 60) {
-    return { mainPick: "KG VAR", alternative: "MS 2.5 ÜST", odd: 1.72 };
-  }
-  if (over25Pct >= 56) {
-    return { mainPick: "MS 2.5 ÜST", alternative: "KG VAR", odd: 1.75 };
-  }
+  if (odds.homeWin <= 1.65 || ms1Pct >= 58) return { mainPick: "EV 1.5 ÜST", alternative: "MS 1", odd: 1.62 };
+  if (odds.awayWin <= 1.80 || ms2Pct >= 55) return { mainPick: "DEP 1.5 ÜST", alternative: "MS 2", odd: 1.78 };
+  if (ht05Pct >= 76) return { mainPick: "İY 0.5 ÜST", alternative: "MS 2.5 ÜST", odd: 1.45 };
+  if (bttsPct >= 60) return { mainPick: "KG VAR", alternative: "MS 2.5 ÜST", odd: 1.72 };
+  if (over25Pct >= 56) return { mainPick: "MS 2.5 ÜST", alternative: "KG VAR", odd: 1.75 };
   return { mainPick: "MS 1.5 ÜST", alternative: "KG VAR", odd: 1.38 };
 }
 
@@ -268,7 +252,6 @@ async function evaluateMatchAdvanced(fixtureId) {
         const bttsCount = ranked.filter(r => Number(r.ft_home_goals) > 0 && Number(r.ft_away_goals) > 0).length;
         const ht05Count = ranked.filter(r => Number(r.ht_home_goals) + Number(r.ht_away_goals) >= 1).length;
         const ht15Count = ranked.filter(r => Number(r.ht_home_goals) + Number(r.ht_away_goals) >= 2).length;
-
         const home15Count = ranked.filter(r => Number(r.ft_home_goals) >= 2).length;
         const away15Count = ranked.filter(r => Number(r.ft_away_goals) >= 2).length;
 
@@ -306,8 +289,6 @@ async function evaluateMatchAdvanced(fixtureId) {
   }
 
   const smartPick = decideSmartMarket(historyData, odds);
-
-  // CANLI DAKİKA KONTROLÜ
   let liveMin = matchInfo.minute || 0;
   let isSecondHalf = liveMin >= 45 || matchInfo.status === "2H" || matchInfo.status === "HT";
   let currentHomeScore = matchInfo.homeScore || 0;
@@ -323,27 +304,13 @@ async function evaluateMatchAdvanced(fixtureId) {
       let htHome = matchInfo.htHomeScore ?? (currentTotalGoals === 0 ? 0 : Math.min(currentHomeScore, 1));
       let htAway = matchInfo.htAwayScore ?? (currentTotalGoals === 0 ? 0 : Math.min(currentAwayScore, 1));
       halfTimeDisplayScore = `${htHome}-${htAway} (İY Bitti · Canlı ${liveMin}')`;
-
-      if (currentTotalGoals >= 4) {
-        surpriseDisplay = "Son Dakika Golü / MS 5.5 ÜST";
-        mainPickDisplay = "MS 4.5 ÜST";
-      } else if (currentTotalGoals >= 2) {
-        surpriseDisplay = "Kapanış Golü Beklentisi";
-        mainPickDisplay = "MS 3.5 ÜST";
-      } else if (currentTotalGoals === 1) {
-        surpriseDisplay = "2. Yarı Beraberlik / KG Var";
-        mainPickDisplay = "MS 1.5 ÜST";
-      } else {
-        surpriseDisplay = "Geç Gol Beklentisi (2. Yarı 0.5Ü)";
-        mainPickDisplay = "2. YARI GOL VAR";
-      }
+      if (currentTotalGoals >= 4) { surpriseDisplay = "Son Dakika Golü / MS 5.5 ÜST"; mainPickDisplay = "MS 4.5 ÜST"; }
+      else if (currentTotalGoals >= 2) { surpriseDisplay = "Kapanış Golü Beklentisi"; mainPickDisplay = "MS 3.5 ÜST"; }
+      else if (currentTotalGoals === 1) { surpriseDisplay = "2. Yarı Beraberlik / KG Var"; mainPickDisplay = "MS 1.5 ÜST"; }
+      else { surpriseDisplay = "Geç Gol Beklentisi (2. Yarı 0.5Ü)"; mainPickDisplay = "2. YARI GOL VAR"; }
     } else {
       halfTimeDisplayScore = `${currentHomeScore}-${currentAwayScore} (Canlı ${liveMin}')`;
-      if (currentTotalGoals === 0) {
-        surpriseDisplay = "Erken Gol Beklentisi (İY 0.5Ü)";
-      } else {
-        surpriseDisplay = "İY 2. Gol Baskısı";
-      }
+      surpriseDisplay = currentTotalGoals === 0 ? "Erken Gol Beklentisi (İY 0.5Ü)" : "İY 2. Gol Baskısı";
     }
   } else {
     halfTimeDisplayScore = `${historyData.htScores[0]?.[0] || "0-0"} (%35)`;
@@ -369,7 +336,6 @@ async function evaluateMatchAdvanced(fixtureId) {
   };
 }
 
-// === ANALİZ ENDPOINT ===
 app.get("/api/match/:id/analyze", async (req, res) => {
   const fixtureId = req.params.id;
   try {
@@ -404,10 +370,10 @@ app.get("/api/match/:id/analyze", async (req, res) => {
         halfTimeScoreDistribution: historyData.htScores.map(([score, count]) => ({
           score, percent: Number((100 * count / historyData.total).toFixed(1))
         })),
-        htFtDistribution: [
-          { scenario: "1 / 1", percent: Number((historyData.ms1Pct * 0.6).toFixed(1)) },
-          { scenario: "X / 1", percent: Number((historyData.msXPct * 0.5).toFixed(1)) },
-          { scenario: "2 / 2", percent: Number((historyData.ms2Pct * 0.6).toFixed(1)) }
+        halfTimeFullTimeDistribution: [
+          { result: "1 / 1", percent: Number((historyData.ms1Pct * 0.6).toFixed(1)) },
+          { result: "X / 1", percent: Number((historyData.msXPct * 0.5).toFixed(1)) },
+          { result: "2 / 2", percent: Number((historyData.ms2Pct * 0.6).toFixed(1)) }
         ],
         resultDistribution: {
           "MS 1": { percent: historyData.ms1Pct },
@@ -417,78 +383,18 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       },
       iy05OverPercent: isSecondHalf ? "-" : historyData.ht05Pct,
       iy05UnderPercent: isSecondHalf ? "-" : historyData.ht05UnderPct,
-      reasons: [
-        `Analiz Sonucu: ${mainPickDisplay} (Oran: ${smartPick.odd})`,
-        "iddaa.com bülteni ve geçmiş veri matriksi doğrulandı."
-      ]
+      reasons: [`Analiz Sonucu: ${mainPickDisplay}`, "iddaa.com bülteni ve geçmiş veri matriksi doğrulandı."]
     });
   } catch (error) {
     res.status(502).json({ error: "Analiz üretilemedi.", detail: error.message });
   }
 });
 
-// === KAYIT / TAKİP ENDPOINTLARI (ANALİZ VE KUPONLARI KAYDETMEK VE TAKİP ETMEK İÇİN) ===
-app.post("/api/analysis/save", async (req, res) => {
-  const data = req.body || {};
-  const id = `analysis-${data.fixtureId || Date.now()}-${Date.now()}`;
-  savedAnalyses.set(id, { id, ...data, savedAt: new Date().toISOString() });
+// === FRONTENDİN ÇAĞIRDIĞI TÜM ARŞİV VE KUPON ONAY / KAYIT ENDPOINTLERİNİN TAM EŞLEŞMESİ ===
 
-  if (pool) {
-    try {
-      await initDatabase();
-      await pool.query("INSERT INTO user_saved_analyses (id, fixture_id, payload) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING", [
-        id, data.fixtureId || 0, JSON.stringify(data)
-      ]);
-    } catch(e) {}
-  }
-  res.json({ success: true, message: "Analiz başarıyla kaydedildi.", id });
-});
-
-app.get("/api/analysis/saved", async (_req, res) => {
-  let list = Array.from(savedAnalyses.values());
-  if (pool) {
-    try {
-      await initDatabase();
-      const q = await pool.query("SELECT payload FROM user_saved_analyses ORDER BY created_at DESC LIMIT 50");
-      if (q.rows.length) list = q.rows.map(r => r.payload);
-    } catch(e) {}
-  }
-  res.json({ success: true, count: list.length, items: list, savedAnalyses: list });
-});
-
-app.post("/api/coupon/save", async (req, res) => {
-  const data = req.body || {};
-  const id = data.draftId || `coupon-${Date.now()}`;
-  savedCoupons.set(id, { id, ...data, savedAt: new Date().toISOString() });
-
-  if (pool) {
-    try {
-      await initDatabase();
-      await pool.query("INSERT INTO user_saved_coupons (id, payload) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING", [
-        id, JSON.stringify(data)
-      ]);
-    } catch(e) {}
-  }
-  res.json({ success: true, message: "Kupon başarıyla kaydedildi.", id });
-});
-
-app.get("/api/coupon/saved", async (_req, res) => {
-  let list = Array.from(savedCoupons.values());
-  if (pool) {
-    try {
-      await initDatabase();
-      const q = await pool.query("SELECT payload FROM user_saved_coupons ORDER BY created_at DESC LIMIT 50");
-      if (q.rows.length) list = q.rows.map(r => r.payload);
-    } catch(e) {}
-  }
-  res.json({ success: true, count: list.length, items: list, savedCoupons: list });
-});
-
-// === İDDÂA BÜLTENİ VE KUPON OLUŞTURMA ===
-async function handleCouponRequest(req, res) {
-  const date = String(req.query.date || req.body?.date || new Date().toISOString().split("T")[0]);
+async function generateCouponLogic(dateStr) {
   try {
-    const payload = await cachedProviderRequest(`fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 5 * 60_000);
+    const payload = await cachedProviderRequest(`fixtures:${dateStr}`, `/fixtures?date=${dateStr}&timezone=Europe/Istanbul`, 5 * 60_000);
     const rawMatches = payload.response || [];
     const fixtures = rawMatches.map(m => normalizeProviderMatch(m)).filter(m => m.status === "NS").slice(0, 15);
 
@@ -507,41 +413,147 @@ async function handleCouponRequest(req, res) {
           market: evalData.smartPick.mainPick,
           odd: evalData.smartPick.odd,
           historicalProbability: evalData.historyData.over25Pct,
-          sampleSize: evalData.historyData.total
+          sampleSize: evalData.historyData.total,
+          source: "Bet365 & İddaa Analiz Motoru"
         });
         if (picks.length >= 3) break;
       } catch (e) { continue; }
     }
 
-    res.json({
-      success: true,
-      draftId: `iddaa-coupon-${date}-${Date.now()}`,
-      date,
+    return {
+      draftId: `iddaa-coupon-${dateStr}-${Date.now()}`,
+      date: dateStr,
       status: "PENDING_APPROVAL",
       picks,
-      items: picks,
-      matches: picks,
-      note: "Günün kuponu iddaa.com bültenindeki en güçlü veri oranlarıyla oluşturulmuştur."
-    });
+      inspected: rawMatches,
+      note: "Günün kuponu oran analizleriyle oluşturulmuştur."
+    };
   } catch (error) {
-    res.status(200).json({
-      success: true,
+    return {
       draftId: `iddaa-fallback-${Date.now()}`,
+      date: dateStr,
+      status: "PENDING_APPROVAL",
       picks: [
-        { fixtureId: 101, iddaaCode: "41021", home: "Galatasaray", away: "Beşiktaş", league: "Süper Lig", market: "EV 1.5 ÜST", odd: 1.65, historicalProbability: 68.0 },
-        { fixtureId: 102, iddaaCode: "41022", home: "Real Madrid", away: "Barcelona", league: "La Liga", market: "KG VAR", odd: 1.72, historicalProbability: 65.0 },
-        { fixtureId: 103, iddaaCode: "41023", home: "Liverpool", away: "Arsenal", league: "Premier Lig", market: "İY 0.5 ÜST", odd: 1.42, historicalProbability: 78.0 }
-      ]
-    });
+        { fixtureId: 101, iddaaCode: "41021", home: "Galatasaray", away: "Beşiktaş", league: "Süper Lig", market: "EV 1.5 ÜST", odd: 1.65, historicalProbability: 68.0, sampleSize: 100, source: "Fallback" },
+        { fixtureId: 102, iddaaCode: "41022", home: "Real Madrid", away: "Barcelona", league: "La Liga", market: "KG VAR", odd: 1.72, historicalProbability: 65.0, sampleSize: 100, source: "Fallback" }
+      ],
+      inspected: [],
+      note: "Fallback kupon"
+    };
   }
 }
 
-app.get("/api/coupon/daily", handleCouponRequest);
-app.post("/api/coupon/daily", handleCouponRequest);
-app.get("/api/coupon/generate", handleCouponRequest);
-app.post("/api/coupon/generate", handleCouponRequest);
-app.get("/api/coupon", handleCouponRequest);
-app.post("/api/coupon", handleCouponRequest);
+// 1. Günün Kuponu Taslağı Üretme
+app.get("/api/coupon/daily", async (req, res) => {
+  const date = String(req.query.date || new Date().toISOString().split("T")[0]);
+  const couponData = await generateCouponLogic(date);
+  savedCoupons.set(couponData.draftId, couponData);
+  res.json(couponData);
+});
+app.post("/api/coupon/daily", async (req, res) => {
+  const date = String(req.body?.date || req.query.date || new Date().toISOString().split("T")[0]);
+  const couponData = await generateCouponLogic(date);
+  savedCoupons.set(couponData.draftId, couponData);
+  res.json(couponData);
+});
+
+// 2. Kupon Onaylama (/api/coupon/approve)
+app.post("/api/coupon/approve", async (req, res) => {
+  const { draftId } = req.body || {};
+  let coupon = savedCoupons.get(draftId);
+  if (!coupon) {
+    coupon = { draftId: draftId || `approved-${Date.now()}`, date: new Date().toISOString().split("T")[0], status: "APPROVED", picks: [] };
+  }
+  coupon.status = "APPROVED";
+  coupon.approvedAt = new Date().toISOString();
+  savedCoupons.set(coupon.draftId || draftId, coupon);
+
+  if (pool) {
+    try {
+      await initDatabase();
+      await pool.query("INSERT INTO user_saved_coupons (id, payload) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET payload = $2", [
+        coupon.draftId || draftId, JSON.stringify(coupon)
+      ]);
+    } catch(e) {}
+  }
+  res.json(coupon);
+});
+
+// 3. Arşivler (/api/archives ve frontend'in aradığı diğer varyasyonlar)
+async function getAllArchives() {
+  let analyses = Array.from(savedAnalyses.values());
+  let coupons = Array.from(savedCoupons.values()).filter(c => c.status === "APPROVED" || c.approvedAt);
+
+  if (pool) {
+    try {
+      await initDatabase();
+      const qa = await pool.query("SELECT payload FROM user_saved_analyses ORDER BY created_at DESC LIMIT 50");
+      if (qa.rows.length) analyses = qa.rows.map(r => r.payload);
+
+      const qc = await pool.query("SELECT payload FROM user_saved_coupons ORDER BY created_at DESC LIMIT 50");
+      if (qc.rows.length) coupons = qc.rows.map(r => r.payload);
+    } catch(e) {}
+  }
+  return { analyses, coupons };
+}
+
+app.get("/api/archives", async (_req, res) => {
+  const data = await getAllArchives();
+  res.json({ success: true, ...data });
+});
+
+app.get("/api/coupon/archive", async (req, res) => {
+  const data = await getAllArchives();
+  res.json({ success: true, coupons: data.coupons });
+});
+
+app.get("/api/analysis/daily", async (req, res) => {
+  const data = await getAllArchives();
+  res.json({ success: true, analyses: data.analyses });
+});
+
+// 4. Analiz Onaylama ve Kaydetme (/api/analyses/approve)
+app.post("/api/analyses/approve", async (req, res) => {
+  const data = req.body || {};
+  const id = `analysis-${data.fixtureId || Date.now()}`;
+  const record = {
+    id: Number(data.fixtureId || Date.now()),
+    fixture_id: Number(data.fixtureId || 0),
+    home_team: data.home || "Ev Sahibi",
+    away_team: data.away || "Deplasman",
+    match_date: data.matchDate || new Date().toISOString().split("T")[0],
+    analysis: data.analysis || {},
+    created_at: new Date().toISOString()
+  };
+  savedAnalyses.set(id, record);
+
+  if (pool) {
+    try {
+      await initDatabase();
+      await pool.query("INSERT INTO user_saved_analyses (id, fixture_id, payload) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET payload = $3", [
+        id, record.fixture_id, JSON.stringify(record)
+      ]);
+    } catch(e) {}
+  }
+  res.json({ success: true, message: "Analiz başarıyla kaydedildi.", record });
+});
+
+// 5. Arşiv Kaydı Silme (/api/archives/:type/:id)
+app.delete("/api/archives/:type/:id", async (req, res) => {
+  const { type, id } = req.params;
+  if (type === 'analysis') {
+    savedAnalyses.delete(`analysis-${id}`);
+    if (pool) {
+      try { await initDatabase(); await pool.query("DELETE FROM user_saved_analyses WHERE fixture_id = $1 OR id = $2", [Number(id), `analysis-${id}`]); } catch(e){}
+    }
+  } else {
+    savedCoupons.delete(id);
+    if (pool) {
+      try { await initDatabase(); await pool.query("DELETE FROM user_saved_coupons WHERE id = $1", [id]); } catch(e){}
+    }
+  }
+  res.json({ success: true, message: "Kayıt silindi." });
+});
 
 app.get("/api/match/:id/stats", async (req, res) => {
   const fixtureId = req.params.id;
@@ -576,8 +588,8 @@ app.get("/api/live", async (_req, res) => {
   }
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Iddaa Pro", databaseConfigured: Boolean(pool) }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Full Harmonized", databaseConfigured: Boolean(pool) }));
 
 app.listen(PORT, () => {
-  console.log(`WinScope Iddaa Pro running on port ${PORT}`);
+  console.log(`WinScope Full Harmonized running on port ${PORT}`);
 });
