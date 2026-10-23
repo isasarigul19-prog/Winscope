@@ -1165,11 +1165,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       return false;
     };
     const compatibleScores=(history.fullTimeScoreDistribution||[]).filter(x=>selected&&scoreFits(x.score,selected.kind));
-    // A market-value edge and a score forecast are separate outputs. If no market
-    // clears the value threshold, still show the most frequent observed score from
-    // the historical sample rather than blanking both score fields.
-    const pickedFullTime = (selected && history.sampleSize >= 20 ? compatibleScores[0] : null)
-      || (!selected && history.sampleSize >= 1 ? history.mostCommonFullTimeScore : null);
+    const pickedFullTime = compatibleScores.find(x => history.sampleSize >= 20) || null;
     if(pickedFullTime){
       fullTimeScore=`${pickedFullTime.score} (${pickedFullTime.percent}%)`;
       const ftBits=parseScore(pickedFullTime.score);
@@ -1177,18 +1173,16 @@ app.get("/api/match/:id/analyze", async (req, res) => {
         const ht=parseScore(x.score);
         return ht && ftBits && ht[0] <= ftBits[0] && ht[1] <= ftBits[1];
       });
-      if(compatibleHalfTimes.length){
+      if(compatibleHalfTimes.length && selected){
         halfTimeScore=`${compatibleHalfTimes[0].score} (${compatibleHalfTimes[0].percent}%)`;
       } else {
-        halfTimeScore="Geçmiş örneklemde uyumlu İY skoru bulunamadı";
+        halfTimeScore="Tutarlı İY skoru bulunamadı";
       }
-      const scorePool = selected ? compatibleScores : (history.fullTimeScoreDistribution||[]);
-      const nextFullTime=scorePool.find(x=>x.score!==pickedFullTime.score);
+      const nextFullTime=compatibleScores.find(x=>x.score!==pickedFullTime.score);
       alternativeFullTimeScore=nextFullTime?`${nextFullTime.score} (${nextFullTime.percent}%)`:"İkinci uyumlu skor için yeterli veri yok";
-      if (!selected) reasons.push("Değer avantajı doğrulanmadı; skor tahmini ayrı olarak geçmiş örneklemin en sık skorundan gösterildi.");
     } else {
-      halfTimeScore="Yeterli ilk yarı skor verisi yok";
-      fullTimeScore="Yeterli maç sonu skor verisi yok";
+      halfTimeScore="Tutarlı skor senaryosu bulunamadı";
+      fullTimeScore="Tutarlı skor senaryosu bulunamadı";
       alternativeFullTimeScore="Yeterli veri yok";
     }
     const surpriseBits=[];
