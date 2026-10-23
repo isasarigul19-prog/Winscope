@@ -1136,7 +1136,9 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     };
     const addCandidate=(pick,pct,market,kind)=>{
       const odd=Number(market?.odd);
-      if (history.sampleSize>=20 && pct!=null && Number.isFinite(odd) && odd>1) {
+      // A generic 100-match reference sample is display-only. It must never select
+      // a market for an individual fixture; otherwise unrelated matches repeat picks.
+      if (history.matchSpecificSample && history.sampleSize>=20 && pct!=null && Number.isFinite(odd) && odd>1) {
         const implied=100/odd;
         const edge=Number((Number(pct)-implied).toFixed(1));
         const scoreFit=scoreCoverageFor(kind);
@@ -1177,14 +1179,16 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       if(selected.kind==="home-goals" && selected.resilienceBonus) reasons.push("Ev 1.5 Üst, ev sahibinin 2+ gol attığı ve rakibin de gol bulabildiği skor senaryolarında KG Yok'a göre daha dayanıklı bulundu.");
     } else {
       // Do not force a market pick when a current quote, sample, or positive value edge is missing.
-      mainPick = history.sampleSize >= 20
+      mainPick = history.matchSpecificSample
         ? "TUTARSIZ SİNYAL · net tercih yok"
-        : "Yeterli tarihsel örneklem yok";
-      alternative = "Değer avantajı doğrulanmadı";
-      confidence = history.sampleSize >= 20
-        ? `${history.matchSpecificSample ? `${history.sampleSize} oran-benzer maç` : `${history.sampleSize} maçlık genel referans; sıkı eşleşme ${history.matchSampleSize || 0} maç`} incelendi; yeterli güncel oran/değer avantajı bulunamadı`
-        : `Yeterli tarihsel örneklem yok (${history.sampleSize} maç)`;
-      reasons.push("Güvenilir bir ana tercih için güncel gerçek oran ve en az +3 puanlık tarihsel değer farkı doğrulanamadı; sistem zorla seçim üretmedi.");
+        : "MAÇA ÖZEL VERİ YETERSİZ · tercih yok";
+      alternative = "Maça özel değer avantajı doğrulanmadı";
+      confidence = history.matchSpecificSample
+        ? `${history.sampleSize} oran-benzer maç incelendi; yeterli güncel oran/değer avantajı bulunamadı`
+        : `Genel referans yalnızca istatistik göstermek için kullanıldı; oran eşiğini geçen ${history.matchSampleSize || 0} maç var. Bu maç için seçim üretilmedi.`;
+      reasons.push(history.matchSpecificSample
+        ? "Güvenilir bir ana tercih için güncel gerçek oran ve en az +3 puanlık tarihsel değer farkı doğrulanamadı; sistem zorla seçim üretmedi."
+        : "Genel 100 maçlık referans, maça özel tahmin üretmek için kullanılmadı. En az 20 oran-benzer maç bulunmadığından ana tercih ve skor tahmini zorlanmadı.");
     }
     // SCORE-ALIGNED TEAM TOTAL RULE:
     // If the leading observed full-time score has 2+ home goals (e.g. 2-0, 2-1)
@@ -1196,7 +1200,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     const modalForAlignment = Array.isArray(history.fullTimeScoreDistribution)
       ? history.fullTimeScoreDistribution[0] : null;
     const modalAlignmentBits = String(modalForAlignment?.score || "").split("-").map(Number);
-    const supportsHome15FromScore = history.sampleSize >= 20
+    const supportsHome15FromScore = history.matchSpecificSample && history.sampleSize >= 20
       && modalAlignmentBits.length === 2
       && modalAlignmentBits.every(Number.isFinite)
       && modalAlignmentBits[0] >= 2
@@ -1241,7 +1245,8 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     // still filtered for compatibility with the selected market.
     // Without a selected pick, show the most frequent observed score as a historical
     // scenario, not as a guaranteed prediction.
-    const allObservedScores=history.sampleSize>=20 ? (history.fullTimeScoreDistribution||[]) : [];
+    // Never derive individual score predictions from the shared generic reference sample.
+    const allObservedScores=history.matchSpecificSample && history.sampleSize>=20 ? (history.fullTimeScoreDistribution||[]) : [];
     const compatibleScores=selected
       ? allObservedScores.filter(x=>scoreFits(x.score,selected.kind))
       : allObservedScores;
@@ -1267,7 +1272,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     }
     const surpriseBits=[];
     // Sürpriz, seçili marketle tutarlı ve yeterli örneklem destekliyorsa gösterilir.
-    if(selected && history.sampleSize>=30 && history.mostCommonHalfTimeFullTime && history.mostCommonHalfTimeFullTime.percent>=15) {
+    if(selected && history.matchSpecificSample && history.sampleSize>=30 && history.mostCommonHalfTimeFullTime && history.mostCommonHalfTimeFullTime.percent>=15) {
       const htft=history.mostCommonHalfTimeFullTime.result;
       const [htResult, fullResult] = String(htft).split("/");
       const ftBits=parseScore(pickedFullTime?.score);
@@ -1278,8 +1283,8 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       const scoreCompatible = ftBits && htBits && resultOf(ftBits)===fullResult && resultOf(htBits)===htResult;
       if(marketCompatible && scoreCompatible) surpriseBits.push(`${htft} İY/MS (${history.mostCommonHalfTimeFullTime.percent}%)`);
     }
-    if(selected && history.sixPlusPercent!=null && history.sampleSize>=30 && history.sixPlusPercent>=15 && ["over25","home-goals","away-goals","btts-yes"].includes(selected.kind)) surpriseBits.push(`6+ GOL (${history.sixPlusPercent}%)`);
-    if(selected && history.mostCommonFullTimeScore && history.sampleSize>=30 && history.mostCommonFullTimeScore.percent>=12 && Number(history.mostCommonFullTimeScore.score.split("-")[0])+Number(history.mostCommonFullTimeScore.score.split("-")[1])>=4 && scoreFits(history.mostCommonFullTimeScore.score,selected.kind)) surpriseBits.push(`Yüksek skor ${history.mostCommonFullTimeScore.score}`);
+    if(selected && history.matchSpecificSample && history.sixPlusPercent!=null && history.sampleSize>=30 && history.sixPlusPercent>=15 && ["over25","home-goals","away-goals","btts-yes"].includes(selected.kind)) surpriseBits.push(`6+ GOL (${history.sixPlusPercent}%)`);
+    if(selected && history.matchSpecificSample && history.mostCommonFullTimeScore && history.sampleSize>=30 && history.mostCommonFullTimeScore.percent>=12 && Number(history.mostCommonFullTimeScore.score.split("-")[0])+Number(history.mostCommonFullTimeScore.score.split("-")[1])>=4 && scoreFits(history.mostCommonFullTimeScore.score,selected.kind)) surpriseBits.push(`Yüksek skor ${history.mostCommonFullTimeScore.score}`);
     surprise=surpriseBits.join(" · ") || "Yeterli destek yok";
     if (finishedStatuses.includes(status) && scoreHome != null && scoreAway != null) {
       const halftime = fixture.fixture?.score?.halftime;
