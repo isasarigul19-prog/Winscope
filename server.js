@@ -1521,22 +1521,29 @@ app.get("/api/coupon/daily", async (req, res) => {
           const currentOver = available.find(x => x.label === "MS 2.5 ÜST")?.market;
           const currentUnder = available.find(x => x.label === "MS 2.5 ALT")?.market;
           const hasPair = Number(currentOver?.odd) > 1 && Number(currentUnder?.odd) > 1;
+          // Match the analysis endpoint's strict odds-similarity gate.
+          // The old coupon code always took the nearest 100 rows, even when
+          // every row was a poor match; that let the coupon pick a market while
+          // the analysis correctly said "maça özel veri yetersiz".
           const ranked = historyRows.map(r => {
+            const distances = [];
             const over = Number(r.b365_over25), under = Number(r.b365_under25);
             if (hasPair && over > 1 && under > 1) {
-              const dOver = Math.abs(Number(currentOver.odd) - over) / Math.max(.2, Number(currentOver.odd) * .12);
-              const dUnder = Math.abs(Number(currentUnder.odd) - under) / Math.max(.2, Number(currentUnder.odd) * .12);
-              return { r, d: dOver + dUnder };
+              distances.push(Math.abs(Number(currentOver.odd) - over) / Math.max(.2, Number(currentOver.odd) * .12));
+              distances.push(Math.abs(Number(currentUnder.odd) - under) / Math.max(.2, Number(currentUnder.odd) * .12));
+            } else {
+              const historicalOdd = Number(r[field]);
+              if (historicalOdd > 1) distances.push(Math.abs(odd - historicalOdd) / Math.max(.2, odd * .12));
             }
-            const historicalOdd = Number(r[field]);
-            return { r, d: historicalOdd > 1 ? Math.abs(odd - historicalOdd) / Math.max(.2, odd * .12) : Infinity };
+            return { r, d: distances.length ? distances.reduce((sum, value) => sum + value, 0) / distances.length : Infinity };
           }).filter(x => Number.isFinite(x.d)).sort((a,b) => a.d-b.d);
-          const sample = ranked.slice(0, 100).map(x => x.r);
-          if (sample.length < 50) {
+          const near = ranked.filter(x => x.d <= 1.0);
+          if (near.length < 20) {
             couponDiag.insufficientHistory++;
-            console.log(`[COUPON_FILTER] fixture=${fixture.id} market="${item.label}" reason=insufficient_history sample=${sample.length} required=50`);
+            console.log(`[COUPON_FILTER] fixture=${fixture.id} market="${item.label}" reason=match_specific_sample_below_20 sample=${near.length} required=20 threshold=1.0`);
             continue;
           }
+          const sample = near.slice(0, 100).map(x => x.r);
           const wins = sample.filter(r => item.label === "MS 2.5 ÜST" ? Number(r.ft_home_goals)+Number(r.ft_away_goals)>=3 : Number(r.ft_home_goals)+Number(r.ft_away_goals)<=2).length;
           item.probability = pct(wins,sample.length); item.sampleSize = sample.length;
           item.probabilityMethod = hasPair ? "nearest_historical_over_under_odds_pair" : "nearest_historical_side_odds";
@@ -1578,7 +1585,7 @@ app.get("/api/coupon/daily", async (req, res) => {
       inspected.push({
         fixtureId: fixture.id,
         reason: available.length
-          ? `Gerçek oranlar tarihsel örneklemle karşılaştırıldı (${[...new Set(available.map(x => x.market.bookmaker || "Bilinmeyen sağlayıcı"))].join(", ")}); eşik koşulları karşılanmadıysa seçim oluşturulmadı.`
+          ? `Gerçek oranlar karşılaştırıldı (${[...new Set(available.map(x => x.market.bookmaker || "Bilinmeyen sağlayıcı"))].join(", ")}); yalnızca oran benzerliği eşiğini geçen en az 20 maçlık örneklem ve pozitif değer farkı varsa seçim oluşturulur.`
           : `Gerçek oran verisi geldi (${markets.length} market); desteklenen MS 2.5 Üst/Alt veya KG Var/Yok marketi uygun oran aralığında eşleşmedi.`
       });
     }
