@@ -1078,14 +1078,10 @@ app.get("/api/match/:id/analyze", async (req, res) => {
         ].filter(d => Number(d.now)>1);
         const ranked = rows.map(r => { const ds=dims.filter(d=>r[d.field]!=null&&Number(r[d.field])>1).map(d=>Math.abs(Number(d.now)-Number(r[d.field]))/Math.max(.2,Number(d.now)*.12)); return {r,n:ds.length,d:ds.length?ds.reduce((a,b)=>a+b,0)/ds.length:Infinity}; }).filter(x=>x.n>=Math.min(2,dims.length)&&Number.isFinite(x.d)).sort((a,b)=>a.d-b.d);
         let near=ranked.filter(x=>x.d<=2.5).slice(0,100); const expanded=near.length<10; if(expanded) near=ranked.slice(0,100);
-        let sample=near.map(x=>x.r);
-        let generalHistoricalFallback=false;
-        // A live fixture may not have live odds available from the provider. Do not let that
-        // erase all historical percentages: use a transparent recent-results sample instead.
-        if (!sample.length && dims.length === 0) {
-          sample = rows.slice(0,100);
-          generalHistoricalFallback = sample.length > 0;
-        }
+        // Do not substitute unrelated recent matches when current odds are missing.
+        // Historical percentages must come from records matched to the current odds profile.
+        const sample=near.map(x=>x.r);
+        const generalHistoricalFallback=false;
         const valid=sample.filter(r=>r.ft_home_goals!=null&&r.ft_away_goals!=null), n=valid.length;
         const pct=(count,total)=>total?Number((100*count/total).toFixed(1)):null;
         const overN=valid.filter(r=>Number(r.ft_home_goals)+Number(r.ft_away_goals)>=3).length;
@@ -1106,7 +1102,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
         // compatible observed scores even when the globally top five are incompatible.
         const scoreDistribution=(items,total)=>items.slice(0,20).map(([score,count])=>({score,count,percent:pct(count,total)}));
         const htftDistribution=scoreDistribution(htftFreq,htftRows.length).map(x=>({result:x.score,count:x.count,percent:x.percent}));
-        history={available:sample.length>0,scannedMatches:rows.length,sampleSize:sample.length,matchedMarkets:dims.map(d=>d.key),resultDistribution:Object.fromEntries(resFreq.map(([k,v])=>[k,{count:v,percent:pct(v,n)}])),over25Percent:pct(overN,n),under25Percent:pct(n-overN,n),bttsYesPercent:pct(kgN,n),bttsNoPercent:pct(n-kgN,n),home15Percent:pct(home15N,n),away15Percent:pct(away15N,n),htOver05Percent:pct(ht05N,htValid.length),htUnder05Percent:pct(htUnder05N,htValid.length),ht05OverPercent:pct(ht05N,htValid.length),ht05UnderPercent:pct(htUnder05N,htValid.length),halfTimeScoreDistribution:scoreDistribution(htFreq,htValid.length),fullTimeScoreDistribution:scoreDistribution(ftFreq,n),halfTimeFullTimeDistribution:htftDistribution,sixPlusPercent:pct(sixN,n),mostCommonHalfTimeScore:htFreq[0]?{score:htFreq[0][0],count:htFreq[0][1],percent:pct(htFreq[0][1],htValid.length)}:null,mostCommonFullTimeScore:ftFreq[0]?{score:ftFreq[0][0],count:ftFreq[0][1],percent:pct(ftFreq[0][1],n)}:null,alternativeFullTimeScore:ftFreq[1]?{score:ftFreq[1][0],count:ftFreq[1][1],percent:pct(ftFreq[1][1],n)}:null,mostCommonHalfTimeFullTime:htftFreq[0]?{result:htftFreq[0][0],count:htftFreq[0][1],percent:pct(htftFreq[0][1],htftRows.length)}:null,note:generalHistoricalFallback?"Güncel oranla benzerlik kurulamadı; son tarihsel sonuçlardan genel 100 maçlık örneklem kullanıldı.":expanded?"Yakın oran eşleşmesi az; en yakın 100 kayıt kullanıldı.":"Oran benzerliğine göre seçilmiş tarihsel örneklem."};
+        history={available:sample.length>0,scannedMatches:rows.length,sampleSize:sample.length,matchedMarkets:dims.map(d=>d.key),resultDistribution:Object.fromEntries(resFreq.map(([k,v])=>[k,{count:v,percent:pct(v,n)}])),over25Percent:pct(overN,n),under25Percent:pct(n-overN,n),bttsYesPercent:pct(kgN,n),bttsNoPercent:pct(n-kgN,n),home15Percent:pct(home15N,n),away15Percent:pct(away15N,n),htOver05Percent:pct(ht05N,htValid.length),htUnder05Percent:pct(htUnder05N,htValid.length),ht05OverPercent:pct(ht05N,htValid.length),ht05UnderPercent:pct(htUnder05N,htValid.length),halfTimeScoreDistribution:scoreDistribution(htFreq,htValid.length),fullTimeScoreDistribution:scoreDistribution(ftFreq,n),halfTimeFullTimeDistribution:htftDistribution,sixPlusPercent:pct(sixN,n),mostCommonHalfTimeScore:htFreq[0]?{score:htFreq[0][0],count:htFreq[0][1],percent:pct(htFreq[0][1],htValid.length)}:null,mostCommonFullTimeScore:ftFreq[0]?{score:ftFreq[0][0],count:ftFreq[0][1],percent:pct(ftFreq[0][1],n)}:null,alternativeFullTimeScore:ftFreq[1]?{score:ftFreq[1][0],count:ftFreq[1][1],percent:pct(ftFreq[1][1],n)}:null,mostCommonHalfTimeFullTime:htftFreq[0]?{result:htftFreq[0][0],count:htftFreq[0][1],percent:pct(htftFreq[0][1],htftRows.length)}:null,note:!dims.length?"Güncel oran alınamadı; oran profiline göre benzer maç örneklemi oluşturulmadı.":!sample.length?"Güncel oranlarla eşleşen kullanılabilir tarihsel kayıt bulunamadı.":expanded?"Yakın oran eşleşmesi az; en yakın 100 kayıt kullanıldı.":"Güncel oran profiline benzer tarihsel örneklem."};
         if(history.sampleSize) reasons.push(`${rows.length} tarihsel maç tarandı; en yakın ${sample.length} maç hesaplandı.`);
       } catch(e) { history.note=`Tarihsel analiz yapılamadı: ${e.message}`; }
     } else history.note="DATABASE_URL yapılandırılmadığı için tarihsel analiz yapılamadı.";
@@ -1149,7 +1145,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
         {pick:"KG YOK",pct:history.bttsNoPercent,market:kgNo,kind:"btts-no"},
         {pick:"MS 2.5 ÜST",pct:history.over25Percent,market:over25,kind:"over25"},
         {pick:"MS 2.5 ALT",pct:history.under25Percent,market:under25,kind:"under25"}
-      ].filter(x=>history.sampleSize>=20 && x.pct!=null)
+      ].filter(x=>history.sampleSize>=20 && x.pct!=null && Number.isFinite(Number(x.market?.odd)) && Number(x.market.odd)>1)
        .sort((a,b)=>Number(b.pct)-Number(a.pct));
       if(fallback.length){
         selected=fallback[0];
@@ -1164,10 +1160,14 @@ app.get("/api/match/:id/analyze", async (req, res) => {
           ? "Pozitif değer avantajı doğrulanmadığı için seçim yalnızca tarihsel eğilimdir."
           : "Güncel market oranı sağlayıcıdan alınamadı; tercih yalnızca tarihsel benzer maç yüzdesine dayanır ve oran/değer avantajı iddiası taşımaz.");
       } else {
-        mainPick="Yeterli tarihsel örneklem yok";
-        alternative="Yeterli alternatif verisi yok";
-        confidence="Tarihsel örneklem 20 maçın altında veya uygun market yüzdesi hesaplanamadı";
-        reasons.push("Tercih üretmek için en az 20 benzer maçlık kullanılabilir tarihsel örneklem gerekli.");
+        mainPick=history.sampleSize>=20 ? "Güncel oranla doğrulanmış tercih yok" : "Yeterli tarihsel örneklem yok";
+        alternative="İkinci uygun tercih yok";
+        confidence=history.sampleSize>=20
+          ? "Güncel oranı bulunan ve değer avantajı doğrulanan uygun market yok"
+          : "Tarihsel örneklem 20 maçın altında veya uygun market yüzdesi hesaplanamadı";
+        reasons.push(history.sampleSize>=20
+          ? "Geçmiş yüzdeler tek başına ana tercih üretmez; ilgili marketin güncel gerçek oranı bulunmadığı için tercih yapılmadı."
+          : "Tercih üretmek için en az 20 benzer maçlık kullanılabilir tarihsel örneklem gerekli.");
       }
     }
     if(history.mostCommonHalfTimeScore && history.mostCommonHalfTimeScore.percent>=15 && selected) halfTimeScore=`${history.mostCommonHalfTimeScore.score} (${history.mostCommonHalfTimeScore.percent}%)`;
