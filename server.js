@@ -35,16 +35,40 @@ let providerRateLimitedUntil = 0;
 const savedAnalyses = new Map();
 const savedCoupons = new Map();
 
-// IDDAA.COM BÜLTENİNDE BULUNAN POPÜLER VE AÇIK LİGLER (BEYAZ LİSTE)
-const IDDAA_WHITELIST = /süper lig|1\. lig|premier league|la liga|serie a|bundesliga|ligue 1|eredivisie|pro league|championship|primeira liga|super lig|champions league|europa league|conference league|liga profesional|serie a brazil|mls|liga mx|superliga|ekstraklasa|allsvenskan|eliteserien|1\. division|parva liga|1\. hnl|super liga|superettan|2\. bundesliga|liga 2|segunda division|serie b|ligue 2|pro leag|scotland|switzerland|austria|belgium|turkey|england|spain|italy|germany|france|netherlands|portugal|brazil|argentina|mexico|usa|greece/i;
+// IDDAA.COM KESİN BEYAZ LİSTE (SADECE RESMİ VE POPÜLER İDDAA LİGLERİ)
+const STRICT_IDDAA_LEAGUES = [
+  "super lig", "1. lig", "premier league", "la liga", "serie a", "bundesliga", "ligue 1",
+  "eredivisie", "pro league", "championship", "primeira liga", "champions league",
+  "europa league", "conference league", "liga profesional", "serie a", "mls", "liga mx",
+  "superliga", "ekstraklasa", "allsvenskan", "eliteserien", "parva liga", "1. hnl",
+  "superettan", "2. bundesliga", "segunda division", "serie b", "ligue 2"
+];
 
-// IDDAA'DA ASLA YER ALMAYAN EGZOTİK ÜLKE / LİG VE KADIN/AMATÖR KARA LİSTESİ
-const IDDAA_BLACKLIST = /kenya|ethiopia|fkf|welwalo|hadiya|migori|fasil|rwanda|uganda|tanzania|zambia|zimbabwe|malawi|ghana|nigeria|senegal|cameroon|ivory coast|vietnam|thailand|indonesia|myanmar|bangladesh|nepal|malaysia|mongolia|fiji|tahiti|papua|guatemala|honduras|el salvador|nicaragua|panama|jamaica|barbados|women|damallsvenskan|frauen|feminine|femenil|w-league|u19|u21|u23|reserves|youth|amateur|3\. lig|4\. lig/i;
+// IDDAA'DA ASLA BULUNMAYAN KÜÇÜK VE BÖLGESEL/AMATÖR LİG KARA LİSTESİ
+const STRICT_IDDAA_EXCLUDE = [
+  "oberliga", "regionalliga", "bayern", "nord", "belarus", "latvia", "lithuania", "estonia",
+  "kenya", "ethiopia", "fkf", "welwalo", "hadiya", "migori", "fasil", "rwanda", "uganda",
+  "tanzania", "zambia", "zimbabwe", "malawi", "ghana", "nigeria", "senegal", "cameroon",
+  "ivory coast", "vietnam", "thailand", "indonesia", "myanmar", "bangladesh", "nepal",
+  "malaysia", "mongolia", "fiji", "tahiti", "papua", "guatemala", "honduras", "el salvador",
+  "nicaragua", "panama", "jamaica", "barbados", "women", "damallsvenskan", "frauen",
+  "feminine", "femenil", "w-league", "u19", "u21", "u23", "reserves", "youth", "amateur"
+];
 
-function isIddaaMatch(match) {
+function isPureIddaaMatch(match) {
   const text = `${match.league || ""} ${match.country || ""} ${match.home || ""} ${match.away || ""}`.toLowerCase();
-  if (IDDAA_BLACKLIST.test(text)) return false;
-  return IDDAA_WHITELIST.test(text);
+  
+  // 1. Kara listede varsa kesinlikle ELE
+  for (const exc of STRICT_IDDAA_EXCLUDE) {
+    if (text.includes(exc)) return false;
+  }
+
+  // 2. Beyaz listede var mı kontrol et
+  for (const lea of STRICT_IDDAA_LEAGUES) {
+    if (text.includes(lea)) return true;
+  }
+
+  return false;
 }
 
 async function cachedProviderRequest(cacheKey, pathname, ttlMs) {
@@ -465,15 +489,15 @@ app.get("/api/match/:id/analyze", async (req, res) => {
   }
 });
 
-// SADECE İDDAA.COM BÜLTENİNDE YER ALAN MAÇLARLA CANLI KOMBİN OLUŞTUR
+// CANLI KOMBİN - SADECE %100 RESMİ İDDAA MAÇLARI
 async function generateLiveCouponLogic() {
   try {
     const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 30_000);
     const rawMatches = payload.response || [];
     let liveMatches = rawMatches.map(m => normalizeProviderMatch(m)).filter(m => m.status === "LIVE" || m.status === "HT");
 
-    // İDDAA FİLTRESİ: Kenya, Etiyopya vb. İddaa'da olmayan tüm ligleri kesin eler
-    let iddaaLive = liveMatches.filter(m => isIddaaMatch(m));
+    // %100 RESMİ İDDAA FİLTRESİ
+    let iddaaLive = liveMatches.filter(m => isPureIddaaMatch(m));
     if (iddaaLive.length >= 1) liveMatches = iddaaLive;
 
     const picks = [];
@@ -538,15 +562,15 @@ app.post("/api/coupon/live", async (_req, res) => {
   res.json(couponData);
 });
 
-// SADECE İDDAA.COM BÜLTENİNDE YER ALAN MAÇLARLA MAÇ ÖNÜ KUPON OLUŞTUR
+// MAÇ ÖNÜ KUPON - SADECE %100 RESMİ İDDAA MAÇLARI
 async function generateCouponLogic(dateStr) {
   try {
     const payload = await cachedProviderRequest(`fixtures:${dateStr}`, `/fixtures?date=${dateStr}&timezone=Europe/Istanbul`, 5 * 60_000);
     const rawMatches = payload.response || [];
     let fixtures = rawMatches.map(m => normalizeProviderMatch(m)).filter(m => m.status === "NS");
 
-    // İDDAA FİLTRESİ: Kenya, Etiyopya vb. İddaa'da olmayan tüm ligleri kesin eler
-    let iddaaFixtures = fixtures.filter(m => isIddaaMatch(m));
+    // %100 RESMİ İDDAA FİLTRESİ
+    let iddaaFixtures = fixtures.filter(m => isPureIddaaMatch(m));
     if (iddaaFixtures.length >= 1) fixtures = iddaaFixtures;
 
     fixtures = fixtures.slice(0, 15);
@@ -735,8 +759,8 @@ app.get("/api/live", async (_req, res) => {
   }
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Strictly Iddaa Compliant", databaseConfigured: Boolean(pool) }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Ultra Pure Iddaa Only", databaseConfigured: Boolean(pool) }));
 
 app.listen(PORT, () => {
-  console.log(`WinScope Strictly Iddaa Compliant running on port ${PORT}`);
+  console.log(`WinScope Ultra Pure Iddaa Only running on port ${PORT}`);
 });
