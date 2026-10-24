@@ -38,7 +38,7 @@ let providerRateLimitedUntil = 0;
 const savedAnalyses = new Map();
 const savedCoupons = new Map();
 
-// TELEGRAM BİLDİRİM FONKSİYONU (Gelişmiş Hata Logları İle)
+// TELEGRAM BİLDİRİM FONKSİYONU
 async function sendTelegramMessage(text) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
     console.log("[Telegram Skip] Bot Token veya Chat ID eksik.");
@@ -69,10 +69,10 @@ async function sendTelegramMessage(text) {
   }
 }
 
-// İDDAA.COM RESMİ LİGLERİ
+// İDDAA.COM RESMİ LİGLERİ BEYAZ LİSTESİ
 const OFFICIAL_IDDAA_LEAGUES_REGEX = /süper lig|1\. lig|premier league|la liga|serie a|bundesliga|ligue 1|eredivisie|pro league|championship|primeira liga|champions league|europa league|conference league|liga profesional|serie a|mls|liga mx|superliga|ekstraklasa|allsvenskan|eliteserien|2\. bundesliga|segunda division|serie b|ligue 2/i;
 
-// KARA LİSTE (ALT LİG, B TAKIMLARI VE EGZOTİK ÜLKELER)
+// KESİN KARA LİSTE (ALT LİG, B TAKIMLARI VE EGZOTİK ÜLKELER)
 const STRICT_UNWANTED_REGEX = /third league|fourth league|3\. lig|4\. lig|5\. lig|oberliga|regionalliga|regional|southwest|northeast|northwest|southeast| ii| ii$| b$| b |reserve|youth|u19|u21|u23|women|damallsvenskan|frauen|feminine|femenil|w-league|amateur|syria|congo|kosovo|kenya|ethiopia|rwanda|uganda|tanzania|zambia|zimbabwe|malawi|ghana|nigeria|senegal|cameroon|ivory coast|vietnam|thailand|indonesia|myanmar|bangladesh|nepal|malaysia|mongolia|fiji|tahiti|papua|guatemala|honduras|el salvador|nicaragua|panama|jamaica|barbados|belarus|latvia|lithuania|estonia/i;
 
 function isStrictIddaaMatch(match) {
@@ -507,7 +507,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
   }
 });
 
-// CANLI KOMBİN - ROTASYON VE OTOMATİK TELEGRAM BİLDİRİMİ
+// CANLI KOMBİN
 async function generateLiveCouponLogic() {
   try {
     const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 30_000);
@@ -555,10 +555,17 @@ async function generateLiveCouponLogic() {
       note: "İddaa.com uyumlu rotasyonlu canlı kombin"
     };
 
-    // TELEGRAM BİLDİRİMİ GÖNDERİLİYOR
-    let tgMsg = `⚡ <b>WINSCOPE CANLI KOMBİN</b> ⚡\n📅 Tarih: ${coupon.date}\n\n`;
+    let tgMsg = `⚡ <b>WINSCOPE CANLI KOMBİN</b> ⚡
+📅 Tarih: ${coupon.date}
+
+`;
     coupon.picks.forEach(p => {
-      tgMsg += `🏆 <b>${p.league}</b>\n⚽ ${p.home} vs ${p.away}\n⏱️ Dk: ${p.minute}' | Skor: ${p.currentScore}\n🎯 Tercih: <b>${p.market}</b> (Oran: ${p.odd})\n-------------------\n`;
+      tgMsg += `🏆 <b>${p.league}</b>
+⚽ ${p.home} vs ${p.away}
+⏱️ Dk: ${p.minute}' | Skor: ${p.currentScore}
+🎯 Tercih: <b>${p.market}</b> (Oran: ${p.odd})
+-------------------
+`;
     });
     sendTelegramMessage(tgMsg);
 
@@ -587,7 +594,7 @@ app.post("/api/coupon/live", async (_req, res) => {
   res.json(couponData);
 });
 
-// MAÇ ÖNÜ KUPON - ROTASYON VE OTOMATİK TELEGRAM BİLDİRİMİ
+// MAÇ ÖNÜ KUPON
 async function generateCouponLogic(dateStr) {
   try {
     const payload = await cachedProviderRequest(`fixtures:${dateStr}`, `/fixtures?date=${dateStr}&timezone=Europe/Istanbul`, 5 * 60_000);
@@ -628,10 +635,17 @@ async function generateCouponLogic(dateStr) {
       note: "İddaa.com rotasyonlu maç önü kuponu"
     };
 
-    // TELEGRAM BİLDİRİMİ GÖNDERİLİYOR
-    let tgMsg = `🎟️ <b>WINSCOPE GÜNÜN KUPONU</b> 🎟️\n📅 Tarih: ${coupon.date}\n\n`;
+    let tgMsg = `🎟️ <b>WINSCOPE GÜNÜN KUPONU</b> 🎟️
+📅 Tarih: ${coupon.date}
+
+`;
     coupon.picks.forEach(p => {
-      tgMsg += `🏆 <b>${p.league}</b>\n⚽ ${p.home} vs ${p.away}\n🔑 İddaa Kod: ${p.iddaaCode}\n🎯 Tercih: <b>${p.market}</b> (Oran: ${p.odd})\n-------------------\n`;
+      tgMsg += `🏆 <b>${p.league}</b>
+⚽ ${p.home} vs ${p.away}
+🔑 İddaa Kod: ${p.iddaaCode}
+🎯 Tercih: <b>${p.market}</b> (Oran: ${p.odd})
+-------------------
+`;
     });
     sendTelegramMessage(tgMsg);
 
@@ -682,9 +696,8 @@ app.post("/api/coupon/approve", async (req, res) => {
     } catch(e) {}
   }
 
-  // ONAYLANDI BİLDİRİMİ TELEGRAM'A ATILIYOR
-  sendTelegramMessage(`✅ <b>KUPON ONAYLANDI VE KAYDEDİLDİ!</b>\n🆔 Taslak: ${draftId}`);
-
+  sendTelegramMessage(`✅ <b>KUPON ONAYLANDI VE KAYDEDİLDİ!</b>
+🆔 Taslak: ${draftId}`);
   res.json(coupon);
 });
 
@@ -743,9 +756,9 @@ app.post("/api/analyses/approve", async (req, res) => {
     } catch(e) {}
   }
 
-  // ANALİZ ONAY TELEGRAM BİLDİRİMİ
-  sendTelegramMessage(`📋 <b>ANALİZ ONAYLANDI VE KAYDEDİLDİ</b>\n⚽ ${record.home_team} vs ${record.away_team}\n🎯 Tercih: <b>${record.analysis?.mainPick || '—'}</b>`);
-
+  sendTelegramMessage(`📋 <b>ANALİZ ONAYLANDI VE KAYDEDİLDİ</b>
+⚽ ${record.home_team} vs ${record.away_team}
+🎯 Tercih: <b>${record.analysis?.mainPick || '—'}</b>`);
   res.json({ success: true, message: "Analiz başarıyla kaydedildi.", record });
 });
 
@@ -798,8 +811,50 @@ app.get("/api/live", async (_req, res) => {
   }
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Active Telegram Master", databaseConfigured: Boolean(pool) }));
+// ARKA PLANDA OTOMATİK CANLI KOMBİN TARAMASI (HER 5 DAKİKADA BİR)
+const AUTO_SCAN_INTERVAL_MS = 5 * 60 * 1000;
+const notifiedLiveFixtures = new Set();
+
+setInterval(async () => {
+  try {
+    console.log("[Auto-Scan] Canlı maçlar otomatik taranıyor...");
+    const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 30_000);
+    const rawMatches = payload.response || [];
+    
+    let liveMatches = rawMatches
+      .map(m => normalizeProviderMatch(m))
+      .filter(m => (m.status === "LIVE" || m.status === "HT") && isStrictIddaaMatch(m));
+
+    let freshMatches = liveMatches.filter(m => !notifiedLiveFixtures.has(m.id));
+
+    if (freshMatches.length >= 2) {
+      const selectedPicks = freshMatches.slice(0, 3);
+      let autoMsg = `⚡ <b>WINSCOPE OTOMATİK CANLI FIRSAT!</b> ⚡
+🕒 Saat: ${new Date().toLocaleTimeString('tr-TR')}
+
+`;
+      
+      for (const f of selectedPicks) {
+        notifiedLiveFixtures.add(f.id);
+        const evalData = await evaluateMatchAdvanced(f.id);
+        autoMsg += `🏆 <b>${f.league}</b>
+⚽ ${f.home} vs ${f.away}
+⏱️ Dk: ${f.minute}' | Skor: ${f.homeScore}-${f.awayScore}
+🎯 Tercih: <b>${evalData.mainPickDisplay}</b> (Oran: ${evalData.smartPick.odd || 1.65})
+-------------------
+`;
+      }
+
+      await sendTelegramMessage(autoMsg);
+      console.log("[Auto-Scan OK] Otomatik canlı kombin Telegram'a gönderildi.");
+    }
+  } catch (err) {
+    console.error("[Auto-Scan Error]", err.message);
+  }
+}, AUTO_SCAN_INTERVAL_MS);
+
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Auto Telegram Master", databaseConfigured: Boolean(pool) }));
 
 app.listen(PORT, () => {
-  console.log(`WinScope Active Telegram Master running on port ${PORT}`);
+  console.log(`WinScope Auto Telegram Master running on port ${PORT}`);
 });
