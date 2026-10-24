@@ -35,38 +35,42 @@ let providerRateLimitedUntil = 0;
 const savedAnalyses = new Map();
 const savedCoupons = new Map();
 
-// IDDAA.COM KESİN BEYAZ LİSTE (SADECE RESMİ VE POPÜLER İDDAA LİGLERİ)
-const STRICT_IDDAA_LEAGUES = [
-  "super lig", "1. lig", "premier league", "la liga", "serie a", "bundesliga", "ligue 1",
-  "eredivisie", "pro league", "championship", "primeira liga", "champions league",
-  "europa league", "conference league", "liga profesional", "serie a", "mls", "liga mx",
-  "superliga", "ekstraklasa", "allsvenskan", "eliteserien", "parva liga", "1. hnl",
-  "superettan", "2. bundesliga", "segunda division", "serie b", "ligue 2"
+// İDDAA.COM BÜLTENİNDE BULUNAN RESMİ İDDAA ÜLKELERİ VE LİGLERİ
+const IDDAA_ALLOWED_COUNTRIES = [
+  "turkey", "england", "spain", "italy", "germany", "france", "netherlands", "portugal",
+  "belgium", "scotland", "austria", "switzerland", "brazil", "argentina", "mexico", "usa",
+  "denmark", "norway", "sweden", "poland", "czech-republic", "greece", "croatia", "bulgaria"
 ];
 
-// IDDAA'DA ASLA BULUNMAYAN KÜÇÜK VE BÖLGESEL/AMATÖR LİG KARA LİSTESİ
-const STRICT_IDDAA_EXCLUDE = [
-  "oberliga", "regionalliga", "bayern", "nord", "belarus", "latvia", "lithuania", "estonia",
-  "kenya", "ethiopia", "fkf", "welwalo", "hadiya", "migori", "fasil", "rwanda", "uganda",
-  "tanzania", "zambia", "zimbabwe", "malawi", "ghana", "nigeria", "senegal", "cameroon",
-  "ivory coast", "vietnam", "thailand", "indonesia", "myanmar", "bangladesh", "nepal",
-  "malaysia", "mongolia", "fiji", "tahiti", "papua", "guatemala", "honduras", "el salvador",
-  "nicaragua", "panama", "jamaica", "barbados", "women", "damallsvenskan", "frauen",
-  "feminine", "femenil", "w-league", "u19", "u21", "u23", "reserves", "youth", "amateur"
+// KESİN KARA LİSTE (İDDADA OLMAYAN ÜLKELER & KADIN/AMATÖR)
+const IDDAA_BLOCKED_TERMS = [
+  "syria", "congo", "kosovo", "kenya", "ethiopia", "rwanda", "uganda", "tanzania", "zambia",
+  "zimbabwe", "malawi", "ghana", "nigeria", "senegal", "cameroon", "ivory coast", "vietnam",
+  "thailand", "indonesia", "myanmar", "bangladesh", "nepal", "malaysia", "mongolia", "fiji",
+  "tahiti", "papua", "guatemala", "honduras", "el salvador", "nicaragua", "panama", "jamaica",
+  "barbados", "belarus", "latvia", "lithuania", "estonia", "women", "damallsvenskan", "frauen",
+  "feminine", "femenil", "w-league", "u19", "u21", "u23", "reserves", "youth", "amateur", "oberliga", "regionalliga"
 ];
 
-function isPureIddaaMatch(match) {
-  const text = `${match.league || ""} ${match.country || ""} ${match.home || ""} ${match.away || ""}`.toLowerCase();
-  
-  // 1. Kara listede varsa kesinlikle ELE
-  for (const exc of STRICT_IDDAA_EXCLUDE) {
-    if (text.includes(exc)) return false;
+function isRealIddaaMatch(match) {
+  const country = String(match.country || "").toLowerCase();
+  const league = String(match.league || "").toLowerCase();
+  const home = String(match.home || "").toLowerCase();
+  const away = String(match.away || "").toLowerCase();
+  const fullText = `${country} ${league} ${home} ${away}`;
+
+  // 1. Kara listedeki terim/ülke varsa KESİNLİKLE ELE
+  for (const term of IDDAA_BLOCKED_TERMS) {
+    if (fullText.includes(term)) return false;
   }
 
-  // 2. Beyaz listede var mı kontrol et
-  for (const lea of STRICT_IDDAA_LEAGUES) {
-    if (text.includes(lea)) return true;
+  // 2. İddaa.com'da oynanan izinli ülkelerden biri mi?
+  for (const allowedC of IDDAA_ALLOWED_COUNTRIES) {
+    if (country.includes(allowedC) || fullText.includes(allowedC)) return true;
   }
+
+  // 3. Şampiyonlar Ligi / Avrupa Ligi / Konferans Ligi istisnası
+  if (/champions league|europa league|conference league/i.test(league)) return true;
 
   return false;
 }
@@ -489,15 +493,15 @@ app.get("/api/match/:id/analyze", async (req, res) => {
   }
 });
 
-// CANLI KOMBİN - SADECE %100 RESMİ İDDAA MAÇLARI
+// CANLI KOMBİN - SADECE İDDAA BÜLTENİ ÜLKELERİ
 async function generateLiveCouponLogic() {
   try {
     const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 30_000);
     const rawMatches = payload.response || [];
     let liveMatches = rawMatches.map(m => normalizeProviderMatch(m)).filter(m => m.status === "LIVE" || m.status === "HT");
 
-    // %100 RESMİ İDDAA FİLTRESİ
-    let iddaaLive = liveMatches.filter(m => isPureIddaaMatch(m));
+    // %100 ÜLKE VE RESMİ İDDAA FİLTRESİ
+    let iddaaLive = liveMatches.filter(m => isRealIddaaMatch(m));
     if (iddaaLive.length >= 1) liveMatches = iddaaLive;
 
     const picks = [];
@@ -562,15 +566,15 @@ app.post("/api/coupon/live", async (_req, res) => {
   res.json(couponData);
 });
 
-// MAÇ ÖNÜ KUPON - SADECE %100 RESMİ İDDAA MAÇLARI
+// MAÇ ÖNÜ KUPON - SADECE İDDAA BÜLTENİ ÜLKELERİ
 async function generateCouponLogic(dateStr) {
   try {
     const payload = await cachedProviderRequest(`fixtures:${dateStr}`, `/fixtures?date=${dateStr}&timezone=Europe/Istanbul`, 5 * 60_000);
     const rawMatches = payload.response || [];
     let fixtures = rawMatches.map(m => normalizeProviderMatch(m)).filter(m => m.status === "NS");
 
-    // %100 RESMİ İDDAA FİLTRESİ
-    let iddaaFixtures = fixtures.filter(m => isPureIddaaMatch(m));
+    // %100 ÜLKE VE RESMİ İDDAA FİLTRESİ
+    let iddaaFixtures = fixtures.filter(m => isRealIddaaMatch(m));
     if (iddaaFixtures.length >= 1) fixtures = iddaaFixtures;
 
     fixtures = fixtures.slice(0, 15);
@@ -759,8 +763,8 @@ app.get("/api/live", async (_req, res) => {
   }
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Ultra Pure Iddaa Only", databaseConfigured: Boolean(pool) }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Country Filtered Perfect Iddaa", databaseConfigured: Boolean(pool) }));
 
 app.listen(PORT, () => {
-  console.log(`WinScope Ultra Pure Iddaa Only running on port ${PORT}`);
+  console.log(`WinScope Country Filtered Perfect Iddaa running on port ${PORT}`);
 });
