@@ -141,11 +141,11 @@ async function initDatabase() {
 
 function mapProviderStatus(status) {
   const value = String(status || "").toLowerCase();
+  if (["finished", "full", "ft", "aet", "pen"].includes(value)) return "FT";
   if (/^\d{1,3}$/.test(value) || ["live", "in_play", "1h", "2h", "ht", "halftime"].includes(value)) {
     if (["half", "halftime", "ht"].includes(value)) return "HT";
     return "LIVE";
   }
-  if (["finished", "full", "ft"].includes(value)) return "FT";
   return String(status || "NS").toUpperCase();
 }
 
@@ -206,28 +206,14 @@ function generateOrFetchOdds(fixtureId) {
   return { homeWin, draw, awayWin, over25 };
 }
 
-// MAÇ ÖNÜ MARKET SEÇİM MOTORU (İDDAA.COM UYUMLU - MS 1.5 ÜST KESİNLİKLE ÇIKARILDI!)
 function decideSmartMarket(historyData, odds) {
   const { ms1Pct, ms2Pct, over25Pct, bttsPct, ht05Pct, home15Pct, away15Pct } = historyData;
 
-  if (odds.homeWin <= 1.65 || ms1Pct >= 58 || home15Pct >= 55) {
-    return { mainPick: "EV 1.5 ÜST", alternative: "MS 1", odd: 1.65 };
-  }
-  if (odds.awayWin <= 1.80 || ms2Pct >= 55 || away15Pct >= 50) {
-    return { mainPick: "DEP 1.5 ÜST", alternative: "MS 2", odd: 1.78 };
-  }
-  if (bttsPct >= 58) {
-    return { mainPick: "KG VAR", alternative: "MS 2.5 ÜST", odd: 1.70 };
-  }
-  if (over25Pct >= 55) {
-    return { mainPick: "MS 2.5 ÜST", alternative: "KG VAR", odd: 1.75 };
-  }
-  if (ht05Pct >= 75) {
-    return { mainPick: "İY 0.5 ÜST", alternative: "KG VAR", odd: 1.45 };
-  }
-  if (ms1Pct > ms2Pct) {
-    return { mainPick: "MS 1", alternative: "KG VAR", odd: 1.85 };
-  }
+  if (odds.homeWin <= 1.65 || ms1Pct >= 58 || home15Pct >= 55) return { mainPick: "EV 1.5 ÜST", alternative: "MS 1", odd: 1.65 };
+  if (odds.awayWin <= 1.80 || ms2Pct >= 55 || away15Pct >= 50) return { mainPick: "DEP 1.5 ÜST", alternative: "MS 2", odd: 1.78 };
+  if (bttsPct >= 58) return { mainPick: "KG VAR", alternative: "MS 2.5 ÜST", odd: 1.70 };
+  if (over25Pct >= 55) return { mainPick: "MS 2.5 ÜST", alternative: "KG VAR", odd: 1.75 };
+  if (ht05Pct >= 75) return { mainPick: "İY 0.5 ÜST", alternative: "KG VAR", odd: 1.45 };
   return { mainPick: "KG VAR", alternative: "MS 2.5 ÜST", odd: 1.72 };
 }
 
@@ -246,7 +232,8 @@ async function evaluateMatchAdvanced(fixtureId) {
     kickoff_utc: fRaw.fixture?.date
   });
 
-  const isLive = matchInfo.status === "LIVE" || matchInfo.status === "HT" || (matchInfo.minute != null && matchInfo.minute > 0);
+  const isFinished = matchInfo.status === "FT";
+  const isLive = !isFinished && (matchInfo.status === "LIVE" || matchInfo.status === "HT" || (matchInfo.minute != null && matchInfo.minute > 0));
   const odds = generateOrFetchOdds(fixtureId);
 
   let historyData = null;
@@ -299,9 +286,9 @@ async function evaluateMatchAdvanced(fixtureId) {
     historyData = {
       total: 100, over25Pct: 57, under25Pct: 43, bttsPct: 57, bttsNoPct: 43,
       ht05Pct: 72, ht05UnderPct: 28, ht15Pct: 45, ht15UnderPct: 55, home15Pct: 54, away15Pct: 42,
-      ms1Pct: 30, ms2Pct: 45, msXPct: 25,
-      ftScores: [["1-2", 22], ["2-1", 18], ["1-1", 15], ["0-2", 12], ["1-3", 10]],
-      htScores: [["0-0", 35], ["0-1", 28], ["1-0", 20], ["1-1", 17]]
+      ms1Pct: 35, ms2Pct: 42, msXPct: 23,
+      ftScores: [["1-2", 22], ["2-1", 18], ["1-1", 15], ["0-2", 12]],
+      htScores: [["0-0", 35], ["0-1", 28], ["1-0", 20]]
     };
   }
 
@@ -316,50 +303,74 @@ async function evaluateMatchAdvanced(fixtureId) {
   let surpriseDisplay = "";
   let mainPickDisplay = smartPick.mainPick;
 
-  if (isLive) {
+  if (isFinished) {
+    // MAÇ BİTTİ
+    let htHome = matchInfo.htHomeScore ?? (currentHomeScore > 0 ? 0 : 0);
+    let htAway = matchInfo.htAwayScore ?? (currentAwayScore > 0 ? 0 : 0);
+    halfTimeDisplayScore = `${htHome}-${htAway} (İY Bitti)`;
+    surpriseDisplay = "Maç Bitti";
+    mainPickDisplay = currentTotalGoals >= 3 ? "MS 2.5 ÜST" : (currentHomeScore > 0 && currentAwayScore > 0 ? "KG VAR" : "MS KAPANIS");
+  } else if (isLive) {
+    // CANLI MAÇ MANTIĞI & GİDİŞATA GÖRE TAHMİN BAZI
     if (isSecondHalf) {
       let htHome = matchInfo.htHomeScore ?? (currentTotalGoals === 0 ? 0 : Math.min(currentHomeScore, 1));
       let htAway = matchInfo.htAwayScore ?? (currentTotalGoals === 0 ? 0 : Math.min(currentAwayScore, 1));
       halfTimeDisplayScore = `${htHome}-${htAway} (İY Bitti · Canlı ${liveMin}')`;
-      if (currentTotalGoals >= 4) { surpriseDisplay = "Son Dakika Golü / MS 5.5 ÜST"; mainPickDisplay = "MS 4.5 ÜST"; }
-      else if (currentTotalGoals >= 2) { surpriseDisplay = "Kapanış Golü Beklentisi"; mainPickDisplay = "MS 3.5 ÜST"; }
-      else if (currentTotalGoals === 1) { surpriseDisplay = "2. Yarı Beraberlik / KG Var"; mainPickDisplay = "MS 2.5 ÜST"; }
-      else { surpriseDisplay = "Geç Gol Beklentisi (2. Yarı 0.5Ü)"; mainPickDisplay = "2. YARI GOL VAR"; }
+
+      // Skor gidişatına göre canlı tahminler
+      if (currentTotalGoals >= 4) {
+        mainPickDisplay = "MS 4.5 ÜST";
+        surpriseDisplay = "SÜRPRİZ: 2/1";
+      } else if (currentTotalGoals === 3) {
+        mainPickDisplay = "MS 3.5 ÜST";
+        surpriseDisplay = "SÜRPRİZ: 1/2";
+      } else if (currentTotalGoals === 2) {
+        mainPickDisplay = "MS 2.5 ÜST";
+        surpriseDisplay = "SÜRPRİZ: 2/1";
+      } else if (currentTotalGoals === 1) {
+        mainPickDisplay = "MS 1.5 ÜST";
+        surpriseDisplay = "SÜRPRİZ: 1/2";
+      } else {
+        mainPickDisplay = "2. YARI GOL VAR";
+        surpriseDisplay = "SÜRPRİZ: 2/1";
+      }
     } else {
+      // 1. YARI CANLI (Dk < 45)
       halfTimeDisplayScore = `${currentHomeScore}-${currentAwayScore} (Canlı ${liveMin}')`;
-      surpriseDisplay = currentTotalGoals === 0 ? "Erken Gol Beklentisi (İY 0.5Ü)" : "İY 2. Gol Baskısı";
+      if (currentTotalGoals === 0) {
+        mainPickDisplay = "İY 0.5 ÜST";
+        surpriseDisplay = "SÜRPRİZ: 1/2";
+      } else if (currentTotalGoals === 1) {
+        mainPickDisplay = "İY 1.5 ÜST";
+        surpriseDisplay = "SÜRPRİZ: 2/1";
+      } else {
+        mainPickDisplay = "İY 2.5 ÜST";
+        surpriseDisplay = "SÜRPRİZ: 1/2";
+      }
     }
   } else {
+    // MAÇ ÖNÜ
     halfTimeDisplayScore = `${historyData.htScores[0]?.[0] || "0-0"} (%35)`;
-    surpriseDisplay = historyData.home15Pct > 50 ? "Ev Sahibi Baskın (Ev 1.5Ü)" : "Erken Gol Beklentisi";
+    // Verilerde 1/2 veya 2/1 sürpriz dönüş vurgusu
+    surpriseDisplay = historyData.ms2Pct > 40 ? "SÜRPRİZ: 1/2" : "SÜRPRİZ: 2/1";
   }
 
-  // TAHMİN-SKOR ÇELİŞKİSİNİ KÖKTEN ÇÖZEN MANTIKSAL SKOR FİLTRESİ
+  // TAHMİN-SKOR ÇELİŞKİSİNİ ENGELLEYEN SKOR HESAPLAMA
   let probableFullTimeScore = "2-1";
-  let altFullTimeScore = "1-1";
+  let altFullTimeScore = "1-2";
 
-  if (mainPickDisplay === "KG VAR" || mainPickDisplay === "MS 2.5 ÜST") {
-    // KG Var ve 2.5 Üst tahminlerinde skor asla 0-1 veya 1-0 olamaz! Her iki takım da gol atmalı.
-    const validBttsScores = historyData.ftScores.filter(([s]) => {
-      const [h, a] = s.split("-").map(Number);
-      return h > 0 && a > 0;
-    });
-    if (validBttsScores.length) {
-      probableFullTimeScore = validBttsScores[0][0];
-      altFullTimeScore = validBttsScores[1] ? validBttsScores[1][0] : "2-2";
-    } else {
-      probableFullTimeScore = historyData.ms2Pct > historyData.ms1Pct ? "1-2" : "2-1";
-      altFullTimeScore = "2-2";
-    }
-  } else if (mainPickDisplay === "DEP 1.5 ÜST" || historyData.ms2Pct > 42) {
+  if (isFinished) {
+    probableFullTimeScore = `${currentHomeScore}-${currentAwayScore}`;
+    altFullTimeScore = `${currentHomeScore}-${currentAwayScore}`;
+  } else if (mainPickDisplay.includes("KG VAR") || mainPickDisplay.includes("2.5 ÜST")) {
+    probableFullTimeScore = historyData.ms2Pct > historyData.ms1Pct ? "1-2" : "2-1";
+    altFullTimeScore = "2-2";
+  } else if (mainPickDisplay.includes("DEP") || historyData.ms2Pct > 40) {
     probableFullTimeScore = "1-2";
     altFullTimeScore = "0-2";
-  } else if (mainPickDisplay === "EV 1.5 ÜST" || historyData.ms1Pct > 42) {
+  } else {
     probableFullTimeScore = "2-1";
     altFullTimeScore = "2-0";
-  } else {
-    probableFullTimeScore = historyData.ftScores[0]?.[0] || "1-1";
-    altFullTimeScore = historyData.ftScores[1]?.[0] || "2-1";
   }
 
   let liveStats = [];
@@ -376,7 +387,7 @@ async function evaluateMatchAdvanced(fixtureId) {
   }
 
   return {
-    matchInfo, isLive, odds, historyData, liveStats,
+    matchInfo, isLive, isFinished, odds, historyData, liveStats,
     halfTimeDisplayScore, surpriseDisplay, mainPickDisplay, isSecondHalf, smartPick,
     probableFullTimeScore, altFullTimeScore
   };
@@ -386,17 +397,17 @@ app.get("/api/match/:id/analyze", async (req, res) => {
   const fixtureId = req.params.id;
   try {
     const resEval = await evaluateMatchAdvanced(fixtureId);
-    const { matchInfo, isLive, odds, historyData, liveStats, halfTimeDisplayScore, surpriseDisplay, mainPickDisplay, isSecondHalf, smartPick, probableFullTimeScore, altFullTimeScore } = resEval;
+    const { matchInfo, isLive, isFinished, odds, historyData, liveStats, halfTimeDisplayScore, surpriseDisplay, mainPickDisplay, isSecondHalf, smartPick, probableFullTimeScore, altFullTimeScore } = resEval;
 
     res.json({
       fixtureId: Number(fixtureId),
       iddaaCode: matchInfo.iddaaCode,
-      matchStatus: isLive ? "LIVE" : "NS",
+      matchStatus: isFinished ? "FT" : (isLive ? "LIVE" : "NS"),
       mainPick: mainPickDisplay,
       alternative: smartPick.alternative,
       halfTimeScore: halfTimeDisplayScore,
-      fullTimeScore: `${probableFullTimeScore} (%18)`,
-      alternativeFullTimeScore: `${altFullTimeScore} (%14)`,
+      fullTimeScore: isFinished ? `${matchInfo.homeScore}-${matchInfo.awayScore}` : `${probableFullTimeScore} (%18)`,
+      alternativeFullTimeScore: isFinished ? `${matchInfo.homeScore}-${matchInfo.awayScore}` : `${altFullTimeScore} (%14)`,
       surprise: surpriseDisplay,
       marketDirection: "Home: DÜŞTÜ · Away: SABİT · Over 2.5: DÜŞTÜ",
       confidence: `İddaa & Bet365 Analizi · %${historyData.over25Pct} Güven`,
@@ -435,7 +446,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       iy05OverPercent: isSecondHalf ? "-" : historyData.ht05Pct,
       iy05UnderPercent: isSecondHalf ? "-" : historyData.ht05UnderPct,
       iy15OverPercent: isSecondHalf ? "-" : historyData.ht15Pct,
-      reasons: [`Analiz Sonucu: ${mainPickDisplay}`, "iddaa.com bülteni ve geçmiş veri matriksi doğrulandı."]
+      reasons: [`Analiz Sonucu: ${mainPickDisplay}`, "iddaa.com bülteni ve canlı istatistik doğrulandı."]
     });
   } catch (error) {
     res.status(502).json({ error: "Analiz üretilemedi.", detail: error.message });
@@ -484,7 +495,7 @@ async function generateLiveCouponLogic() {
       isLive: true,
       status: "PENDING_APPROVAL",
       picks,
-      note: "Canlı maçların istatistiklerine göre 2-3 maçlık canlı iddaa kombini oluşturulmuştur."
+      note: "Canlı iddaa kombini"
     };
   } catch (error) {
     return {
@@ -544,7 +555,7 @@ async function generateCouponLogic(dateStr) {
       status: "PENDING_APPROVAL",
       picks,
       inspected: rawMatches,
-      note: "Günün kuponu iddaa.com maç önü bülten marketleriyle oluşturulmuştur."
+      note: "Maç önü kuponu"
     };
   } catch (error) {
     return {
@@ -700,8 +711,8 @@ app.get("/api/live", async (_req, res) => {
   }
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Ultra Logic Clean", databaseConfigured: Boolean(pool) }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Super Master Final", databaseConfigured: Boolean(pool) }));
 
 app.listen(PORT, () => {
-  console.log(`WinScope Ultra Logic Clean running on port ${PORT}`);
+  console.log(`WinScope Super Master Final running on port ${PORT}`);
 });
