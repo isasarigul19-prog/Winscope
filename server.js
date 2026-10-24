@@ -38,7 +38,6 @@ let providerRateLimitedUntil = 0;
 const savedAnalyses = new Map();
 const savedCoupons = new Map();
 
-// TELEGRAM BİLDİRİM FONKSİYONU
 async function sendTelegramMessage(text) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
     console.log("[Telegram Skip] Bot Token veya Chat ID eksik.");
@@ -69,10 +68,8 @@ async function sendTelegramMessage(text) {
   }
 }
 
-// İDDAA.COM RESMİ LİGLERİ BEYAZ LİSTESİ
 const OFFICIAL_IDDAA_LEAGUES_REGEX = /süper lig|1\. lig|premier league|la liga|serie a|bundesliga|ligue 1|eredivisie|pro league|championship|primeira liga|champions league|europa league|conference league|liga profesional|serie a|mls|liga mx|superliga|ekstraklasa|allsvenskan|eliteserien|2\. bundesliga|segunda division|serie b|ligue 2/i;
 
-// KESİN KARA LİSTE (ALT LİG, B TAKIMLARI VE EGZOTİK ÜLKELER)
 const STRICT_UNWANTED_REGEX = /third league|fourth league|3\. lig|4\. lig|5\. lig|oberliga|regionalliga|regional|southwest|northeast|northwest|southeast| ii| ii$| b$| b |reserve|youth|u19|u21|u23|women|damallsvenskan|frauen|feminine|femenil|w-league|amateur|syria|congo|kosovo|kenya|ethiopia|rwanda|uganda|tanzania|zambia|zimbabwe|malawi|ghana|nigeria|senegal|cameroon|ivory coast|vietnam|thailand|indonesia|myanmar|bangladesh|nepal|malaysia|mongolia|fiji|tahiti|papua|guatemala|honduras|el salvador|nicaragua|panama|jamaica|barbados|belarus|latvia|lithuania|estonia/i;
 
 function isStrictIddaaMatch(match) {
@@ -507,19 +504,20 @@ app.get("/api/match/:id/analyze", async (req, res) => {
   }
 });
 
-// CANLI KOMBİN
 async function generateLiveCouponLogic() {
   try {
     const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 30_000);
     const rawMatches = payload.response || [];
-    let liveMatches = rawMatches.map(m => normalizeProviderMatch(m)).filter(m => m.status === "LIVE" || m.status === "HT");
+    let liveMatches = rawMatches.map(m => normalizeProviderMatch(m)).filter(m => {
+      const isActuallyLive = m.status === "LIVE" && m.minute != null && m.minute >= 10 && m.minute <= 75;
+      return isActuallyLive && isStrictIddaaMatch(m);
+    });
 
-    let iddaaLive = liveMatches.filter(m => isStrictIddaaMatch(m));
-    iddaaLive.sort(() => Math.random() - 0.5);
+    liveMatches.sort(() => Math.random() - 0.5);
 
     const picks = [];
-    for (let i = 0; i < iddaaLive.length; i++) {
-      const f = iddaaLive[i];
+    for (let i = 0; i < liveMatches.length; i++) {
+      const f = liveMatches[i];
       try {
         const evalData = await evaluateMatchAdvanced(f.id);
         picks.push({
@@ -594,7 +592,6 @@ app.post("/api/coupon/live", async (_req, res) => {
   res.json(couponData);
 });
 
-// MAÇ ÖNÜ KUPON
 async function generateCouponLogic(dateStr) {
   try {
     const payload = await cachedProviderRequest(`fixtures:${dateStr}`, `/fixtures?date=${dateStr}&timezone=Europe/Istanbul`, 5 * 60_000);
@@ -811,25 +808,28 @@ app.get("/api/live", async (_req, res) => {
   }
 });
 
-// ARKA PLANDA OTOMATİK CANLI KOMBİN TARAMASI (HER 5 DAKİKADA BİR)
+// OTOMATİK TARAMA (Dk 10-75 Arası Kesin ve Temiz Canlı Filtre)
 const AUTO_SCAN_INTERVAL_MS = 5 * 60 * 1000;
 const notifiedLiveFixtures = new Set();
 
 setInterval(async () => {
   try {
-    console.log("[Auto-Scan] Canlı maçlar otomatik taranıyor...");
+    console.log("[Auto-Scan] Canlı maçlar taranıyor...");
     const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 30_000);
     const rawMatches = payload.response || [];
     
     let liveMatches = rawMatches
       .map(m => normalizeProviderMatch(m))
-      .filter(m => (m.status === "LIVE" || m.status === "HT") && isStrictIddaaMatch(m));
+      .filter(m => {
+        const isActuallyLive = m.status === "LIVE" && m.minute != null && m.minute >= 10 && m.minute <= 75;
+        return isActuallyLive && isStrictIddaaMatch(m);
+      });
 
     let freshMatches = liveMatches.filter(m => !notifiedLiveFixtures.has(m.id));
 
     if (freshMatches.length >= 2) {
       const selectedPicks = freshMatches.slice(0, 3);
-      let autoMsg = `⚡ <b>WINSCOPE OTOMATİK CANLI FIRSAT!</b> ⚡
+      let autoMsg = `⚡ <b>WINSCOPE CANLI FIRSAT KOMBİNİ</b> ⚡
 🕒 Saat: ${new Date().toLocaleTimeString('tr-TR')}
 
 `;
@@ -846,15 +846,15 @@ setInterval(async () => {
       }
 
       await sendTelegramMessage(autoMsg);
-      console.log("[Auto-Scan OK] Otomatik canlı kombin Telegram'a gönderildi.");
+      console.log("[Auto-Scan OK] Tertemiz canlı kombin Telegram'a gönderildi.");
     }
   } catch (err) {
     console.error("[Auto-Scan Error]", err.message);
   }
 }, AUTO_SCAN_INTERVAL_MS);
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Auto Telegram Master", databaseConfigured: Boolean(pool) }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Strict Live Master", databaseConfigured: Boolean(pool) }));
 
 app.listen(PORT, () => {
-  console.log(`WinScope Auto Telegram Master running on port ${PORT}`);
+  console.log(`WinScope Strict Live Master running on port ${PORT}`);
 });
