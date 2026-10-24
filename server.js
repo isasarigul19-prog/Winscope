@@ -315,7 +315,31 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
     add("DEP 1.5 ÜST", h.away15Pct, h.total >= 30, "Tarihsel deplasman 2+ gol gerçekleşme oranı");
   }
   candidates.sort((a, b) => b.pct - a.pct);
-  if (!candidates.length) return { mainPick: "VERİ YETERSİZ — TERCİH YOK", alternative: "—", confidence: null, rationale: "Gerçek oran/istatistik veya yeterli tarihsel örneklem bulunamadı." };
+  if (!candidates.length) {
+    // Always provide a match-state read, but never invent a percentage.
+    let market = "TAKİP: MAÇ VERİSİ";
+    let rationale = "Yeterli tarihsel örneklem veya doğrulanmış piyasa oranı yok; yüzde hesaplanmadı.";
+    if (isLive) {
+      if (goals === 0 && minute <= 70) {
+        market = "MS 0.5 ÜST";
+        rationale = live.length >= 2 && totalShots >= 8
+          ? "Skor 0-0; canlı şut verisi gol senaryosunu izlemeyi destekliyor, tarihsel doğrulama eksik."
+          : "Skor 0-0; maçın kalan süresi dikkate alınarak gol senaryosu izlenebilir, istatistik desteği sınırlı.";
+      } else if (goals === 1 && minute <= 70) {
+        market = "MS 2.5 ÜST";
+        rationale = "Toplam 1 gol var; iki gol çizgisine ulaşmak için en az iki gol daha gerekir. Canlı tempo ve veri eksikliği nedeniyle güven yüzdesi verilmedi.";
+      } else if (goals >= 2 && goals < 4) {
+        market = `MS ${goals + 0.5} ÜST`;
+        rationale = `Mevcut toplam ${goals} gol; sonraki gol çizgisi izleme amaçlı gösteriliyor, olasılık yüzdesi hesaplanmadı.`;
+      } else {
+        market = "TAKİP: MAÇ SONU GOL ÇİZGİSİ";
+        rationale = "Dakika/skor nedeniyle otomatik tercih için yeterli doğrulama yok.";
+      }
+    } else {
+      market = "ANALİZ: PİYASA VE TARİHSEL VERİ BEKLENİYOR";
+    }
+    return { mainPick: market, alternative: "—", confidence: null, rationale };
+  }
   const best = candidates[0];
   const next = candidates.find(c => c.market !== best.market);
   return { mainPick: best.market, alternative: next?.market || "—", confidence: best.pct, rationale: best.rationale };
@@ -467,7 +491,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       statsAvailable: liveStats.length > 0,
       stats: liveStats,
       history: {
-        available: true,
+        available: historyData.total > 0,
         sampleSize: historyData.total,
         over25Percent: historyData.over25Pct,
         home15Percent: historyData.home15Pct,
@@ -480,6 +504,61 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     res.status(502).json({ error: "Analiz üretilemedi.", detail: error.message });
   }
 });
+
+
+function registerTelegramPicks(draftId, picks, sourceLabel = "WinScope Telegram") {
+  const valid = (Array.isArray(picks) ? picks : []).filter(p => p && Number(p.fixtureId) > 0 && p.market);
+  if (!valid.length) return;
+  const existing = activeSentCoupons.get(draftId);
+  activeSentCoupons.set(draftId, {
+    sourceLabel,
+    picks: valid.map(p => ({
+      fixtureId: Number(p.fixtureId),
+      home: p.home || "Ev sahibi",
+      away: p.away || "Deplasman",
+      market: String(p.market),
+      league: p.league || "",
+      resultSent: false
+    })),
+    checked: false
+  });
+}
+
+function gradePick(marketText, homeScore, awayScore, halfHome = null, halfAway = null) {
+  const market = String(marketText || "").toLocaleUpperCase("tr-TR");
+  const h = Number(homeScore), a = Number(awayScore), total = h + a;
+  if (!Number.isFinite(h) || !Number.isFinite(a)) return null;
+  const isHalf = /İY|İLK YARI|HALF TIME/.test(market);
+  const gh = isHalf && halfHome != null ? Number(halfHome) : h;
+  const ga = isHalf && halfAway != null ? Number(halfAway) : a;
+  const g = gh + ga;
+  if (isHalf && (halfHome == null || halfAway == null)) return null;
+
+  if (/KG VAR|BTTS YES/.test(market)) return gh > 0 && ga > 0;
+  if (/KG YOK|BTTS NO/.test(market)) return gh === 0 || ga === 0;
+  if (/EV SAHİBİ 0\\.5 ÜST|EV 0\\.5 ÜST|EV 1\\.5 ÜST/.test(market)) {
+    const line = /1\\.5/.test(market) ? 1.5 : 0.5; return gh > line;
+  }
+  if (/DEP(?:LASMAN)? 0\\.5 ÜST|DEP(?:LASMAN)? 1\\.5 ÜST/.test(market)) {
+    const line = /1\\.5/.test(market) ? 1.5 : 0.5; return ga > line;
+  }
+  const over = market.match(/(?:MS\s*)?(\d+(?:\.\d+)?)\s*ÜST/);
+  if (over) return g > Number(over[1]);
+  const under = market.match(/(?:MS\s*)?(\d+(?:\.\d+)?)\s*ALT/);
+  if (under) return g < Number(under[1]);
+  if (/MS 1\\b/.test(market)) return h > a;
+  if (/MS X\\b|BERABERLİK/.test(market)) return h === a;
+  if (/MS 2\\b/.test(market)) return h < a;
+  return null;
+}
+
+async function fetchFixtureResult(fixtureId) {
+  const payload = await cachedProviderRequest(`result:${fixtureId}`, `/fixtures?id=${encodeURIComponent(fixtureId)}`, 60_000);
+  const rows = payload.response || payload.data || [];
+  if (!rows.length) return null;
+  const normalized = normalizeProviderMatch(rows[0]);
+  return { ...normalized, raw: rows[0] };
+}
 
 async function generateLiveCouponLogic() {
   try {
@@ -551,7 +630,8 @@ async function generateLiveCouponLogic() {
 -------------------
 `;
     });
-    sendTelegramMessage(tgMsg);
+    registerTelegramPicks(coupon.draftId, coupon.picks, "Günün canlı kuponu");
+    await sendTelegramMessage(tgMsg);
 
     return coupon;
   } catch (error) {
@@ -636,7 +716,8 @@ async function generateCouponLogic(dateStr) {
 -------------------
 `;
     });
-    sendTelegramMessage(tgMsg);
+    registerTelegramPicks(coupon.draftId, coupon.picks, "Günün kuponu");
+    await sendTelegramMessage(tgMsg);
 
     return coupon;
   } catch (error) {
@@ -742,7 +823,13 @@ app.post("/api/analyses/approve", async (req, res) => {
     } catch(e) {}
   }
 
-  sendTelegramMessage(`📋 <b>ANALİZ ONAYLANDI VE KAYDEDİLDİ</b>
+  if (record.fixture_id && record.analysis?.mainPick && !/VERİ YETERSİZ|TERCİH YOK|Maç tamamlandı/i.test(record.analysis.mainPick)) {
+    registerTelegramPicks(`analysis-${record.fixture_id}-${Date.now()}`, [{
+      fixtureId: record.fixture_id, home: record.home_team, away: record.away_team,
+      market: record.analysis.mainPick, league: record.league || ""
+    }], "Onaylanan maç analizi");
+  }
+  await sendTelegramMessage(`📋 <b>ANALİZ ONAYLANDI VE KAYDEDİLDİ</b>
 ⚽ ${record.home_team} vs ${record.away_team}
 🎯 Tercih: <b>${record.analysis?.mainPick || '—'}</b>`);
   res.json({ success: true, message: "Analiz başarıyla kaydedildi.", record });
@@ -808,59 +895,51 @@ setInterval(async () => {
     const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 30_000);
     const rawMatches = payload.response || [];
     
-    // 1. MAÇ SONU KONTROLÜ VE SONUÇ BİLDİRİMİ
+    // 1. SONUÇ TAKİBİ: fixture ID ile doğrudan sorgula; biten maç canlı listesinden çıkmış olsa da bulunur.
     for (const [draftId, couponInfo] of activeSentCoupons.entries()) {
-      if (couponInfo.checked) continue;
-      
       let allFinished = true;
-      let wonCount = 0;
-      let matchDetailsText = "";
-
       for (const pick of couponInfo.picks) {
-        const matchData = rawMatches.find(m => Number(m.fixture?.id ?? m.id) === Number(pick.fixtureId));
-        const normalized = matchData ? normalizeProviderMatch(matchData) : null;
-        
-        if (!normalized || normalized.status !== "FT") {
-          allFinished = false;
-        } else {
-          const totalGoals = (normalized.homeScore ?? 0) + (normalized.awayScore ?? 0);
-          let pickWon = false;
-          
-          if (pick.market.includes("0.5 ÜST")) {
-            if (pick.market.includes("EV") && (normalized.homeScore ?? 0) >= 1) pickWon = true;
-            else if (pick.market.includes("DEPLASMAN") && (normalized.awayScore ?? 0) >= 1) pickWon = true;
-          } else if (pick.market.includes("1.5 ÜST")) {
-            if (totalGoals >= 2) pickWon = true;
-          } else if (pick.market.includes("2.5 ÜST")) {
-            if (totalGoals >= 3) pickWon = true;
-          } else if (pick.market.includes("ÜST")) {
-            const line = parseFloat(pick.market.replace(/[^0-9.]/g, "")) || 2.5;
-            if (totalGoals > line) pickWon = true;
-          } else {
-            pickWon = totalGoals > 0;
+        if (pick.resultSent) continue;
+        try {
+          const result = await fetchFixtureResult(pick.fixtureId);
+          if (!result || result.status !== "FT") {
+            allFinished = false;
+            continue;
           }
-
-          if (pickWon) wonCount++;
-          matchDetailsText += `⚽ ${pick.home} ${normalized.homeScore}-${normalized.awayScore} ${pick.away} (MS Bitti)
-`;
+          const rawScore = result.raw?.score || {};
+          const ht = rawScore.halftime || {};
+          const won = gradePick(pick.market, result.homeScore, result.awayScore, ht.home, ht.away);
+          pick.won = won == null ? null : won;
+          if (won == null) {
+            await sendTelegramMessage(`📊 <b>WINSCOPE MAÇ SONUCU</b>
+🏆 ${pick.league || couponInfo.sourceLabel || "Maç analizi"}
+⚽ ${pick.home} ${result.homeScore}-${result.awayScore} ${pick.away}
+🎯 Tercih: ${pick.market}
+⚠️ Sonuç otomatik değerlendirilemedi; manuel kontrol gerekli.`);
+          } else {
+            await sendTelegramMessage(`${won ? "✅ <b>TERCİH KAZANDI</b>" : "❌ <b>TERCİH KAYBETTİ</b>"}
+🏆 ${pick.league || couponInfo.sourceLabel || "Maç analizi"}
+⚽ ${pick.home} ${result.homeScore}-${result.awayScore} ${pick.away}
+🎯 Tercih: ${pick.market}
+📌 Sonuç: ${won ? "KAZANDI" : "KAYBETTİ"}`);
+          }
+          pick.resultSent = true;
+        } catch (e) {
+          allFinished = false;
+          console.warn(`[Result tracker] ${pick.fixtureId}: ${e.message}`);
         }
       }
-
-      if (allFinished && couponInfo.picks.length > 0) {
-        couponInfo.checked = true;
-        const isAllWon = wonCount === couponInfo.picks.length;
-        
-        let resultMsg = isAllWon 
-          ? `🎉 <b>TEBRİKLER! KUPON KAZANDI!</b> 🎉
-
-${matchDetailsText}
-🎯 Tüm tercihler tuttu!`
-          : `❌ <b>KUPON SONUÇLANDI</b>
-
-${matchDetailsText}
-📊 Maçlar sonuçlandı.`;
-          
-        await sendTelegramMessage(resultMsg);
+      if (couponInfo.picks.every(p => p.resultSent)) {
+        const won = couponInfo.picks.filter(p => {
+          // The result marker is set only after a result was sent; result state is attached below where available.
+          return p.won === true;
+        }).length;
+        const lost = couponInfo.picks.filter(p => p.won === false).length;
+        await sendTelegramMessage(`📋 <b>WINSCOPE KUPON ÖZETİ</b>
+📦 ${couponInfo.sourceLabel || "Telegram kuponu"}
+✅ Kazanan: ${won}
+❌ Kaybeden: ${lost}
+📊 Takip edilen seçim: ${couponInfo.picks.length}`);
         activeSentCoupons.delete(draftId);
       }
     }
