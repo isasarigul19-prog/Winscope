@@ -286,6 +286,13 @@ async function fetchRealOdds(fixtureId) {
   return { source: null, homeWin: null, draw: null, awayWin: null, over25: null, under25: null, bttsYes: null, bttsNo: null };
 }
 
+function isActionableMarket(marketText) {
+  const market = String(marketText || "").toLocaleUpperCase("tr-TR");
+  if (!market || market === "—") return false;
+  if (/GERÇEKLEŞTİ|ÇİZGİ GERÇEKLEŞTİ|TAKİP:|ANALİZ:|VERİ YETERSİZ|TERCİH YOK|MAÇ TAMAMLANDI/.test(market)) return false;
+  return /(?:MS\s*)?\d+(?:\.\d+)?\s*(?:ÜST|ALT)|KG\s*(?:VAR|YOK)|(?:EV|EV SAHİBİ|DEP|DEPLASMAN)\s*\d+(?:\.\d+)?\s*ÜST|MS\s*[1X2]\b|BERABERLİK/.test(market);
+}
+
 function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matchInfo) {
   const candidates = [];
   const add = (market, pct, ok, rationale) => {
@@ -619,7 +626,7 @@ async function generateLiveCouponLogic() {
       if (isActuallyLive && isStrictIddaaMatch(f)) {
         try {
           const evalData = await evaluateMatchAdvanced(f.id);
-          if (evalData.confidenceScore >= 75 && evalData.historyData.total >= 30 && !String(evalData.mainPickDisplay).includes('VERİ YETERSİZ')) {
+          if (evalData.confidenceScore >= 75 && evalData.historyData.total >= 30 && isActionableMarket(evalData.mainPickDisplay)) {
             validMatches.push({ f, evalData });
           }
         } catch (e) {}
@@ -715,7 +722,7 @@ async function generateCouponLogic(dateStr) {
     for (const f of fixtures) {
       try {
         const evalData = await evaluateMatchAdvanced(f.id);
-        if (evalData.confidenceScore >= 75 && evalData.historyData.total >= 30 && !String(evalData.mainPickDisplay).includes('VERİ YETERSİZ')) {
+        if (evalData.confidenceScore >= 75 && evalData.historyData.total >= 30 && isActionableMarket(evalData.mainPickDisplay)) {
           picks.push({
             fixtureId: f.id,
             iddaaCode: f.iddaaCode,
@@ -1016,7 +1023,7 @@ setInterval(async () => {
       if (isActuallyLive && isStrictIddaaMatch(f) && !notifiedLiveFixtures.has(f.id)) {
         try {
           const evalData = await evaluateMatchAdvanced(f.id);
-          if (evalData.confidenceScore >= 75 && evalData.historyData.total >= 30 && !String(evalData.mainPickDisplay).includes('VERİ YETERSİZ')) {
+          if (evalData.confidenceScore >= 75 && evalData.historyData.total >= 30 && isActionableMarket(evalData.mainPickDisplay)) {
             validMatches.push({ f, evalData });
           }
         } catch (e) {}
