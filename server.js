@@ -534,7 +534,7 @@ async function generateLiveCouponLogic() {
           sampleSize: evalData.historyData.total,
           source: "WinScope İddaa Canlı Analiz"
         });
-        if (picks.length >= 3) break;
+        if (picks.length >= 2) break; // 2 MAÇ LİMİTİ
       } catch (e) { continue; }
     }
 
@@ -619,7 +619,7 @@ async function generateCouponLogic(dateStr) {
           sampleSize: evalData.historyData.total,
           source: "Bet365 & İddaa Analiz Motoru"
         });
-        if (picks.length >= 3) break;
+        if (picks.length >= 2) break; // 2 MAÇ LİMİTİ
       } catch (e) { continue; }
     }
 
@@ -808,16 +808,70 @@ app.get("/api/live", async (_req, res) => {
   }
 });
 
-// OTOMATİK TARAMA (Dk 10-75 Arası Kesin ve Temiz Canlı Filtre)
+// OTOMATİK TARAMA (2 Maçlık Fırsat Kombini + Maç Sonu Sonuç Takipçisi)
 const AUTO_SCAN_INTERVAL_MS = 5 * 60 * 1000;
 const notifiedLiveFixtures = new Set();
+const activeSentCoupons = new Map();
 
 setInterval(async () => {
   try {
-    console.log("[Auto-Scan] Canlı maçlar taranıyor...");
+    console.log("[Auto-Scan] Canlı maçlar ve sonuçlar taranıyor...");
     const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 30_000);
     const rawMatches = payload.response || [];
     
+    // 1. MAÇ SONU KONTROLÜ VE SONUÇ BİLDİRİMİ (Kazandı / Kaybetti)
+    for (const [draftId, couponInfo] of activeSentCoupons.entries()) {
+      if (couponInfo.checked) continue;
+      
+      let allFinished = true;
+      let wonCount = 0;
+      let matchDetailsText = "";
+
+      for (const pick of couponInfo.picks) {
+        const matchData = rawMatches.find(m => Number(m.fixture?.id ?? m.id) === Number(pick.fixtureId));
+        const normalized = matchData ? normalizeProviderMatch(matchData) : null;
+        
+        if (!normalized || normalized.status !== "FT") {
+          allFinished = false;
+        } else {
+          const totalGoals = (normalized.homeScore ?? 0) + (normalized.awayScore ?? 0);
+          let pickWon = false;
+          
+          if (pick.market.includes("ÜST")) {
+            const line = parseFloat(pick.market.replace(/[^0-9.]/g, "")) || 2.5;
+            if (totalGoals > line) pickWon = true;
+          } else if (pick.market.includes("KG VAR")) {
+            if ((normalized.homeScore ?? 0) > 0 && (normalized.awayScore ?? 0) > 0) pickWon = true;
+          } else {
+            pickWon = totalGoals > 1;
+          }
+
+          if (pickWon) wonCount++;
+          matchDetailsText += `⚽ ${pick.home} ${normalized.homeScore}-${normalized.awayScore} ${pick.away} (MS Bitti)
+`;
+        }
+      }
+
+      if (allFinished && couponInfo.picks.length > 0) {
+        couponInfo.checked = true;
+        const isAllWon = wonCount === couponInfo.picks.length;
+        
+        let resultMsg = isAllWon 
+          ? `🎉 <b>TEBRİKLER! KUPON KAZANDI!</b> 🎉
+
+${matchDetailsText}
+🎯 Tüm tercihler tuttu!`
+          : `❌ <b>KUPON SONUÇLANDI</b>
+
+${matchDetailsText}
+📊 Maçlar sonuçlandı.`;
+          
+        await sendTelegramMessage(resultMsg);
+        activeSentCoupons.delete(draftId);
+      }
+    }
+
+    // 2. YENİ 2 MAÇLIK CANLI FIRSAT KOMBİNİ ÜRETİMİ
     let liveMatches = rawMatches
       .map(m => normalizeProviderMatch(m))
       .filter(m => {
@@ -828,15 +882,26 @@ setInterval(async () => {
     let freshMatches = liveMatches.filter(m => !notifiedLiveFixtures.has(m.id));
 
     if (freshMatches.length >= 2) {
-      const selectedPicks = freshMatches.slice(0, 3);
-      let autoMsg = `⚡ <b>WINSCOPE CANLI FIRSAT KOMBİNİ</b> ⚡
+      const selectedPicks = freshMatches.slice(0, 2); // TAM 2 MAÇ
+      const draftId = `auto-coupon-${Date.now()}`;
+      
+      let autoMsg = `⚡ <b>WINSCOPE 2'Lİ FIRSAT KOMBİNİ</b> ⚡
 🕒 Saat: ${new Date().toLocaleTimeString('tr-TR')}
 
 `;
+      const couponPicksArray = [];
       
       for (const f of selectedPicks) {
         notifiedLiveFixtures.add(f.id);
         const evalData = await evaluateMatchAdvanced(f.id);
+        
+        couponPicksArray.push({
+          fixtureId: f.id,
+          home: f.home,
+          away: f.away,
+          market: evalData.mainPickDisplay
+        });
+
         autoMsg += `🏆 <b>${f.league}</b>
 ⚽ ${f.home} vs ${f.away}
 ⏱️ Dk: ${f.minute}' | Skor: ${f.homeScore}-${f.awayScore}
@@ -845,16 +910,21 @@ setInterval(async () => {
 `;
       }
 
+      activeSentCoupons.set(draftId, {
+        picks: couponPicksArray,
+        checked: false
+      });
+
       await sendTelegramMessage(autoMsg);
-      console.log("[Auto-Scan OK] Tertemiz canlı kombin Telegram'a gönderildi.");
+      console.log("[Auto-Scan OK] 2 maçlık fırsat kombini gönderildi ve sonuç takibine alındı.");
     }
   } catch (err) {
     console.error("[Auto-Scan Error]", err.message);
   }
 }, AUTO_SCAN_INTERVAL_MS);
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Strict Live Master", databaseConfigured: Boolean(pool) }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope 2-Match Result Tracker Master", databaseConfigured: Boolean(pool) }));
 
 app.listen(PORT, () => {
-  console.log(`WinScope Strict Live Master running on port ${PORT}`);
+  console.log(`WinScope 2-Match Result Tracker Master running on port ${PORT}`);
 });
