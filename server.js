@@ -294,70 +294,97 @@ function isActionableMarket(marketText) {
 }
 
 function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matchInfo) {
-  const candidates = [];
-  const add = (market, pct, ok, rationale) => {
-    if (ok && Number.isFinite(pct) && pct >= 65) candidates.push({ market, pct, rationale });
-  };
   const h = historyData || {};
   const o = odds || {};
   const live = Array.isArray(liveStats) ? liveStats : [];
-  let shotsOnTarget = 0, totalShots = 0;
+  let shotsOnTarget = 0, totalShots = 0, dangerousAttacks = 0;
+
   for (const team of live) {
-    for (const s of (Array.isArray(team.statistics) ? team.statistics : [])) {
-      const name = String(s.type || "").toLowerCase();
-      const value = toNumber(s.value) || 0;
+    for (const stat of (Array.isArray(team.statistics) ? team.statistics : [])) {
+      const name = String(stat.type || "").toLowerCase();
+      const value = toNumber(stat.value) || 0;
       if (name === "shots on goal" || name === "shots on target") shotsOnTarget += value;
       if (name === "total shots") totalShots += value;
+      if (name === "dangerous attacks") dangerousAttacks += value;
     }
   }
-  const isLive = matchInfo && ["LIVE", "HT"].includes(matchInfo.status);
+
+  const isLive = Boolean(matchInfo && ["LIVE", "HT"].includes(matchInfo.status));
   const minute = Number(matchInfo?.minute || 0);
   const goals = Number(currentTotalGoals || 0);
-  if (isLive && live.length >= 2 && minute >= 10 && minute <= 80) {
-    if (goals >= 3) {
-      return { mainPick: "MS 2.5 ÜST (GERÇEKLEŞTİ)", alternative: "—", confidence: null,
-        rationale: "2.5 üst çizgisi mevcut skorla gerçekleşmiş; bu artık yeni bahis adayı değil, maç durumu bilgisidir." };
+  const candidates = [];
+
+  // Only consider markets for which this server actually received a real bookmaker price.
+  // The percentage is a historical outcome frequency in an odds-matched sample, NOT a
+  // calibrated probability for the current live state.
+  const add = (market, pct, hasRealMarketPrice, rationale) => {
+    if (hasRealMarketPrice && Number.isFinite(pct) && h.total >= 30 && pct >= 65) {
+      candidates.push({ market, pct, rationale });
     }
-    else if (goals < 3 && minute <= 65 && shotsOnTarget >= 5 && totalShots >= 12) {
-      add("MS 2.5 ÜST", h.over25Pct, h.total >= 30, "Canlı tempo ve en az 30 benzer tarihsel maç");
-    } else if (goals === 0 && minute <= 35 && shotsOnTarget >= 3 && totalShots >= 8) {
-      add("MS 1.5 ÜST", h.over15Pct, h.total >= 30, "Erken canlı tempo ve en az 30 benzer tarihsel maç");
+  };
+
+  if (isLive) {
+    if (goals >= 3) {
+      return {
+        mainPick: "ANALİZ: MS 2.5 ÜST ÇİZGİSİ GERÇEKLEŞTİ",
+        alternative: "—",
+        confidence: null,
+        rationale: `Canlı skor ${matchInfo.homeScore}-${matchInfo.awayScore}, dakika ${minute}. 2.5 üst çizgisi zaten gerçekleşti; yeni kupon tercihi olarak sunulmuyor.`
+      };
+    }
+
+    const liveStatsAvailable = live.length >= 2;
+    const strongLiveTempo = liveStatsAvailable && shotsOnTarget >= 5 && totalShots >= 12;
+    const earlyLiveTempo = liveStatsAvailable && minute <= 35 && shotsOnTarget >= 3 && totalShots >= 8;
+
+    // For a live match, require both observable live tempo and a real bookmaker price.
+    // API-Football may return pre-match prices for some fixtures; this is disclosed in rationale.
+    if (goals < 3 && minute >= 10 && minute <= 65 && strongLiveTempo && o.over25 != null) {
+      add("MS 2.5 ÜST", h.over25Pct, true,
+        `Canlı veri: ${minute}. dakika, toplam ${totalShots} şut ve ${shotsOnTarget} isabetli şut. Benzer oranlı geçmiş örneklemde 2.5 üst gerçekleşme sıklığı %${h.over25Pct}; bu, canlı kazanma olasılığı değildir.`);
+    }
+
+    // Do not manufacture a 0.5/1.5/2.5 pick when the matching market price or sufficient evidence is absent.
+    if (!candidates.length) {
+      let rationale = `Canlı skor ${matchInfo.homeScore}-${matchInfo.awayScore}, dakika ${minute}. `;
+      rationale += liveStatsAvailable
+        ? `Toplam şut: ${totalShots}; isabetli şut: ${shotsOnTarget}; tehlikeli atak verisi: ${dangerousAttacks}. `
+        : "Canlı takım istatistikleri API'den alınamadı. ";
+      rationale += (o.source && (o.over25 != null || o.bttsYes != null))
+        ? `Gerçek oran kaynağı: ${o.source}; ancak mevcut sinyaller otomatik tercih eşiğini karşılamıyor.`
+        : "Doğrulanmış ilgili piyasa oranı veya yeterli canlı sinyal yok; zorla bahis tercihi üretilmedi.";
+      return {
+        mainPick: "ANALİZ: NET TERCİH YOK",
+        alternative: "—",
+        confidence: null,
+        rationale
+      };
     }
   } else {
-    add("MS 2.5 ÜST", h.over25Pct, h.total >= 30 && o.over25 != null, "Gerçek 2.5 üst oranı ve tarihsel örneklem");
-    add("KG VAR", h.bttsPct, h.total >= 30 && o.bttsYes != null, "Gerçek KG oranı ve tarihsel örneklem");
-    add("EV 1.5 ÜST", h.home15Pct, h.total >= 30, "Tarihsel ev sahibi 2+ gol gerçekleşme oranı");
-    add("DEP 1.5 ÜST", h.away15Pct, h.total >= 30, "Tarihsel deplasman 2+ gol gerçekleşme oranı");
+    add("MS 2.5 ÜST", h.over25Pct, o.over25 != null,
+      `Benzer oranlı geçmiş ${h.total} maçta 2.5 üst gerçekleşme sıklığı %${h.over25Pct}. Bu tarihsel sıklık, tek maçın kesin olasılığı değildir.`);
+    add("KG VAR", h.bttsPct, o.bttsYes != null,
+      `Benzer oranlı geçmiş ${h.total} maçta KG Var gerçekleşme sıklığı %${h.bttsPct}.`);
   }
+
   candidates.sort((a, b) => b.pct - a.pct);
   if (!candidates.length) {
-    // Always provide a match-state read, but never invent a percentage.
-    let market = "TAKİP: MAÇ VERİSİ";
-    let rationale = "Yeterli tarihsel örneklem veya doğrulanmış piyasa oranı yok; yüzde hesaplanmadı.";
-    if (isLive) {
-      if (goals === 0 && minute <= 70) {
-        market = "MS 0.5 ÜST";
-        rationale = live.length >= 2 && totalShots >= 8
-          ? "Skor 0-0; canlı şut verisi gol senaryosunu izlemeyi destekliyor, tarihsel doğrulama eksik."
-          : "Skor 0-0; maçın kalan süresi dikkate alınarak gol senaryosu izlenebilir, istatistik desteği sınırlı.";
-      } else if (goals === 1 && minute <= 70) {
-        market = "MS 2.5 ÜST";
-        rationale = "Toplam 1 gol var; iki gol çizgisine ulaşmak için en az iki gol daha gerekir. Canlı tempo ve veri eksikliği nedeniyle güven yüzdesi verilmedi.";
-      } else if (goals >= 2 && goals < 4) {
-        market = `MS ${goals + 0.5} ÜST`;
-        rationale = `Mevcut toplam ${goals} gol; sonraki gol çizgisi izleme amaçlı gösteriliyor, olasılık yüzdesi hesaplanmadı.`;
-      } else {
-        market = "TAKİP: MAÇ SONU GOL ÇİZGİSİ";
-        rationale = "Dakika/skor nedeniyle otomatik tercih için yeterli doğrulama yok.";
-      }
-    } else {
-      market = "ANALİZ: PİYASA VE TARİHSEL VERİ BEKLENİYOR";
-    }
-    return { mainPick: market, alternative: "—", confidence: null, rationale };
+    return {
+      mainPick: isLive ? "ANALİZ: NET TERCİH YOK" : "ANALİZ: PİYASA VE TARİHSEL VERİ YETERSİZ",
+      alternative: "—",
+      confidence: null,
+      rationale: `Tarihsel örneklem: ${Number(h.total || 0)} maç. Gerçek ilgili piyasa oranı ve en az 30 karşılaştırılabilir tarihsel maç koşulları birlikte sağlanmadığı için otomatik tercih verilmedi.`
+    };
   }
+
   const best = candidates[0];
   const next = candidates.find(c => c.market !== best.market);
-  return { mainPick: best.market, alternative: next?.market || "—", confidence: best.pct, rationale: best.rationale };
+  return {
+    mainPick: best.market,
+    alternative: next?.market || "—",
+    confidence: best.pct,
+    rationale: best.rationale
+  };
 }
 
 async function evaluateMatchAdvanced(fixtureId) {
@@ -502,7 +529,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       alternativeFullTimeScore: isFinished ? `${matchInfo.homeScore}-${matchInfo.awayScore}` : "—",
       surprise: surpriseDisplay,
       marketDirection: odds.source ? `Oran kaynağı: ${odds.source}` : "Piyasa oranı bulunamadı",
-      confidence: confidenceScore > 0 ? `Tarihsel eşleşme göstergesi · %${confidenceScore}` : "Güven puanı hesaplanamadı",
+      confidence: confidenceScore > 0 ? `Benzer oranlı geçmiş maçlarda gerçekleşme sıklığı · %${confidenceScore}` : "Yeterli doğrulanmış veri yok",
       statsAvailable: liveStats.length > 0,
       stats: liveStats,
       history: {
@@ -513,7 +540,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
         away15Percent: historyData.away15Pct,
         resultDistribution: { "MS 1": { percent: historyData.ms1Pct }, "MS X": { percent: historyData.msXPct }, "MS 2": { percent: historyData.ms2Pct } }
       },
-      reasons: [smartPick.rationale, confidenceScore > 0 ? `Tarihsel eşleşme göstergesi: %${confidenceScore}` : "Yeterli doğrulanmış veri yok; kupon adayı olarak seçilmemeli"]
+      reasons: [smartPick.rationale, confidenceScore > 0 ? `Benzer oranlı geçmiş maçlarda gerçekleşme sıklığı: %${confidenceScore}` : "Yeterli doğrulanmış veri yok; otomatik kupon tercihi verilmedi"]
     });
   } catch (error) {
     res.status(502).json({ error: "Analiz üretilemedi.", detail: error.message });
