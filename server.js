@@ -264,7 +264,7 @@ async function fetchRealOdds(fixtureId) {
             if (["home", "1"].includes(label)) result.homeWin = n;
             else if (["draw", "x"].includes(label)) result.draw = n;
             else if (["away", "2"].includes(label)) result.awayWin = n;
-          } else if (/over\\/under|goals over\\/under|total goals/.test(name) && /2\\.5/.test(label)) {
+          } else if (/over\/under|goals over\/under|total goals/.test(name) && /2\.5/.test(label)) {
             if (label.includes("over")) result.over25 = n;
             if (label.includes("under")) result.under25 = n;
           } else if (/both teams to score|both teams score/.test(name)) {
