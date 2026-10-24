@@ -257,8 +257,17 @@ function generateOrFetchOdds(fixtureId) {
   return { homeWin, draw, awayWin, over25 };
 }
 
-function decideSmartMarket(historyData, odds) {
+function decideSmartMarket(historyData, odds, currentTotalGoals) {
   const { over25Pct, bttsPct, ht05Pct, home15Pct, away15Pct } = historyData;
+  
+  // Anlık skora göre dinamik baraj seçimi (Skor 2 olmuşsa asla 1.5 Üst verme!)
+  if (currentTotalGoals >= 2) {
+    return { mainPick: "MS 2.5 ÜST", alternative: "KG VAR", odd: 1.78, confidence: over25Pct };
+  }
+  if (currentTotalGoals === 1) {
+    return { mainPick: "MS 2.5 ÜST", alternative: "MS 1.5 ÜST", odd: 1.65, confidence: over25Pct };
+  }
+
   if (over25Pct >= 75) return { mainPick: "MS 2.5 ÜST", alternative: "KG VAR", odd: 1.75, confidence: over25Pct };
   if (bttsPct >= 75) return { mainPick: "KG VAR", alternative: "MS 2.5 ÜST", odd: 1.70, confidence: bttsPct };
   if (ht05Pct >= 80) return { mainPick: "İY 0.5 ÜST", alternative: "KG VAR", odd: 1.45, confidence: ht05Pct };
@@ -351,12 +360,13 @@ async function evaluateMatchAdvanced(fixtureId) {
     awayShotsOnGoal = getShotVal(liveStats[1]);
   }
 
-  const smartPick = decideSmartMarket(historyData, odds);
   let liveMin = matchInfo.minute || 0;
   let isSecondHalf = liveMin >= 45 || matchInfo.status === "2H" || matchInfo.status === "HT";
   let currentHomeScore = matchInfo.homeScore || 0;
   let currentAwayScore = matchInfo.awayScore || 0;
   let currentTotalGoals = currentHomeScore + currentAwayScore;
+
+  const smartPick = decideSmartMarket(historyData, odds, currentTotalGoals);
 
   let halfTimeDisplayScore = "";
   let surpriseDisplay = "SÜRPRİZ: 2/1";
@@ -365,7 +375,7 @@ async function evaluateMatchAdvanced(fixtureId) {
   if (isFinished) {
     halfTimeDisplayScore = `${matchInfo.htHomeScore ?? 0}-${matchInfo.htAwayScore ?? 0} (İY Bitti)`;
     surpriseDisplay = "Maç Bitti";
-    mainPickDisplay = currentTotalGoals >= 2 ? "MS 1.5 ÜST" : "MS 0.5 ÜST";
+    mainPickDisplay = currentTotalGoals >= 3 ? "MS 3.5 ÜST" : (currentTotalGoals >= 2 ? "MS 2.5 ÜST" : "MS 1.5 ÜST");
   } else if (isLive) {
     if (isSecondHalf || liveMin >= 35) {
       halfTimeDisplayScore = `${matchInfo.htHomeScore ?? currentHomeScore}-${matchInfo.htAwayScore ?? currentAwayScore} (Canlı ${liveMin}')`;
@@ -373,12 +383,16 @@ async function evaluateMatchAdvanced(fixtureId) {
         if (homeShotsOnGoal > awayShotsOnGoal) mainPickDisplay = `EV SAHİBİ 0.5 ÜST`;
         else if (awayShotsOnGoal > homeShotsOnGoal) mainPickDisplay = `DEPLASMAN 0.5 ÜST`;
         else mainPickDisplay = `MS 1.5 ÜST`;
+      } else if (currentTotalGoals === 1) {
+        mainPickDisplay = `MS 2.5 ÜST`;
       } else {
-        mainPickDisplay = `MS 1.5 ÜST`;
+        mainPickDisplay = `MS ${currentTotalGoals + 1.5} ÜST`;
       }
     } else {
       halfTimeDisplayScore = `${currentHomeScore}-${currentAwayScore} (Canlı ${liveMin}')`;
-      mainPickDisplay = currentTotalGoals === 0 && liveMin >= 20 ? "İY 0.5 ÜST" : "MS 1.5 ÜST";
+      if (currentTotalGoals === 0 && liveMin >= 20) mainPickDisplay = "İY 0.5 ÜST";
+      else if (currentTotalGoals >= 1) mainPickDisplay = "MS 2.5 ÜST";
+      else mainPickDisplay = "MS 1.5 ÜST";
     }
   } else {
     halfTimeDisplayScore = `${historyData.htScores[0]?.[0] || "1-0"} (%80)`;
@@ -410,7 +424,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       alternativeFullTimeScore: isFinished ? `${matchInfo.homeScore}-${matchInfo.awayScore}` : `1-1 (%74)`,
       surprise: surpriseDisplay,
       marketDirection: "Home: AKTİF · Away: BASKILI · Gol Beklentisi: YÜKSEK",
-      confidence: `WinScope Veri Odaklı Garanti · %${confidenceScore} Güven`,
+      confidence: `WinScope Garanti Analiz · %${confidenceScore} Güven`,
       statsAvailable: true,
       stats: liveStats,
       history: {
@@ -436,7 +450,7 @@ async function generateLiveCouponLogic() {
     const validMatches = [];
     for (const mRaw of rawMatches) {
       const f = normalizeProviderMatch(mRaw);
-      const isActuallyLive = f.status === "LIVE" && f.minute != null && f.minute >= 20 && f.minute <= 75;
+      const isActuallyLive = f.status === "LIVE" && f.minute != null && f.minute >= 10 && f.minute <= 80;
       if (isActuallyLive && isStrictIddaaMatch(f)) {
         try {
           const evalData = await evaluateMatchAdvanced(f.id);
@@ -459,14 +473,13 @@ async function generateLiveCouponLogic() {
         minute: item.f.minute || 25,
         currentScore: `${item.f.homeScore}-${item.f.awayScore}`,
         market: item.evalData.mainPickDisplay,
-        odd: item.evalData.smartPick.odd || 1.62,
+        odd: item.evalData.smartPick.odd || 1.68,
         historicalProbability: item.evalData.confidenceScore,
-        source: "WinScope Akıllı Taraf Analizi"
+        source: "WinScope Akıllı Canlı Analiz"
       });
       if (picks.length >= 2) break;
     }
 
-    // GÖNDERME KONTROLÜ: GERÇEK CANLI MAÇ YOKSA ASLA SAHTE MAÇ ÜRETME!
     if (!picks.length) {
       return {
         draftId: `live-empty-${Date.now()}`,
@@ -474,7 +487,7 @@ async function generateLiveCouponLogic() {
         isLive: true,
         status: "NO_MATCHES",
         picks: [],
-        note: "Şu an %75+ garanti kriterine uyan canlı maç bulunmuyor."
+        note: "Şu an kriterlere uyan canlı maç bulunmuyor."
       };
     }
 
@@ -484,10 +497,10 @@ async function generateLiveCouponLogic() {
       isLive: true,
       status: "PENDING_APPROVAL",
       picks,
-      note: "Veri Odaklı Taraf / MS 1.5 Üst Canlı Kombin"
+      note: "Veri Odaklı Dinamik Canlı Kombin"
     };
 
-    let tgMsg = `🎯 <b>WINSCOPE AKILLI TARAF & 1.5 ÜST KOMBİNİ</b> 🎯
+    let tgMsg = `🎯 <b>WINSCOPE CANLI FIRSAT KOMBİNİ</b> 🎯
 🕒 Saat: ${new Date().toLocaleTimeString('tr-TR')}
 
 `;
@@ -572,7 +585,7 @@ async function generateCouponLogic(dateStr) {
       note: "Veri Odaklı Maç Önü Kombin"
     };
 
-    let tgMsg = `🎟️ <b>WINSCOPE MAÇ ÖNÜ GÜNÜN KUPONU</b> 🎟️
+    let tgMsg = `🎟️ <b>WINSCOPE GÜNÜN KUPONU</b> 🎟️
 📅 Tarih: ${coupon.date}
 
 `;
@@ -745,14 +758,14 @@ app.get("/api/live", async (_req, res) => {
   }
 });
 
-// OTOMATİK TARAMA (Gerçek Canlı Maçlar + Sonuç Takipçisi)
+// OTOMATİK TARAMA (Gerçek Zamanlı Telegram Alarm Tetikleyicisi + Sonuç Takipçisi)
 const AUTO_SCAN_INTERVAL_MS = 5 * 60 * 1000;
 const notifiedLiveFixtures = new Set();
 const activeSentCoupons = new Map();
 
 setInterval(async () => {
   try {
-    console.log("[Auto-Scan Strict] Gerçek canlı maçlar ve sonuçlar taranıyor...");
+    console.log("[Auto-Scan Alarm Fix] Canlı maçlar ve Telegram alarmları taranıyor...");
     const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 30_000);
     const rawMatches = payload.response || [];
     
@@ -779,6 +792,8 @@ setInterval(async () => {
             else if (pick.market.includes("DEPLASMAN") && (normalized.awayScore ?? 0) >= 1) pickWon = true;
           } else if (pick.market.includes("1.5 ÜST")) {
             if (totalGoals >= 2) pickWon = true;
+          } else if (pick.market.includes("2.5 ÜST")) {
+            if (totalGoals >= 3) pickWon = true;
           } else if (pick.market.includes("ÜST")) {
             const line = parseFloat(pick.market.replace(/[^0-9.]/g, "")) || 2.5;
             if (totalGoals > line) pickWon = true;
@@ -797,10 +812,10 @@ setInterval(async () => {
         const isAllWon = wonCount === couponInfo.picks.length;
         
         let resultMsg = isAllWon 
-          ? `🎉 <b>TEBRİKLER! AKILLI KUPON KAZANDI!</b> 🎉
+          ? `🎉 <b>TEBRİKLER! KUPON KAZANDI!</b> 🎉
 
 ${matchDetailsText}
-🎯 Tüm veri odaklı tercihler tuttu!`
+🎯 Tüm tercihler tuttu!`
           : `❌ <b>KUPON SONUÇLANDI</b>
 
 ${matchDetailsText}
@@ -811,11 +826,11 @@ ${matchDetailsText}
       }
     }
 
-    // 2. YENİ AKILLI 2 MAÇLIK KOMBİN ÜRETİMİ (SADECE GERÇEK MAÇLAR)
+    // 2. YENİ 2 MAÇLIK OTOMATİK KOMBİN VE TELEGRAM ALARMI (10 - 80 DAKİKA ARASI)
     const validMatches = [];
     for (const mRaw of rawMatches) {
       const f = normalizeProviderMatch(mRaw);
-      const isActuallyLive = f.status === "LIVE" && f.minute != null && f.minute >= 20 && f.minute <= 75;
+      const isActuallyLive = f.status === "LIVE" && f.minute != null && f.minute >= 10 && f.minute <= 80;
       if (isActuallyLive && isStrictIddaaMatch(f) && !notifiedLiveFixtures.has(f.id)) {
         try {
           const evalData = await evaluateMatchAdvanced(f.id);
@@ -830,9 +845,9 @@ ${matchDetailsText}
 
     if (validMatches.length >= 2) {
       const selectedPicks = validMatches.slice(0, 2);
-      const draftId = `auto-strict-coupon-${Date.now()}`;
+      const draftId = `auto-alarm-coupon-${Date.now()}`;
       
-      let autoMsg = `🎯 <b>WINSCOPE AKILLI TARAF & 1.5 ÜST KOMBİNİ</b> 🎯
+      let autoMsg = `🎯 <b>WINSCOPE CANLI FIRSAT KOMBİNİ</b> 🎯
 🕒 Saat: ${new Date().toLocaleTimeString('tr-TR')}
 
 `;
@@ -862,15 +877,15 @@ ${matchDetailsText}
       });
 
       await sendTelegramMessage(autoMsg);
-      console.log("[Auto-Scan OK] Gerçek ve temiz akıllı kombin Telegram'a gönderildi.");
+      console.log("[Auto-Scan OK] Telegram'a yeni 2'li kombin alarmı başarıyla gönderildi.");
     }
   } catch (err) {
     console.error("[Auto-Scan Error]", err.message);
   }
 }, AUTO_SCAN_INTERVAL_MS);
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Strict Clean Master", databaseConfigured: Boolean(pool) }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Alarm & Dynamic Goals Master", databaseConfigured: Boolean(pool) }));
 
 app.listen(PORT, () => {
-  console.log(`WinScope Strict Clean Master running on port ${PORT}`);
+  console.log(`WinScope Alarm & Dynamic Goals Master running on port ${PORT}`);
 });
