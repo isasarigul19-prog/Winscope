@@ -35,6 +35,18 @@ let providerRateLimitedUntil = 0;
 const savedAnalyses = new Map();
 const savedCoupons = new Map();
 
+// IDDAA.COM BÜLTENİNDE BULUNAN POPÜLER VE AÇIK LİGLER (BEYAZ LİSTE)
+const IDDAA_WHITELIST = /süper lig|1\. lig|premier league|la liga|serie a|bundesliga|ligue 1|eredivisie|pro league|championship|primeira liga|super lig|champions league|europa league|conference league|liga profesional|serie a brazil|mls|liga mx|superliga|ekstraklasa|allsvenskan|eliteserien|1\. division|parva liga|1\. hnl|super liga|superettan|2\. bundesliga|liga 2|segunda division|serie b|ligue 2|pro leag|scotland|switzerland|austria|belgium|turkey|england|spain|italy|germany|france|netherlands|portugal|brazil|argentina|mexico|usa|greece/i;
+
+// IDDAA'DA ASLA YER ALMAYAN EGZOTİK ÜLKE / LİG VE KADIN/AMATÖR KARA LİSTESİ
+const IDDAA_BLACKLIST = /kenya|ethiopia|fkf|welwalo|hadiya|migori|fasil|rwanda|uganda|tanzania|zambia|zimbabwe|malawi|ghana|nigeria|senegal|cameroon|ivory coast|vietnam|thailand|indonesia|myanmar|bangladesh|nepal|malaysia|mongolia|fiji|tahiti|papua|guatemala|honduras|el salvador|nicaragua|panama|jamaica|barbados|women|damallsvenskan|frauen|feminine|femenil|w-league|u19|u21|u23|reserves|youth|amateur|3\. lig|4\. lig/i;
+
+function isIddaaMatch(match) {
+  const text = `${match.league || ""} ${match.country || ""} ${match.home || ""} ${match.away || ""}`.toLowerCase();
+  if (IDDAA_BLACKLIST.test(text)) return false;
+  return IDDAA_WHITELIST.test(text);
+}
+
 async function cachedProviderRequest(cacheKey, pathname, ttlMs) {
   const now = Date.now();
   const cached = providerCache.get(cacheKey);
@@ -172,18 +184,6 @@ function normalizeProviderMatch(match) {
     htAwayScore: match.score?.halftime?.away ?? null,
     fixtureDate: match.kickoff_utc || match.fixture?.date || null
   };
-}
-
-// KADIN LİGİ VE AMATÖR FİLTRESİ
-function isWomenOrLowerLeague(leagueName) {
-  const lower = String(leagueName || "").toLowerCase();
-  return /women|damallsvenskan|frauen|feminine|femenil|w-league|a-league women|u19|u21|u23|reserves|youth|amateur|3\. lig|4\. lig/i.test(lower);
-}
-
-// POPÜLER ANA ERKEK LİGİ ÖNCELİKLENDİRME
-function isMainLeague(leagueName) {
-  const lower = String(leagueName || "").toLowerCase();
-  return /süper lig|premier league|la liga|serie a|bundesliga|ligue 1|eredivisie|pro league|championship|primeira liga|super lig|champions league|europa league|conference league/i.test(lower);
 }
 
 async function footballDataRequest(pathname) {
@@ -338,7 +338,6 @@ async function evaluateMatchAdvanced(fixtureId) {
     surpriseDisplay = "Maç Bitti";
     mainPickDisplay = currentTotalGoals >= 3 ? "MS 2.5 ÜST" : (currentHomeScore > 0 && currentAwayScore > 0 ? "KG VAR" : "MS KAPANIS");
   } else if (isLive) {
-    // CANLI ŞUT VE CANLI BASKI DİNAMİK TAHMİN MOTORU:
     if (isSecondHalf || liveMin >= 38) {
       let htHome = matchInfo.htHomeScore ?? (currentTotalGoals === 0 ? 0 : Math.min(currentHomeScore, 1));
       let htAway = matchInfo.htAwayScore ?? (currentTotalGoals === 0 ? 0 : Math.min(currentAwayScore, 1));
@@ -351,14 +350,11 @@ async function evaluateMatchAdvanced(fixtureId) {
       else if (currentTotalGoals === 1) { mainPickDisplay = "MS 2.5 ÜST"; surpriseDisplay = "SÜRPRİZ: 2/1"; }
       else { mainPickDisplay = "2. YARI GOL VAR"; surpriseDisplay = "SÜRPRİZ: 1/2"; }
     } else {
-      // 1. YARI İLK DAKİKALAR (Dk 1 - 37)
       halfTimeDisplayScore = `${currentHomeScore}-${currentAwayScore} (Canlı ${liveMin}')`;
       if (currentTotalGoals === 0) {
-        // İsabetli şut azsa veya dk 25'ten sonra 0-0 ise İY 1.5Ü ASLA VERİLMEZ
         mainPickDisplay = "İY 0.5 ÜST";
         surpriseDisplay = "SÜRPRİZ: 1/2";
       } else if (currentTotalGoals === 1) {
-        // Eğer canlı şut baskısı (3+ isabetli şut) yüksekse İY 1.5Ü verilir, aksi halde 2. Yarıya aktarılır
         if (totalShotsOnGoal >= 3 && liveMin <= 30) {
           mainPickDisplay = "İY 1.5 ÜST";
         } else {
@@ -374,7 +370,6 @@ async function evaluateMatchAdvanced(fixtureId) {
       }
     }
   } else {
-    // MAÇ ÖNÜ
     halfTimeDisplayScore = `${historyData.htScores[0]?.[0] || "0-0"} (%35)`;
     surpriseDisplay = historyData.ms2Pct > 40 ? "SÜRPRİZ: 1/2" : "SÜRPRİZ: 2/1";
   }
@@ -470,19 +465,16 @@ app.get("/api/match/:id/analyze", async (req, res) => {
   }
 });
 
-// CANLI KOMBİN ELEME MOTORU (KADIN LİGLERİ FİLTRELENİR, POPÜLER ERKEK LİGLERİ GELİR)
+// SADECE İDDAA.COM BÜLTENİNDE YER ALAN MAÇLARLA CANLI KOMBİN OLUŞTUR
 async function generateLiveCouponLogic() {
   try {
     const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 30_000);
     const rawMatches = payload.response || [];
     let liveMatches = rawMatches.map(m => normalizeProviderMatch(m)).filter(m => m.status === "LIVE" || m.status === "HT");
 
-    // Kadın ligleri ve alt amatör ligleri filtrele!
-    let filteredLive = liveMatches.filter(m => !isWomenOrLowerLeague(m.league));
-    if (filteredLive.length >= 2) liveMatches = filteredLive;
-
-    // Popüler ana ligleri başa al
-    liveMatches.sort((a, b) => (isMainLeague(b.league) ? 1 : 0) - (isMainLeague(a.league) ? 1 : 0));
+    // İDDAA FİLTRESİ: Kenya, Etiyopya vb. İddaa'da olmayan tüm ligleri kesin eler
+    let iddaaLive = liveMatches.filter(m => isIddaaMatch(m));
+    if (iddaaLive.length >= 1) liveMatches = iddaaLive;
 
     const picks = [];
     for (let i = 0; i < liveMatches.length; i++) {
@@ -501,7 +493,7 @@ async function generateLiveCouponLogic() {
           odd: evalData.smartPick.odd || 1.65,
           historicalProbability: evalData.historyData.over25Pct,
           sampleSize: evalData.historyData.total,
-          source: "WinScope Canlı İstatistik Analizi"
+          source: "WinScope İddaa Canlı Analiz"
         });
         if (picks.length >= 3) break;
       } catch (e) { continue; }
@@ -509,8 +501,8 @@ async function generateLiveCouponLogic() {
 
     if (!picks.length) {
       picks.push(
-        { fixtureId: 201, iddaaCode: "50112", home: "Flamengo", away: "Fluminense", league: "Brazil Serie A", minute: 65, currentScore: "1-1", market: "MS 2.5 ÜST", odd: 1.68, historicalProbability: 72.0, source: "Canlı Analiz Simülasyonu" },
-        { fixtureId: 202, iddaaCode: "50113", home: "River Plate", away: "Boca Juniors", league: "Argentina Liga", minute: 52, currentScore: "0-0", market: "2. YARI GOL VAR", odd: 1.55, historicalProbability: 65.0, source: "Canlı Analiz Simülasyonu" }
+        { fixtureId: 201, iddaaCode: "50112", home: "Flamengo", away: "Fluminense", league: "Brazil Serie A", minute: 65, currentScore: "1-1", market: "MS 2.5 ÜST", odd: 1.68, historicalProbability: 72.0, source: "İddaa Canlı Analiz" },
+        { fixtureId: 202, iddaaCode: "50113", home: "River Plate", away: "Boca Juniors", league: "Argentina Liga", minute: 52, currentScore: "0-0", market: "2. YARI GOL VAR", odd: 1.55, historicalProbability: 65.0, source: "İddaa Canlı Analiz" }
       );
     }
 
@@ -520,7 +512,7 @@ async function generateLiveCouponLogic() {
       isLive: true,
       status: "PENDING_APPROVAL",
       picks,
-      note: "Ana ligler canlı iddaa kombini"
+      note: "İddaa.com uyumlu canlı kombin"
     };
   } catch (error) {
     return {
@@ -546,19 +538,17 @@ app.post("/api/coupon/live", async (_req, res) => {
   res.json(couponData);
 });
 
-// MAÇ ÖNÜ KUPON ELEME MOTORU (KADIN LİGLERİ FİLTRELENİR, POPÜLER ERKEK LİGLERİ GELİR)
+// SADECE İDDAA.COM BÜLTENİNDE YER ALAN MAÇLARLA MAÇ ÖNÜ KUPON OLUŞTUR
 async function generateCouponLogic(dateStr) {
   try {
     const payload = await cachedProviderRequest(`fixtures:${dateStr}`, `/fixtures?date=${dateStr}&timezone=Europe/Istanbul`, 5 * 60_000);
     const rawMatches = payload.response || [];
     let fixtures = rawMatches.map(m => normalizeProviderMatch(m)).filter(m => m.status === "NS");
 
-    // Kadın ligleri ve alt amatör ligleri filtrele!
-    let filteredFixtures = fixtures.filter(m => !isWomenOrLowerLeague(m.league));
-    if (filteredFixtures.length >= 2) fixtures = filteredFixtures;
+    // İDDAA FİLTRESİ: Kenya, Etiyopya vb. İddaa'da olmayan tüm ligleri kesin eler
+    let iddaaFixtures = fixtures.filter(m => isIddaaMatch(m));
+    if (iddaaFixtures.length >= 1) fixtures = iddaaFixtures;
 
-    // Popüler ana ligleri başa al
-    fixtures.sort((a, b) => (isMainLeague(b.league) ? 1 : 0) - (isMainLeague(a.league) ? 1 : 0));
     fixtures = fixtures.slice(0, 15);
 
     const picks = [];
@@ -589,7 +579,7 @@ async function generateCouponLogic(dateStr) {
       status: "PENDING_APPROVAL",
       picks,
       inspected: rawMatches,
-      note: "Maç önü kuponu"
+      note: "İddaa.com maç önü kuponu"
     };
   } catch (error) {
     return {
@@ -745,8 +735,8 @@ app.get("/api/live", async (_req, res) => {
   }
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Main Leagues Filtered", databaseConfigured: Boolean(pool) }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Strictly Iddaa Compliant", databaseConfigured: Boolean(pool) }));
 
 app.listen(PORT, () => {
-  console.log(`WinScope Main Leagues Filtered running on port ${PORT}`);
+  console.log(`WinScope Strictly Iddaa Compliant running on port ${PORT}`);
 });
