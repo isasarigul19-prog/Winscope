@@ -263,7 +263,7 @@ function decideSmartMarket(historyData, odds) {
   if (bttsPct >= 75) return { mainPick: "KG VAR", alternative: "MS 2.5 ÜST", odd: 1.70, confidence: bttsPct };
   if (ht05Pct >= 80) return { mainPick: "İY 0.5 ÜST", alternative: "KG VAR", odd: 1.45, confidence: ht05Pct };
   if (home15Pct >= 75) return { mainPick: "EV 0.5 ÜST", alternative: "MS 1", odd: 1.58, confidence: home15Pct };
-  if (away15Percent >= 75) return { mainPick: "DEP 0.5 ÜST", alternative: "MS 2", odd: 1.62, confidence: away15Pct };
+  if (away15Pct >= 75) return { mainPick: "DEP 0.5 ÜST", alternative: "MS 2", odd: 1.62, confidence: away15Pct };
   return { mainPick: "MS 1.5 ÜST", alternative: "KG VAR", odd: 1.52, confidence: 76 };
 }
 
@@ -370,24 +370,15 @@ async function evaluateMatchAdvanced(fixtureId) {
     if (isSecondHalf || liveMin >= 35) {
       halfTimeDisplayScore = `${matchInfo.htHomeScore ?? currentHomeScore}-${matchInfo.htAwayScore ?? currentAwayScore} (Canlı ${liveMin}')`;
       if (currentTotalGoals === 0) {
-        // Veri odaklı taraf bazlı 0.5 üst seçimi (Genel 2. Yarı Gol Var yerine)
-        if (homeShotsOnGoal > awayShotsOnGoal) {
-          mainPickDisplay = `EV SAHİBİ 0.5 ÜST`;
-        } else if (awayShotsOnGoal > homeShotsOnGoal) {
-          mainPickDisplay = `DEPLASMAN 0.5 ÜST`;
-        } else {
-          mainPickDisplay = `MS 1.5 ÜST`;
-        }
+        if (homeShotsOnGoal > awayShotsOnGoal) mainPickDisplay = `EV SAHİBİ 0.5 ÜST`;
+        else if (awayShotsOnGoal > homeShotsOnGoal) mainPickDisplay = `DEPLASMAN 0.5 ÜST`;
+        else mainPickDisplay = `MS 1.5 ÜST`;
       } else {
         mainPickDisplay = `MS 1.5 ÜST`;
       }
     } else {
       halfTimeDisplayScore = `${currentHomeScore}-${currentAwayScore} (Canlı ${liveMin}')`;
-      if (currentTotalGoals === 0 && liveMin >= 20) {
-        mainPickDisplay = "İY 0.5 ÜST";
-      } else {
-        mainPickDisplay = "MS 1.5 ÜST";
-      }
+      mainPickDisplay = currentTotalGoals === 0 && liveMin >= 20 ? "İY 0.5 ÜST" : "MS 1.5 ÜST";
     }
   } else {
     halfTimeDisplayScore = `${historyData.htScores[0]?.[0] || "1-0"} (%80)`;
@@ -446,7 +437,7 @@ async function generateLiveCouponLogic() {
     for (const mRaw of rawMatches) {
       const f = normalizeProviderMatch(mRaw);
       const isActuallyLive = f.status === "LIVE" && f.minute != null && f.minute >= 20 && f.minute <= 75;
-      if (isActuallyLive && isStrictIddaaMatch(f) && !notifiedLiveFixtures.has(f.id)) {
+      if (isActuallyLive && isStrictIddaaMatch(f)) {
         try {
           const evalData = await evaluateMatchAdvanced(f.id);
           if (evalData.confidenceScore >= 75) {
@@ -472,14 +463,19 @@ async function generateLiveCouponLogic() {
         historicalProbability: item.evalData.confidenceScore,
         source: "WinScope Akıllı Taraf Analizi"
       });
-      if (picks.length >= 2) break; // TAM 2 MAÇ
+      if (picks.length >= 2) break;
     }
 
+    // GÖNDERME KONTROLÜ: GERÇEK CANLI MAÇ YOKSA ASLA SAHTE MAÇ ÜRETME!
     if (!picks.length) {
-      picks.push(
-        { fixtureId: 401, iddaaCode: "70111", home: "Galatasaray", away: "Fenerbahçe", league: "Süper Lig", minute: 45, currentScore: "0-0", market: "EV SAHİBİ 0.5 ÜST", odd: 1.58, historicalProbability: 78.0, source: "Yedek" },
-        { fixtureId: 402, iddaaCode: "70112", home: "Real Madrid", away: "Barcelona", league: "La Liga", minute: 50, currentScore: "1-0", market: "MS 1.5 ÜST", odd: 1.55, historicalProbability: 77.0, source: "Yedek" }
-      );
+      return {
+        draftId: `live-empty-${Date.now()}`,
+        date: new Date().toISOString().split("T")[0],
+        isLive: true,
+        status: "NO_MATCHES",
+        picks: [],
+        note: "Şu an %75+ garanti kriterine uyan canlı maç bulunmuyor."
+      };
     }
 
     const coupon = {
@@ -508,13 +504,12 @@ async function generateLiveCouponLogic() {
     return coupon;
   } catch (error) {
     return {
-      draftId: `live-fallback-${Date.now()}`,
+      draftId: `live-error-${Date.now()}`,
       date: new Date().toISOString().split("T")[0],
       isLive: true,
-      status: "PENDING_APPROVAL",
-      picks: [
-        { fixtureId: 401, iddaaCode: "70111", home: "Galatasaray", away: "Beşiktaş", league: "Süper Lig", minute: 40, currentScore: "0-0", market: "MS 1.5 ÜST", odd: 1.60, historicalProbability: 76.0, source: "Fallback" }
-      ]
+      status: "ERROR",
+      picks: [],
+      note: "Canlı maç taranırken hata oluştu."
     };
   }
 }
@@ -554,9 +549,19 @@ async function generateCouponLogic(dateStr) {
             historicalProbability: evalData.confidenceScore,
             source: "Veri Odaklı Maç Önü"
           });
-          if (picks.length >= 2) break; // TAM 2 MAÇ
+          if (picks.length >= 2) break;
         }
       } catch (e) { continue; }
+    }
+
+    if (!picks.length) {
+      return {
+        draftId: `iddaa-empty-${Date.now()}`,
+        date: dateStr,
+        status: "NO_MATCHES",
+        picks: [],
+        note: "Bu tarihte %75+ kritere uyan maç bulunamadı."
+      };
     }
 
     const coupon = {
@@ -584,13 +589,11 @@ async function generateCouponLogic(dateStr) {
     return coupon;
   } catch (error) {
     return {
-      draftId: `iddaa-fallback-${Date.now()}`,
+      draftId: `iddaa-error-${Date.now()}`,
       date: dateStr,
-      status: "PENDING_APPROVAL",
-      picks: [
-        { fixtureId: 101, iddaaCode: "41021", home: "Galatasaray", away: "Beşiktaş", league: "Süper Lig", market: "MS 1.5 ÜST", odd: 1.58, historicalProbability: 78.0, sampleSize: 120, source: "Fallback" }
-      ],
-      note: "Fallback kupon"
+      status: "ERROR",
+      picks: [],
+      note: "Bülten taranırken hata oluştu."
     };
   }
 }
@@ -742,14 +745,14 @@ app.get("/api/live", async (_req, res) => {
   }
 });
 
-// OTOMATİK TARAMA (Akıllı Taraf + 1.5 Üst Kombin & Sonuç Takipçisi)
+// OTOMATİK TARAMA (Gerçek Canlı Maçlar + Sonuç Takipçisi)
 const AUTO_SCAN_INTERVAL_MS = 5 * 60 * 1000;
 const notifiedLiveFixtures = new Set();
 const activeSentCoupons = new Map();
 
 setInterval(async () => {
   try {
-    console.log("[Auto-Scan Smart] Akıllı taraf maçları ve sonuçlar taranıyor...");
+    console.log("[Auto-Scan Strict] Gerçek canlı maçlar ve sonuçlar taranıyor...");
     const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 30_000);
     const rawMatches = payload.response || [];
     
@@ -808,7 +811,7 @@ ${matchDetailsText}
       }
     }
 
-    // 2. YENİ AKILLI 2 MAÇLIK KOMBİN ÜRETİMİ
+    // 2. YENİ AKILLI 2 MAÇLIK KOMBİN ÜRETİMİ (SADECE GERÇEK MAÇLAR)
     const validMatches = [];
     for (const mRaw of rawMatches) {
       const f = normalizeProviderMatch(mRaw);
@@ -826,8 +829,8 @@ ${matchDetailsText}
     validMatches.sort(() => Math.random() - 0.5);
 
     if (validMatches.length >= 2) {
-      const selectedPicks = validMatches.slice(0, 2); // TAM 2 MAÇ
-      const draftId = `auto-smart-coupon-${Date.now()}`;
+      const selectedPicks = validMatches.slice(0, 2);
+      const draftId = `auto-strict-coupon-${Date.now()}`;
       
       let autoMsg = `🎯 <b>WINSCOPE AKILLI TARAF & 1.5 ÜST KOMBİNİ</b> 🎯
 🕒 Saat: ${new Date().toLocaleTimeString('tr-TR')}
@@ -859,15 +862,15 @@ ${matchDetailsText}
       });
 
       await sendTelegramMessage(autoMsg);
-      console.log("[Auto-Scan OK] Akıllı kombin Telegram'a gönderildi.");
+      console.log("[Auto-Scan OK] Gerçek ve temiz akıllı kombin Telegram'a gönderildi.");
     }
   } catch (err) {
     console.error("[Auto-Scan Error]", err.message);
   }
 }, AUTO_SCAN_INTERVAL_MS);
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Smart Side & Goals Master", databaseConfigured: Boolean(pool) }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Strict Clean Master", databaseConfigured: Boolean(pool) }));
 
 app.listen(PORT, () => {
-  console.log(`WinScope Smart Side & Goals Master running on port ${PORT}`);
+  console.log(`WinScope Strict Clean Master running on port ${PORT}`);
 });
