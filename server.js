@@ -174,6 +174,18 @@ function normalizeProviderMatch(match) {
   };
 }
 
+// KADIN LİGİ VE AMATÖR FİLTRESİ
+function isWomenOrLowerLeague(leagueName) {
+  const lower = String(leagueName || "").toLowerCase();
+  return /women|damallsvenskan|frauen|feminine|femenil|w-league|a-league women|u19|u21|u23|reserves|youth|amateur|3\. lig|4\. lig/i.test(lower);
+}
+
+// POPÜLER ANA ERKEK LİGİ ÖNCELİKLENDİRME
+function isMainLeague(leagueName) {
+  const lower = String(leagueName || "").toLowerCase();
+  return /süper lig|premier league|la liga|serie a|bundesliga|ligue 1|eredivisie|pro league|championship|primeira liga|super lig|champions league|europa league|conference league/i.test(lower);
+}
+
 async function footballDataRequest(pathname) {
   if (!API_KEY) throw new Error("API_FOOTBALL_KEY yok.");
   const response = await fetch(`${BASE_URL}${pathname}`, {
@@ -299,70 +311,81 @@ async function evaluateMatchAdvanced(fixtureId) {
   let currentAwayScore = matchInfo.awayScore || 0;
   let currentTotalGoals = currentHomeScore + currentAwayScore;
 
+  let liveStats = [];
+  try {
+    const statsRes = await apiGet(`/fixtures/statistics?fixture=${fixtureId}`);
+    if (Array.isArray(statsRes) && statsRes.length > 0) liveStats = statsRes;
+  } catch (e) {}
+
+  let totalShotsOnGoal = 0;
+  if (liveStats && liveStats.length >= 2) {
+    const getShotVal = (teamObj) => {
+      const statsArr = Array.isArray(teamObj.statistics) ? teamObj.statistics : [];
+      const shotItem = statsArr.find(s => s.type === "Shots on Goal");
+      return Number(shotItem?.value || 0);
+    };
+    totalShotsOnGoal = getShotVal(liveStats[0]) + getShotVal(liveStats[1]);
+  }
+
   let halfTimeDisplayScore = "";
   let surpriseDisplay = "";
   let mainPickDisplay = smartPick.mainPick;
 
   if (isFinished) {
-    // MAÇ BİTTİ
-    let htHome = matchInfo.htHomeScore ?? (currentHomeScore > 0 ? 0 : 0);
-    let htAway = matchInfo.htAwayScore ?? (currentAwayScore > 0 ? 0 : 0);
+    let htHome = matchInfo.htHomeScore ?? 0;
+    let htAway = matchInfo.htAwayScore ?? 0;
     halfTimeDisplayScore = `${htHome}-${htAway} (İY Bitti)`;
     surpriseDisplay = "Maç Bitti";
     mainPickDisplay = currentTotalGoals >= 3 ? "MS 2.5 ÜST" : (currentHomeScore > 0 && currentAwayScore > 0 ? "KG VAR" : "MS KAPANIS");
   } else if (isLive) {
-    // CANLI MAÇ MANTIĞI & GİDİŞATA GÖRE TAHMİN BAZI
-    if (isSecondHalf) {
+    // CANLI ŞUT VE CANLI BASKI DİNAMİK TAHMİN MOTORU:
+    if (isSecondHalf || liveMin >= 38) {
       let htHome = matchInfo.htHomeScore ?? (currentTotalGoals === 0 ? 0 : Math.min(currentHomeScore, 1));
       let htAway = matchInfo.htAwayScore ?? (currentTotalGoals === 0 ? 0 : Math.min(currentAwayScore, 1));
-      halfTimeDisplayScore = `${htHome}-${htAway} (İY Bitti · Canlı ${liveMin}')`;
+      halfTimeDisplayScore = `${htHome}-${htAway} (${isSecondHalf ? "İY Bitti · " : ""}Canlı ${liveMin}')`;
 
-      // Skor gidişatına göre canlı tahminler
-      if (currentTotalGoals >= 4) {
-        mainPickDisplay = "MS 4.5 ÜST";
-        surpriseDisplay = "SÜRPRİZ: 2/1";
-      } else if (currentTotalGoals === 3) {
-        mainPickDisplay = "MS 3.5 ÜST";
-        surpriseDisplay = "SÜRPRİZ: 1/2";
-      } else if (currentTotalGoals === 2) {
-        mainPickDisplay = "MS 2.5 ÜST";
-        surpriseDisplay = "SÜRPRİZ: 2/1";
-      } else if (currentTotalGoals === 1) {
-        mainPickDisplay = "MS 1.5 ÜST";
-        surpriseDisplay = "SÜRPRİZ: 1/2";
-      } else {
-        mainPickDisplay = "2. YARI GOL VAR";
-        surpriseDisplay = "SÜRPRİZ: 2/1";
-      }
+      if (currentTotalGoals >= 5) { mainPickDisplay = "MS 6.5 ÜST"; surpriseDisplay = "SÜRPRİZ: 2/1"; }
+      else if (currentTotalGoals === 4) { mainPickDisplay = "MS 5.5 ÜST"; surpriseDisplay = "SÜRPRİZ: 1/2"; }
+      else if (currentTotalGoals === 3) { mainPickDisplay = "MS 4.5 ÜST"; surpriseDisplay = "SÜRPRİZ: 2/1"; }
+      else if (currentTotalGoals === 2) { mainPickDisplay = "MS 3.5 ÜST"; surpriseDisplay = "SÜRPRİZ: 1/2"; }
+      else if (currentTotalGoals === 1) { mainPickDisplay = "MS 2.5 ÜST"; surpriseDisplay = "SÜRPRİZ: 2/1"; }
+      else { mainPickDisplay = "2. YARI GOL VAR"; surpriseDisplay = "SÜRPRİZ: 1/2"; }
     } else {
-      // 1. YARI CANLI (Dk < 45)
+      // 1. YARI İLK DAKİKALAR (Dk 1 - 37)
       halfTimeDisplayScore = `${currentHomeScore}-${currentAwayScore} (Canlı ${liveMin}')`;
       if (currentTotalGoals === 0) {
+        // İsabetli şut azsa veya dk 25'ten sonra 0-0 ise İY 1.5Ü ASLA VERİLMEZ
         mainPickDisplay = "İY 0.5 ÜST";
         surpriseDisplay = "SÜRPRİZ: 1/2";
       } else if (currentTotalGoals === 1) {
-        mainPickDisplay = "İY 1.5 ÜST";
+        // Eğer canlı şut baskısı (3+ isabetli şut) yüksekse İY 1.5Ü verilir, aksi halde 2. Yarıya aktarılır
+        if (totalShotsOnGoal >= 3 && liveMin <= 30) {
+          mainPickDisplay = "İY 1.5 ÜST";
+        } else {
+          mainPickDisplay = "2. YARI GOL VAR";
+        }
         surpriseDisplay = "SÜRPRİZ: 2/1";
-      } else {
+      } else if (currentTotalGoals === 2) {
         mainPickDisplay = "İY 2.5 ÜST";
         surpriseDisplay = "SÜRPRİZ: 1/2";
+      } else {
+        mainPickDisplay = `MS ${currentTotalGoals + 1.5} ÜST`;
+        surpriseDisplay = "SÜRPRİZ: 2/1";
       }
     }
   } else {
     // MAÇ ÖNÜ
     halfTimeDisplayScore = `${historyData.htScores[0]?.[0] || "0-0"} (%35)`;
-    // Verilerde 1/2 veya 2/1 sürpriz dönüş vurgusu
     surpriseDisplay = historyData.ms2Pct > 40 ? "SÜRPRİZ: 1/2" : "SÜRPRİZ: 2/1";
   }
 
-  // TAHMİN-SKOR ÇELİŞKİSİNİ ENGELLEYEN SKOR HESAPLAMA
   let probableFullTimeScore = "2-1";
   let altFullTimeScore = "1-2";
 
   if (isFinished) {
     probableFullTimeScore = `${currentHomeScore}-${currentAwayScore}`;
     altFullTimeScore = `${currentHomeScore}-${currentAwayScore}`;
-  } else if (mainPickDisplay.includes("KG VAR") || mainPickDisplay.includes("2.5 ÜST")) {
+  } else if (mainPickDisplay.includes("KG VAR") || mainPickDisplay.includes("ÜST")) {
     probableFullTimeScore = historyData.ms2Pct > historyData.ms1Pct ? "1-2" : "2-1";
     altFullTimeScore = "2-2";
   } else if (mainPickDisplay.includes("DEP") || historyData.ms2Pct > 40) {
@@ -372,12 +395,6 @@ async function evaluateMatchAdvanced(fixtureId) {
     probableFullTimeScore = "2-1";
     altFullTimeScore = "2-0";
   }
-
-  let liveStats = [];
-  try {
-    const statsRes = await apiGet(`/fixtures/statistics?fixture=${fixtureId}`);
-    if (Array.isArray(statsRes) && statsRes.length > 0) liveStats = statsRes;
-  } catch (e) {}
 
   if (!liveStats.length) {
     liveStats = [
@@ -453,11 +470,19 @@ app.get("/api/match/:id/analyze", async (req, res) => {
   }
 });
 
+// CANLI KOMBİN ELEME MOTORU (KADIN LİGLERİ FİLTRELENİR, POPÜLER ERKEK LİGLERİ GELİR)
 async function generateLiveCouponLogic() {
   try {
     const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 30_000);
     const rawMatches = payload.response || [];
-    const liveMatches = rawMatches.map(m => normalizeProviderMatch(m)).filter(m => m.status === "LIVE" || m.status === "HT");
+    let liveMatches = rawMatches.map(m => normalizeProviderMatch(m)).filter(m => m.status === "LIVE" || m.status === "HT");
+
+    // Kadın ligleri ve alt amatör ligleri filtrele!
+    let filteredLive = liveMatches.filter(m => !isWomenOrLowerLeague(m.league));
+    if (filteredLive.length >= 2) liveMatches = filteredLive;
+
+    // Popüler ana ligleri başa al
+    liveMatches.sort((a, b) => (isMainLeague(b.league) ? 1 : 0) - (isMainLeague(a.league) ? 1 : 0));
 
     const picks = [];
     for (let i = 0; i < liveMatches.length; i++) {
@@ -495,7 +520,7 @@ async function generateLiveCouponLogic() {
       isLive: true,
       status: "PENDING_APPROVAL",
       picks,
-      note: "Canlı iddaa kombini"
+      note: "Ana ligler canlı iddaa kombini"
     };
   } catch (error) {
     return {
@@ -521,11 +546,20 @@ app.post("/api/coupon/live", async (_req, res) => {
   res.json(couponData);
 });
 
+// MAÇ ÖNÜ KUPON ELEME MOTORU (KADIN LİGLERİ FİLTRELENİR, POPÜLER ERKEK LİGLERİ GELİR)
 async function generateCouponLogic(dateStr) {
   try {
     const payload = await cachedProviderRequest(`fixtures:${dateStr}`, `/fixtures?date=${dateStr}&timezone=Europe/Istanbul`, 5 * 60_000);
     const rawMatches = payload.response || [];
-    const fixtures = rawMatches.map(m => normalizeProviderMatch(m)).filter(m => m.status === "NS").slice(0, 15);
+    let fixtures = rawMatches.map(m => normalizeProviderMatch(m)).filter(m => m.status === "NS");
+
+    // Kadın ligleri ve alt amatör ligleri filtrele!
+    let filteredFixtures = fixtures.filter(m => !isWomenOrLowerLeague(m.league));
+    if (filteredFixtures.length >= 2) fixtures = filteredFixtures;
+
+    // Popüler ana ligleri başa al
+    fixtures.sort((a, b) => (isMainLeague(b.league) ? 1 : 0) - (isMainLeague(a.league) ? 1 : 0));
+    fixtures = fixtures.slice(0, 15);
 
     const picks = [];
     for (let i = 0; i < fixtures.length; i++) {
@@ -711,8 +745,8 @@ app.get("/api/live", async (_req, res) => {
   }
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Super Master Final", databaseConfigured: Boolean(pool) }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "WinScope Main Leagues Filtered", databaseConfigured: Boolean(pool) }));
 
 app.listen(PORT, () => {
-  console.log(`WinScope Super Master Final running on port ${PORT}`);
+  console.log(`WinScope Main Leagues Filtered running on port ${PORT}`);
 });
