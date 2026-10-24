@@ -257,29 +257,53 @@ async function apiGet(pathname) {
   return payload.response || payload.data || [];
 }
 
-function parseOddsBookmakers(rows) {
-  const bookmakers = (Array.isArray(rows) ? rows : [])
-    .flatMap(row => Array.isArray(row.bookmakers) ? row.bookmakers : []);
-  const preferred = bookmakers.find(b => /bet365/i.test(String(b.name || "")));
-  const ordered = preferred ? [preferred, ...bookmakers.filter(b => b !== preferred)] : bookmakers;
+function parseOddsBookmakers(rows, defaultSource = "API-Football") {
+  const normalized = [];
+  for (const row of (Array.isArray(rows) ? rows : [])) {
+    // Pre-match /odds returns bookmakers[].bets[].values[].
+    for (const book of (Array.isArray(row.bookmakers) ? row.bookmakers : [])) {
+      normalized.push({
+        source: String(book.name || defaultSource),
+        bets: Array.isArray(book.bets) ? book.bets : []
+      });
+    }
+
+    // API-Football /odds/live uses odds[].values[] directly on the fixture row
+    // (without the pre-match bookmakers[].bets[] nesting).
+    if (Array.isArray(row.odds) && row.odds.length) {
+      normalized.push({
+        source: String(row.bookmaker?.name || row.bookmaker || row.source || defaultSource),
+        bets: row.odds.map(item => ({
+          name: item.name || item.bet || "",
+          values: Array.isArray(item.values) ? item.values : []
+        }))
+      });
+    }
+  }
+
+  // Bet365 is preferred only when a bookmaker is explicitly identified.
+  const preferred = normalized.find(b => /bet365/i.test(b.source));
+  const ordered = preferred ? [preferred, ...normalized.filter(b => b !== preferred)] : normalized;
+
   for (const book of ordered) {
     const result = {
-      source: String(book.name || "API-Football bookmaker"),
+      source: book.source,
       homeWin: null, draw: null, awayWin: null,
       over15: null, under15: null, over25: null, under25: null,
       bttsYes: null, bttsNo: null
     };
-    for (const bet of (book.bets || [])) {
+    for (const bet of book.bets) {
       const name = String(bet.name || "").toLowerCase();
       for (const v of (bet.values || [])) {
-        const label = String(v.value || "").toLowerCase();
+        const label = String(v.value ?? v.name ?? "").toLowerCase();
         const n = toNumber(v.odd);
         if (n == null) continue;
-        if (/match winner|1x2|fulltime result|winner/.test(name)) {
-          if (["home", "1"].includes(label)) result.homeWin = n;
+
+        if (/match winner|1x2|fulltime result|winner|match result/.test(name)) {
+          if (["home", "1", "team 1"].includes(label)) result.homeWin = n;
           else if (["draw", "x"].includes(label)) result.draw = n;
-          else if (["away", "2"].includes(label)) result.awayWin = n;
-        } else if (/over\/under|goals over\/under|total goals|total/.test(name)) {
+          else if (["away", "2", "team 2"].includes(label)) result.awayWin = n;
+        } else if (/over\/under|goals over\/under|total goals|total goals|total/.test(name)) {
           if (/1\.5/.test(label)) {
             if (label.includes("over")) result.over15 = n;
             if (label.includes("under")) result.under15 = n;
@@ -288,7 +312,7 @@ function parseOddsBookmakers(rows) {
             if (label.includes("over")) result.over25 = n;
             if (label.includes("under")) result.under25 = n;
           }
-        } else if (/both teams to score|both teams score/.test(name)) {
+        } else if (/both teams to score|both teams score|both teams/.test(name)) {
           if (["yes", "y"].includes(label)) result.bttsYes = n;
           else if (["no", "n"].includes(label)) result.bttsNo = n;
         }
@@ -314,7 +338,11 @@ async function fetchRealOdds(fixtureId, liveMatch = false) {
   if (liveMatch) {
     try {
       const livePayload = await apiGet(`/odds/live?fixture=${encodeURIComponent(fixtureId)}`);
-      liveOdds = parseOddsBookmakers(livePayload);
+      liveOdds = parseOddsBookmakers(livePayload, "API-Football canlı oran");
+      if (!liveOdds) {
+        const first = Array.isArray(livePayload) ? livePayload[0] : null;
+        console.warn(`[Live odds parse empty] fixture=${fixtureId}; rows=${Array.isArray(livePayload) ? livePayload.length : 0}; rowKeys=${first && typeof first === "object" ? Object.keys(first).join(",") : "none"}; oddsRows=${Array.isArray(first?.odds) ? first.odds.length : 0}; bookmakerRows=${Array.isArray(first?.bookmakers) ? first.bookmakers.length : 0}`);
+      }
     } catch (error) {
       console.warn(`[Live odds unavailable] fixture=${fixtureId}: ${error.message}`);
     }
