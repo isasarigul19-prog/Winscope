@@ -607,17 +607,18 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
   // exact market; if unavailable, use only an actual pre-match quote from this fixture.
   // Never borrow an unrelated market's price or invent a price.
   const exactMarketProbability = (m) => {
+    // Live picks may only use the same live quotes represented in the live market table.
+    // Never silently justify a live pick with a pre-match quote.
+    if (isLive && !liveOdds) return null;
+    const src = isLive ? liveOdds : o;
+    if (!src) return null;
     if (m.oneXtwo) return implied[keyForLabel[m.label]] ?? null;
-    const livePrice = liveOdds;
-    const sources = [livePrice, o].filter(Boolean);
-    for (const src of sources) {
-      const over = toNumber(src[m.oddsKey]);
-      const under = m.underKey ? toNumber(src[m.underKey]) : null;
-      if (over != null && over > 1 && under != null && under > 1) {
-        return 100 * (1 / over) / ((1 / over) + (1 / under));
-      }
-      if (over != null && over > 1) return 100 / over;
+    const over = toNumber(src[m.oddsKey]);
+    const under = m.underKey ? toNumber(src[m.underKey]) : null;
+    if (over != null && over > 1 && under != null && under > 1) {
+      return 100 * (1 / over) / ((1 / over) + (1 / under));
     }
+    if (over != null && over > 1) return 100 / over;
     return null;
   };
   let candidates = markets.map(m => ({ ...m, pct: h[m.key], marketPct: exactMarketProbability(m) }))
@@ -876,19 +877,30 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
     surpriseDisplay = "Maç tamamlandı";
     mainPickDisplay = "Maç tamamlandı — sonuç analizi";
   } else {
+    const scoreOdds = isLive ? (odds.liveOdds || null) : odds;
+    const validScores = rows => (Array.isArray(rows) ? rows : []).filter(row => {
+      const m = String(row?.score || "").match(/^(\d+)-(\d+)$/);
+      return !!m && (!isLive || (Number(m[1]) >= currentHome && Number(m[2]) >= currentAway));
+    });
+    const halfScoreRows = validScores(scoreOdds?.halfCorrectScores);
+    const fullScoreRows = validScores(scoreOdds?.correctScores);
     if (isLive && liveMin >= 45 && matchInfo.htHomeScore != null && matchInfo.htAwayScore != null) {
       halfTimeDisplayScore = `${matchInfo.htHomeScore}-${matchInfo.htAwayScore} (gerçek İY skoru)`;
-    } else if (Array.isArray(odds.halfCorrectScores) && odds.halfCorrectScores.length) {
-      halfTimeDisplayScore = `${odds.halfCorrectScores[0].score} (İY doğru skor piyasası)`;
+    } else if (halfScoreRows.length) {
+      halfTimeDisplayScore = `${halfScoreRows[0].score} (İY doğru skor piyasası)`;
     } else {
-      halfTimeDisplayScore = "İY doğru skor oranı API yanıtında bulunamadı";
+      halfTimeDisplayScore = isLive
+        ? "Canlı İY doğru skor oranı bulunmadı; maç önü skoru kullanılmadı"
+        : "İY doğru skor oranı API yanıtında bulunamadı";
     }
-    if (Array.isArray(odds.correctScores) && odds.correctScores.length) {
-      fullTimeForecast = `${odds.correctScores[0].score} (MS doğru skor piyasası)`;
-      surpriseDisplay = odds.correctScores[1] ? `${odds.correctScores[1].score} (2. olası MS skoru)` : "İkinci doğru skor seçeneği API yanıtında bulunamadı";
+    if (fullScoreRows.length) {
+      fullTimeForecast = `${fullScoreRows[0].score} (${isLive ? "canlı MS doğru skor piyasası" : "MS doğru skor piyasası"})`;
+      surpriseDisplay = fullScoreRows[1] ? `${fullScoreRows[1].score} (2. olası MS skoru)` : "İkinci uygun doğru skor seçeneği API yanıtında bulunamadı";
     } else {
-      fullTimeForecast = "MS doğru skor oranı API yanıtında bulunamadı";
-      surpriseDisplay = "Doğru skor piyasası gelmedi; skor tahmini üretilmedi";
+      fullTimeForecast = isLive
+        ? "Canlı MS doğru skor oranı bulunmadı; maç önü skorundan tahmin yapılmadı"
+        : "MS doğru skor oranı API yanıtında bulunamadı";
+      surpriseDisplay = "Uygun doğru skor piyasası gelmedi; skor tahmini üretilmedi";
     }
     if (isLive && currentTotalGoals >= 3) mainPickDisplay = "MS 2.5 ÜST (çizgi gerçekleşti)";
   }
@@ -915,7 +927,14 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       alternative: smartPick.alternative,
       halfTimeScore: halfTimeDisplayScore,
       fullTimeScore: fullTimeForecast,
-      alternativeFullTimeScore: isFinished ? `${matchInfo.homeScore}-${matchInfo.awayScore}` : (Array.isArray(odds.correctScores) && odds.correctScores[1] ? `${odds.correctScores[1].score} (2. olası MS skoru piyasası)` : "İkinci doğru skor oranı API yanıtında bulunamadı"),
+      alternativeFullTimeScore: isFinished ? `${matchInfo.homeScore}-${matchInfo.awayScore}` : (() => {
+        const source = isLive ? odds.liveOdds : odds;
+        const rows = (Array.isArray(source?.correctScores) ? source.correctScores : []).filter(row => {
+          const m = String(row?.score || "").match(/^(\d+)-(\d+)$/);
+          return !!m && (!isLive || (Number(m[1]) >= Number(matchInfo.homeScore || 0) && Number(m[2]) >= Number(matchInfo.awayScore || 0)));
+        });
+        return rows[1] ? `${rows[1].score} (2. olası MS skoru piyasası)` : (isLive ? "Canlı ikinci MS skor oranı bulunamadı" : "İkinci doğru skor oranı API yanıtında bulunamadı");
+      })(),
       surprise: isFinished ? surpriseDisplay : (smartPick.surprise || surpriseDisplay),
       marketDirection: isLive
         ? (odds.liveOdds?.source && hasUsableGoalMarketOdds(odds.liveOdds)
