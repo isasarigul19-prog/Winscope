@@ -298,7 +298,10 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
   }
   const preferred = books.find(b => /bet365/i.test(b.source));
   const ordered = preferred ? [preferred, ...books.filter(b => b !== preferred)] : books;
-  const keys = ["homeWin","draw","awayWin","over05","under05","over15","under15","over25","under25","over35","under35","bttsYes","bttsNo","handicapHome","handicapAway"];
+  const keys = ["homeWin","draw","awayWin","over05","under05","over15","under15","over25","under25","over35","under35",
+    "htOver05","htUnder05","htOver15","htUnder15","htOver25","htUnder25",
+    "homeOver05","homeUnder05","homeOver15","homeUnder15","awayOver05","awayUnder05","awayOver15","awayUnder15",
+    "bttsYes","bttsNo","handicapHome","handicapAway"];
   const combined = Object.fromEntries(keys.map(k => [k, null]));
   combined.source = null; combined.sources = {}; combined.handicapLine = null;
   for (const book of ordered) {
@@ -314,10 +317,21 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
           if (["home", "1", "team 1"].includes(label)) one.homeWin = n;
           else if (["draw", "x"].includes(label)) one.draw = n;
           else if (["away", "2", "team 2"].includes(label)) one.awayWin = n;
-        } else if (/over\/under|goals over\/under|total goals|total/.test(name)) {
+        } else if (/home team|home goals|team 1 total|team 1 goals/.test(name) ||
+                   /away team|away goals|team 2 total|team 2 goals/.test(name)) {
+          const side = /home team|home goals|team 1/.test(name) ? "home" : "away";
+          for (const line of ["0.5", "1.5"]) if (label.includes(line)) {
+            if (label.includes("over")) one[`${side}Over${line.replace(".", "")}`] = n;
+            if (label.includes("under")) one[`${side}Under${line.replace(".", "")}`] = n;
+          }
+        } else if (/over\/under|goals over\/under|total goals|total/.test(name) &&
+                   !/home team|away team|team total|team goals|home goals|away goals/.test(name)) {
+          const isHalfTimeMarket = /first half|1st half|half time|half-time|1st period|first period/.test(name);
           for (const line of ["0.5", "1.5", "2.5", "3.5"]) if (label.includes(line)) {
-            if (label.includes("over")) one[`over${line.replace(".", "")}`] = n;
-            if (label.includes("under")) one[`under${line.replace(".", "")}`] = n;
+            const prefix = isHalfTimeMarket ? "htOver" : "over";
+            const underPrefix = isHalfTimeMarket ? "htUnder" : "under";
+            if (label.includes("over")) one[`${prefix}${line.replace(".", "")}`] = n;
+            if (label.includes("under")) one[`${underPrefix}${line.replace(".", "")}`] = n;
           }
         } else if (/both teams to score|both teams score|both teams/.test(name)) {
           if (["yes", "y"].includes(label)) one.bttsYes = n;
@@ -485,6 +499,13 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
   implied.over15Pct = paired("over15", "under15");
   implied.over25Pct = paired("over25", "under25");
   implied.over35Pct = paired("over35", "under35");
+  implied.ht05Pct = paired("htOver05", "htUnder05");
+  implied.ht15Pct = paired("htOver15", "htUnder15");
+  implied.ht25Pct = paired("htOver25", "htUnder25");
+  implied.home05Pct = paired("homeOver05", "homeUnder05");
+  implied.away05Pct = paired("awayOver05", "awayUnder05");
+  implied.home15Pct = paired("homeOver15", "homeUnder15");
+  implied.away15Pct = paired("awayOver15", "awayUnder15");
   const yes = toNumber(priceSource.bttsYes), no = toNumber(priceSource.bttsNo);
   implied.bttsPct = yes != null && no != null && yes > 1 && no > 1 ? 100 * (1/yes) / ((1/yes)+(1/no)) : null;
   const oneXtwo = [toNumber(priceSource.homeWin), toNumber(priceSource.draw), toNumber(priceSource.awayWin)];
@@ -492,19 +513,27 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
     const inv = oneXtwo.map(v => 1/v), sum = inv.reduce((a,b)=>a+b,0);
     implied.ms1Pct = inv[0] / sum * 100; implied.msXPct = inv[1] / sum * 100; implied.ms2Pct = inv[2] / sum * 100;
   }
-  const impliedKey = {"MS 0.5 ÜST":"over05Pct", "MS 1.5 ÜST":"over15Pct", "MS 2.5 ÜST":"over25Pct", "MS 3.5 ÜST":"over35Pct", "KG VAR":"bttsPct", "MS 1":"ms1Pct", "MS X":"msXPct", "MS 2":"ms2Pct"};
+  const impliedKey = {"MS 0.5 ÜST":"over05Pct", "MS 1.5 ÜST":"over15Pct", "MS 2.5 ÜST":"over25Pct", "MS 3.5 ÜST":"over35Pct",
+    "İY 0.5 ÜST":"ht05Pct", "İY 1.5 ÜST":"ht15Pct", "İY 2.5 ÜST":"ht25Pct",
+    "EV 0.5 ÜST":"home05Pct", "DEP 0.5 ÜST":"away05Pct",
+    "KG VAR":"bttsPct", "MS 1":"ms1Pct", "MS X":"msXPct", "MS 2":"ms2Pct"};
   const lateZeroZeroWindow = isLive && goals === 0 && minute >= 70 && minute <= 76;
   const lateZeroZeroSupported = lateZeroZeroWindow && h.total >= 30 && Number(h.ft05Pct) >= 70 &&
     live.length >= 2 && (shotsOnTarget >= 1 || totalShots >= 5) &&
     (liveOdds?.over05 != null || liveOdds?.over15 != null || liveOdds?.over25 != null || liveOdds?.bttsYes != null);
   const homeScoreNow = Number(matchInfo?.homeScore || 0), awayScoreNow = Number(matchInfo?.awayScore || 0);
   const candidates = markets.map(m => ({...m, pct: h[m.key], marketPct: implied[impliedKey[m.label]] ?? null}))
-    // Match-total 0.5 over is excluded before kickoff; it is selectable live only in the late 0-0 window with supporting evidence.
+    // Keep all historical percentages visible, but a main recommendation needs a price for that exact market.
     .filter(m => m.label !== "MS 0.5 ÜST" || lateZeroZeroSupported)
-    .filter(m => Number.isFinite(m.pct) && h.total >= 10)
+    .filter(m => Number.isFinite(m.pct) && h.total >= 30)
+    .filter(m => isLive
+      ? !["MS 1","MS X","MS 2","İY EV 0.5 ÜST","İY DEP 0.5 ÜST"].includes(m.label)
+      : /^(MS 1.5 ÜST|MS 2.5 ÜST|MS 3.5 ÜST|KG VAR)$/.test(m.label))
     .filter(m => !m.half || !isLive || minute < 45)
     .filter(m => !isLive || !m.team || (m.team === "home" ? homeScoreNow === 0 : awayScoreNow === 0))
-    .filter(m => !isLive || !m.liveEligible || m.threshold == null || goals < m.threshold);
+    .filter(m => !isLive || !m.liveEligible || m.threshold == null || goals < m.threshold)
+    .filter(m => m.marketPct != null)
+    .filter(m => !isLive || (live.length >= 2 && !!liveOdds));
   const liveSupport = live.length >= 2 ? Math.min(8, shotsOnTarget * 0.9 + totalShots * 0.15 + corners * 0.25 + dangerousAttacks * 0.1) : 0;
   for (const c of candidates) {
     // When the market has a real price, rank using both its normalized market-implied probability and the historical frequency.
@@ -533,10 +562,13 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
   const top = eligible[0];
   const next = eligible.find(c => c.label !== top?.label);
   const scoreSurprise = (h.ftScores || []).find(([score, pct]) => Number(pct) >= 5 && ![top?.label,next?.label].includes(score));
-  let mainPick = top ? top.label : "ANALİZ: TARİHSEL VERİ HESAPLANIYOR";
+  let mainPick = top ? top.label : "PİYASA DOĞRULAMASI BEKLENİYOR";
+  const sampleDescription = h.source === "odds-nearest-historical-matches"
+    ? `oranlarına en yakın ${h.total} geçmiş maçta`
+    : `son ${h.total || 0} tamamlanmış geçmiş maçlık karşılaştırma örnekleminde`;
   let rationale = top
-    ? `En yakın ${h.total} geçmiş maçta ${top.label} gerçekleşme sıklığı %${top.pct}${top.marketPct != null ? `; gerçek oranlardan arındırılmış piyasa olasılığı yaklaşık %${top.marketPct.toFixed(1)}` : "; bu pazar için eşleşen gerçek oran bulunmadı"}. Canlı istatistikler ${live.length >= 2 ? `mevcut (${shotsOnTarget} isabetli şut, ${totalShots} toplam şut, ${corners} korner)` : "bulunamadı"}. Oran kaynağı: ${liveOdds?.source || o.source || "bulunamadı"}.`
-    : `Pazar yüzdelerini hesaplamak için uygun geçmiş örneklem bulunamadı. Mevcut örneklem: ${h.total || 0}.`;
+    ? `${sampleDescription} ${top.label} gerçekleşme sıklığı %${top.pct}; bu pazar için oranlardan arındırılmış piyasa olasılığı yaklaşık %${top.marketPct.toFixed(1)}. Canlı istatistikler ${live.length >= 2 ? `mevcut (${shotsOnTarget} isabetli şut, ${totalShots} toplam şut, ${corners} korner)` : "bulunamadı"}. Oran kaynağı: ${liveOdds?.source || o.source || "bulunamadı"}.`
+    : `Tarihsel pazar yüzdeleri hesaplandı (örneklem: ${h.total || 0}), ancak seçilebilir pazarda doğrulanmış ilgili oran${isLive ? " ve canlı istatistik" : ""} bulunmadığı için ana tercih üretilmedi. ${h.source === "recent-historical-fallback" ? "Bu örneklem oran eşleşmesi değil, son tamamlanmış maçlardan oluşur." : ""}`;
   if (isLive && top && top.threshold && goals >= top.threshold) {
     const nextUnmet = eligible.find(c => c.threshold && goals < c.threshold);
     if (nextUnmet) { mainPick = nextUnmet.label; rationale += ` Mevcut skor ${goals} gol; gerçekleşmiş çizgiler yeni tercih yapılmadı.`; }
@@ -544,7 +576,7 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
   return {
     mainPick,
     alternative: next ? next.label : "—",
-    confidence: top ? top.pct : null,
+    confidence: top && top.marketPct != null ? top.pct : null,
     rationale,
     marketProbabilities: Object.fromEntries(markets.map(m => [m.key, Number.isFinite(h[m.key]) ? h[m.key] : null])),
     marketImpliedProbabilities: implied,
@@ -859,9 +891,9 @@ async function fetchFixtureResult(fixtureId) {
 
 function isPreMatchCouponMarketAllowed(marketText) {
   const market = String(marketText || "").toLocaleUpperCase("tr-TR").replace(/\s+/g, " ").trim();
-  // Match-total 0.5 over is not a useful pre-match coupon selection; team 0.5 markets remain allowed.
-  if (/^MS\s*0[.,]5\s*ÜST$/.test(market)) return false;
-  return isActionableMarket(market);
+  // Maç önü kuponunda düşük 0.5 çizgileri kullanılmaz. Bunlar canlı analizde,
+  // maç dakikası/skoru, canlı istatistik ve canlı oran birlikte uygunsa değerlendirilebilir.
+  return /^(MS\s*1[.,]5\s*ÜST|MS\s*2[.,]5\s*ÜST|MS\s*3[.,]5\s*ÜST|KG\s*VAR)$/.test(market);
 }
 
 function isLateZeroZeroMarketSupported(evalData, fixture) {
