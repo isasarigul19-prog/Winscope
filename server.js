@@ -245,6 +245,8 @@ function normalizeProviderMatch(match) {
 
   return {
     id: idNum,
+    homeId: Number(match.teams?.home?.id ?? match.homeId) || null,
+    awayId: Number(match.teams?.away?.id ?? match.awayId) || null,
     iddaaCode,
     league: String(leagueName),
     country: String(countryName),
@@ -252,8 +254,6 @@ function normalizeProviderMatch(match) {
     status: mapProviderStatus(match.status_code ?? match.status ?? match.fixture?.status?.short),
     home: String(homeName),
     away: String(awayName),
-    homeId: Number(match.teams?.home?.id ?? match.homeId) || null,
-    awayId: Number(match.teams?.away?.id ?? match.awayId) || null,
     homeScore: match.goals?.home ?? 0,
     awayScore: match.goals?.away ?? 0,
     htHomeScore: match.score?.halftime?.home ?? null,
@@ -636,9 +636,6 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
     mainPick,
     alternative: next ? next.label : "—",
     confidence: top && top.marketPct != null ? top.pct : null,
-    historicalPct: top && Number.isFinite(top.pct) ? top.pct : null,
-    marketImpliedPct: top && Number.isFinite(top.marketPct) ? Number(top.marketPct.toFixed(1)) : null,
-    rankScore: top && Number.isFinite(top.rankScore) ? Number(top.rankScore.toFixed(2)) : null,
     rationale,
     marketProbabilities: Object.fromEntries(markets.map(m => [m.key, Number.isFinite(h[m.key]) ? h[m.key] : null])),
     marketImpliedProbabilities: implied,
@@ -662,8 +659,6 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
     status: fRaw.fixture?.status?.short,
     minute: fRaw.fixture?.status?.elapsed,
     teams: fRaw.teams,
-    homeId: fRaw.teams?.home?.id,
-    awayId: fRaw.teams?.away?.id,
     goals: fRaw.goals,
     score: fRaw.score,
     kickoff_utc: fRaw.fixture?.date
@@ -957,11 +952,26 @@ async function fetchFixtureResult(fixtureId) {
   return { ...normalized, raw: rows[0] };
 }
 
+function normalizeCouponMarket(marketText) {
+  return String(marketText || "")
+    .toLocaleUpperCase("tr-TR")
+    .replace(/İ/g, "İ")
+    .replace(/Ü/g, "Ü")
+    .replace(/\\s+/g, " ")
+    .trim();
+}
+
 function isPreMatchCouponMarketAllowed(marketText) {
-  const market = String(marketText || "").toLocaleUpperCase("tr-TR").replace(/\s+/g, " ").trim();
-  // Maç önü kuponunda düşük 0.5 çizgileri kullanılmaz. Bunlar canlı analizde,
-  // maç dakikası/skoru, canlı istatistik ve canlı oran birlikte uygunsa değerlendirilebilir.
-  return /^(EV\s*0[.,]5\s*ÜST|DEP\s*0[.,]5\s*ÜST|EV\s*1[.,]5\s*ÜST|DEP\s*1[.,]5\s*ÜST|MS\s*2[.,]5\s*ÜST|MS\s*3[.,]5\s*ÜST|KG\s*VAR|İY\s*(?:0[.,]5|1[.,]5|2[.,]5)\s*ÜST|İY\s*(?:EV|DEP)\s*0[.,]5\s*ÜST)$/.test(market);
+  const market = normalizeCouponMarket(marketText);
+  // Maç önü: yalnızca EV/DEP 1.5+, MS 2.5/3.5 üst ve KG Var.
+  return /^(?:EV\\s*1[.,]5\\s*ÜST|DEP\\s*1[.,]5\\s*ÜST|MS\\s*2[.,]5\\s*ÜST|MS\\s*3[.,]5\\s*ÜST|KG\\s*VAR)$/.test(market);
+}
+
+function isLiveCouponMarketAllowed(marketText) {
+  const market = normalizeCouponMarket(marketText);
+  // Canlı: İY 0.5/1.5/2.5 üst; MS 0.5/1.5/2.5/3.5 üst;
+  // KG Var; EV/DEP 0.5 üst. Maç önü kuralları canlıya uygulanmaz.
+  return /^(?:İY\\s*(?:0[.,]5|1[.,]5|2[.,]5)\\s*ÜST|MS\\s*(?:0[.,]5|1[.,]5|2[.,]5|3[.,]5)\\s*ÜST|KG\\s*VAR|EV\\s*0[.,]5\\s*ÜST|DEP\\s*0[.,]5\\s*ÜST)$/.test(market);
 }
 
 function isLateZeroZeroMarketSupported(evalData, fixture) {
@@ -1044,7 +1054,7 @@ async function generateLiveCouponLogic() {
         const specialLateZeroZero = isLateZeroZeroMarketSupported(evalData, f);
         const hasLiveMarketOdds = Boolean(evalData.odds?.liveOdds?.isLive &&
           [evalData.odds.liveOdds.over05, evalData.odds.liveOdds.over15, evalData.odds.liveOdds.over25, evalData.odds.liveOdds.over35, evalData.odds.liveOdds.homeOver05, evalData.odds.liveOdds.awayOver05, evalData.odds.liveOdds.homeOver15, evalData.odds.liveOdds.awayOver15, evalData.odds.liveOdds.bttsYes].some(v => v != null));
-        const qualifies = isActionableMarket(evalData.smartPick?.mainPick) &&
+        const qualifies = isLiveCouponMarketAllowed(evalData.smartPick?.mainPick) &&
           evalData.historyData?.total >= 30 && evalData.smartPick?.confidence >= 65 &&
           evalData.liveStats?.length >= 2 && hasLiveMarketOdds &&
           (!/^MS\s*0[.,]5\s*ÜST$/i.test(String(evalData.smartPick?.mainPick || "")) || specialLateZeroZero);
@@ -1145,65 +1155,35 @@ async function generateCouponLogic(dateStr) {
   try {
     const payload = await cachedProviderRequest(`fixtures:${dateStr}`, `/fixtures?date=${dateStr}&timezone=Europe/Istanbul`, 5 * 60_000);
     const rawMatches = payload.response || [];
-    const fixtures = rawMatches
-      .map(m => normalizeProviderMatch(m))
-      .filter(m => m.status === "NS" && isStrictIddaaMatch(m))
-      .sort((a, b) => String(a.fixtureDate || "").localeCompare(String(b.fixtureDate || "")));
+    let fixtures = rawMatches.map(m => normalizeProviderMatch(m)).filter(m => m.status === "NS" && isStrictIddaaMatch(m));
 
-    const candidates = [];
-    const diagnostics = { fixtures: fixtures.length, evaluated: 0, enoughHistory: 0, realOdds: 0, allowedMarket: 0, qualified: 0 };
-
-    // Scan all available fixtures first; do not stop at the first two qualifying matches.
+    fixtures.sort((a, b) => String(a.fixtureDate || "").localeCompare(String(b.fixtureDate || "")));
+    const picks = [];
     for (const f of fixtures) {
       try {
         const evalData = await evaluateMatchAdvanced(f.id);
-        diagnostics.evaluated++;
-
-        const pick = evalData.smartPick || {};
-        const market = String(pick.mainPick || "");
-        const history = evalData.historyData || {};
-        const hasRealOdds = Boolean(evalData.odds?.source && Number.isFinite(Number(pick.marketImpliedPct)));
-        const allowedMarket = isPreMatchCouponMarketAllowed(market);
-        const enoughHistory = Number(history.total) >= 30;
-        const enoughHistoricalSupport = Number(pick.historicalPct) >= 70;
-        const enoughMarketSupport = Number(pick.marketImpliedPct) >= 45;
-        const validSample = history.source === "odds-nearest-historical-matches" ||
-          history.source === "recent-historical-fallback";
-
-        if (enoughHistory) diagnostics.enoughHistory++;
-        if (hasRealOdds) diagnostics.realOdds++;
-        if (allowedMarket) diagnostics.allowedMarket++;
-
-        if (!hasRealOdds || !allowedMarket || !enoughHistory || !enoughHistoricalSupport ||
-            !enoughMarketSupport || !validSample || !Number.isFinite(Number(pick.rankScore))) continue;
-
-        candidates.push({
-          fixtureId: f.id,
-          iddaaCode: f.iddaaCode,
-          home: f.home,
-          away: f.away,
-          league: f.league,
-          kickoff: f.fixtureDate,
-          market,
-          historicalProbability: Number(pick.historicalPct),
-          marketProbability: Number(pick.marketImpliedPct),
-          sampleSize: Number(history.total),
-          rankScore: Number(pick.rankScore),
-          oddsDirection: evalData.odds?.movement?.trend || "ilk ölçüm bekleniyor",
-          source: evalData.odds?.source || "API-Football oran kaynağı"
-        });
-      } catch (e) {
-        console.warn(`[Daily coupon evaluation] fixture=${f.id}: ${e.message}`);
-      }
+        if (evalData.confidenceScore >= 70 && evalData.historyData.total >= 30 &&
+            isPreMatchCouponMarketAllowed(evalData.smartPick?.mainPick) &&
+            Boolean(evalData.odds?.source)) {
+          picks.push({
+            fixtureId: f.id,
+            iddaaCode: f.iddaaCode,
+            home: f.home,
+            away: f.away,
+            league: f.league,
+            kickoff: f.fixtureDate,
+            market: evalData.smartPick.mainPick,
+            odd: evalData.smartPick.odd,
+            historicalProbability: evalData.confidenceScore,
+            oddsDirection: evalData.odds?.movement?.trend || "ilk ölçüm bekleniyor",
+            source: "Veri Odaklı Maç Önü"
+          });
+        }
+      } catch (e) { continue; }
     }
 
-    candidates.sort((a, b) =>
-      b.rankScore - a.rankScore ||
-      b.historicalProbability - a.historicalProbability ||
-      b.sampleSize - a.sampleSize
-    );
-    diagnostics.qualified = candidates.length;
-    const picks = candidates.slice(0, 2).map(({ rankScore, marketProbability, sampleSize, ...pick }) => pick);
+    picks.sort((a, b) => (Number(b.historicalProbability) || 0) - (Number(a.historicalProbability) || 0));
+    picks.splice(2);
 
     if (!picks.length) {
       return {
@@ -1211,8 +1191,7 @@ async function generateCouponLogic(dateStr) {
         date: dateStr,
         status: "NO_MATCHES",
         picks: [],
-        diagnostics,
-        note: "Gerçek ilgili pazar oranı, en az 30 geçmiş maç ve yeterli tarihsel/piyasa desteği birlikte doğrulanamadı. Kupon zorlanmadı."
+        note: "Bu tarihte %75+ kritere uyan maç bulunamadı."
       };
     }
 
@@ -1221,8 +1200,7 @@ async function generateCouponLogic(dateStr) {
       date: dateStr,
       status: "PENDING_APPROVAL",
       picks,
-      diagnostics,
-      note: "WinScope doğrulanmış maç önü seçimi: tüm uygun maçlar puanlandı; en yüksek sıralı tercihler seçildi."
+      note: "Veri Odaklı Maç Önü Kombin"
     };
 
     let tgMsg = `🎟️ <b>WINSCOPE GÜNÜN KUPONU</b> 🎟️
@@ -1242,7 +1220,6 @@ async function generateCouponLogic(dateStr) {
 
     return coupon;
   } catch (error) {
-    console.error("[Daily coupon error]", error.message);
     return {
       draftId: `iddaa-error-${Date.now()}`,
       date: dateStr,
