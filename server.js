@@ -481,6 +481,8 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
     { key: "ht25Pct", label: "İY 2.5 ÜST", half: true },
     { key: "home05Pct", label: "EV 0.5 ÜST", team: "home" },
     { key: "away05Pct", label: "DEP 0.5 ÜST", team: "away" },
+    { key: "home15Pct", label: "EV 1.5 ÜST", team: "home", threshold: 2 },
+    { key: "away15Pct", label: "DEP 1.5 ÜST", team: "away", threshold: 2 },
     { key: "htHome05Pct", label: "İY EV 0.5 ÜST", half: true, team: "home" },
     { key: "htAway05Pct", label: "İY DEP 0.5 ÜST", half: true, team: "away" },
     { key: "bttsPct", label: "KG VAR" },
@@ -516,6 +518,7 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
   const impliedKey = {"MS 0.5 ÜST":"over05Pct", "MS 1.5 ÜST":"over15Pct", "MS 2.5 ÜST":"over25Pct", "MS 3.5 ÜST":"over35Pct",
     "İY 0.5 ÜST":"ht05Pct", "İY 1.5 ÜST":"ht15Pct", "İY 2.5 ÜST":"ht25Pct",
     "EV 0.5 ÜST":"home05Pct", "DEP 0.5 ÜST":"away05Pct",
+    "EV 1.5 ÜST":"home15Pct", "DEP 1.5 ÜST":"away15Pct",
     "KG VAR":"bttsPct", "MS 1":"ms1Pct", "MS X":"msXPct", "MS 2":"ms2Pct"};
   const lateZeroZeroWindow = isLive && goals === 0 && minute >= 70 && minute <= 76;
   const lateZeroZeroSupported = lateZeroZeroWindow && h.total >= 30 && Number(h.ft05Pct) >= 70 &&
@@ -528,7 +531,7 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
     .filter(m => Number.isFinite(m.pct) && h.total >= 30)
     .filter(m => isLive
       ? !["MS 1","MS X","MS 2","İY EV 0.5 ÜST","İY DEP 0.5 ÜST"].includes(m.label)
-      : /^(MS 1.5 ÜST|MS 2.5 ÜST|MS 3.5 ÜST|KG VAR)$/.test(m.label))
+      : /^(EV 0.5 ÜST|DEP 0.5 ÜST|EV 1.5 ÜST|DEP 1.5 ÜST|MS 2.5 ÜST|MS 3.5 ÜST|KG VAR|İY 0.5 ÜST|İY 1.5 ÜST|İY 2.5 ÜST|İY EV 0.5 ÜST|İY DEP 0.5 ÜST)$/.test(m.label))
     .filter(m => !m.half || !isLive || minute < 45)
     .filter(m => !isLive || !m.team || (m.team === "home" ? homeScoreNow === 0 : awayScoreNow === 0))
     .filter(m => !isLive || !m.liveEligible || m.threshold == null || goals < m.threshold)
@@ -893,7 +896,7 @@ function isPreMatchCouponMarketAllowed(marketText) {
   const market = String(marketText || "").toLocaleUpperCase("tr-TR").replace(/\s+/g, " ").trim();
   // Maç önü kuponunda düşük 0.5 çizgileri kullanılmaz. Bunlar canlı analizde,
   // maç dakikası/skoru, canlı istatistik ve canlı oran birlikte uygunsa değerlendirilebilir.
-  return /^(MS\s*1[.,]5\s*ÜST|MS\s*2[.,]5\s*ÜST|MS\s*3[.,]5\s*ÜST|KG\s*VAR)$/.test(market);
+  return /^(EV\s*0[.,]5\s*ÜST|DEP\s*0[.,]5\s*ÜST|EV\s*1[.,]5\s*ÜST|DEP\s*1[.,]5\s*ÜST|MS\s*2[.,]5\s*ÜST|MS\s*3[.,]5\s*ÜST|KG\s*VAR|İY\s*(?:0[.,]5|1[.,]5|2[.,]5)\s*ÜST|İY\s*(?:EV|DEP)\s*0[.,]5\s*ÜST)$/.test(market);
 }
 
 function isLateZeroZeroMarketSupported(evalData, fixture) {
@@ -952,7 +955,7 @@ async function generateLiveCouponLogic() {
         diagnostics.evaluated++;
         const evalData = await evaluateMatchAdvanced(f.id, raw);
         if (evalData.liveStats?.length >= 2) diagnostics.withLiveStats++;
-        if (evalData.odds?.liveOdds?.isLive && [evalData.odds.liveOdds.over05, evalData.odds.liveOdds.over15, evalData.odds.liveOdds.over25, evalData.odds.liveOdds.bttsYes].some(v => v != null)) diagnostics.withRealOdds++;
+        if (evalData.odds?.liveOdds?.isLive && [evalData.odds.liveOdds.over05, evalData.odds.liveOdds.over15, evalData.odds.liveOdds.over25, evalData.odds.liveOdds.over35, evalData.odds.liveOdds.homeOver05, evalData.odds.liveOdds.awayOver05, evalData.odds.liveOdds.homeOver15, evalData.odds.liveOdds.awayOver15, evalData.odds.liveOdds.bttsYes].some(v => v != null)) diagnostics.withRealOdds++;
         if (evalData.odds?.liveOdds?.movement?.previousObservedAt) diagnostics.withOddsMovement++;
         if (evalData.historyData?.total >= 30) diagnostics.withHistory30++;
 
@@ -967,7 +970,7 @@ async function generateLiveCouponLogic() {
           rationale: evalData.smartPick?.rationale || "Analiz gerekçesi oluşturulamadı.",
           marketDirection: evalData.odds?.liveOdds?.movement?.trend || "Hareket ölçümü bekleniyor",
           hasLiveStats: (evalData.liveStats?.length || 0) >= 2,
-          hasLiveOdds: Boolean(evalData.odds?.liveOdds?.isLive && [evalData.odds.liveOdds.over05, evalData.odds.liveOdds.over15, evalData.odds.liveOdds.over25, evalData.odds.liveOdds.bttsYes].some(v => v != null)),
+          hasLiveOdds: Boolean(evalData.odds?.liveOdds?.isLive && [evalData.odds.liveOdds.over05, evalData.odds.liveOdds.over15, evalData.odds.liveOdds.over25, evalData.odds.liveOdds.over35, evalData.odds.liveOdds.homeOver05, evalData.odds.liveOdds.awayOver05, evalData.odds.liveOdds.homeOver15, evalData.odds.liveOdds.awayOver15, evalData.odds.liveOdds.bttsYes].some(v => v != null)),
           markets: { ht00: evalData.historyData?.ht00Pct, ht05: evalData.historyData?.ht05Pct, ht15: evalData.historyData?.ht15Pct, ht25: evalData.historyData?.ht25Pct, htHome05: evalData.historyData?.htHome05Pct, htAway05: evalData.historyData?.htAway05Pct, ft05: evalData.historyData?.ft05Pct, ft15: evalData.historyData?.over15Pct, ft25: evalData.historyData?.over25Pct, ft35: evalData.historyData?.over35Pct, home05: evalData.historyData?.home05Pct, away05: evalData.historyData?.away05Pct, btts: evalData.historyData?.bttsPct, ms1: evalData.historyData?.ms1Pct, msx: evalData.historyData?.msXPct, ms2: evalData.historyData?.ms2Pct },
           topHalfTimeScores: evalData.historyData?.htScores || [],
           topFullTimeScores: evalData.historyData?.ftScores || []
@@ -975,7 +978,7 @@ async function generateLiveCouponLogic() {
 
         const specialLateZeroZero = isLateZeroZeroMarketSupported(evalData, f);
         const hasLiveMarketOdds = Boolean(evalData.odds?.liveOdds?.isLive &&
-          [evalData.odds.liveOdds.over05, evalData.odds.liveOdds.over15, evalData.odds.liveOdds.over25, evalData.odds.liveOdds.bttsYes].some(v => v != null));
+          [evalData.odds.liveOdds.over05, evalData.odds.liveOdds.over15, evalData.odds.liveOdds.over25, evalData.odds.liveOdds.over35, evalData.odds.liveOdds.homeOver05, evalData.odds.liveOdds.awayOver05, evalData.odds.liveOdds.homeOver15, evalData.odds.liveOdds.awayOver15, evalData.odds.liveOdds.bttsYes].some(v => v != null));
         const qualifies = isActionableMarket(evalData.smartPick?.mainPick) &&
           evalData.historyData?.total >= 30 && evalData.smartPick?.confidence >= 65 &&
           evalData.liveStats?.length >= 2 && hasLiveMarketOdds &&
@@ -1403,7 +1406,7 @@ setInterval(async () => {
         const evalData = await evaluateMatchAdvanced(f.id, mRaw);
         const specialLateZeroZero = isLateZeroZeroMarketSupported(evalData, f);
         const hasLiveMarketOdds = Boolean(evalData.odds?.liveOdds?.isLive &&
-          [evalData.odds.liveOdds.over05, evalData.odds.liveOdds.over15, evalData.odds.liveOdds.over25, evalData.odds.liveOdds.bttsYes].some(v => v != null));
+          [evalData.odds.liveOdds.over05, evalData.odds.liveOdds.over15, evalData.odds.liveOdds.over25, evalData.odds.liveOdds.over35, evalData.odds.liveOdds.homeOver05, evalData.odds.liveOdds.awayOver05, evalData.odds.liveOdds.homeOver15, evalData.odds.liveOdds.awayOver15, evalData.odds.liveOdds.bttsYes].some(v => v != null));
         const qualifies = isActionableMarket(evalData.smartPick?.mainPick) &&
           evalData.historyData?.total >= 30 && evalData.smartPick?.confidence >= 65 &&
           evalData.liveStats?.length >= 2 && hasLiveMarketOdds &&
