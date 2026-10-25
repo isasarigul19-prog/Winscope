@@ -304,7 +304,7 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
     "homeOver05","homeUnder05","homeOver15","homeUnder15","awayOver05","awayUnder05","awayOver15","awayUnder15",
     "bttsYes","bttsNo","handicapHome","handicapAway"];
   const combined = Object.fromEntries(keys.map(k => [k, null]));
-  combined.source = null; combined.sources = {}; combined.handicapLine = null;
+  combined.source = null; combined.sources = {}; combined.handicapLine = null; combined.bookmakerCount = ordered.length; combined.bookmakers = ordered.map(b => b.source);
   for (const book of ordered) {
     const one = Object.fromEntries(keys.map(k => [k, null]));
     let handicapHomeLine = null, handicapAwayLine = null;
@@ -314,29 +314,29 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
         const label = String(v.value ?? v.name ?? "").toLowerCase().trim();
         const n = toNumber(v.odd);
         if (n == null || n <= 1) continue;
-        if (/match winner|1x2|fulltime result|winner|match result/.test(name)) {
+        if (/match winner|1x2|full[ -]?time result|winner|match result|1x2 \(including/.test(name)) {
           if (["home", "1", "team 1"].includes(label)) one.homeWin = n;
           else if (["draw", "x"].includes(label)) one.draw = n;
           else if (["away", "2", "team 2"].includes(label)) one.awayWin = n;
-        } else if (/home team|home goals|team 1 total|team 1 goals/.test(name) ||
-                   /away team|away goals|team 2 total|team 2 goals/.test(name)) {
-          const side = /home team|home goals|team 1/.test(name) ? "home" : "away";
-          const isFirstHalfTeamMarket = /first half|1st half|half time|half-time|1st period|first period/.test(name);
+        } else if (/home team|home goals|team 1 total|team 1 goals|home total goals|team total goals \(home\)/.test(name) ||
+                   /away team|away goals|team 2 total|team 2 goals|away total goals|team total goals \(away\)/.test(name)) {
+          const side = /home team|home goals|team 1|home total goals|team total goals \(home\)/.test(name) ? "home" : "away";
+          const isFirstHalfTeamMarket = /first half|1st half|half time|half-time|1st period|first period|1st half team/.test(name);
           const prefix = isFirstHalfTeamMarket ? `ht${side === "home" ? "Home" : "Away"}` : side;
           for (const line of ["0.5", "1.5"]) if (label.includes(line)) {
             if (label.includes("over")) one[`${prefix}Over${line.replace(".", "")}`] = n;
             if (label.includes("under")) one[`${prefix}Under${line.replace(".", "")}`] = n;
           }
-        } else if (/over\/under|goals over\/under|total goals|total/.test(name) &&
-                   !/home team|away team|team total|team goals|home goals|away goals/.test(name)) {
-          const isHalfTimeMarket = /first half|1st half|half time|half-time|1st period|first period/.test(name);
+        } else if (/over\s*\/\s*under|goals over\s*\/\s*under|total goals|total|match goals|goal line/.test(name) &&
+                   !/home team|away team|team total|team goals|home goals|away goals|home total goals|away total goals/.test(name)) {
+          const isHalfTimeMarket = /first half|1st half|half time|half-time|1st period|first period|1st half goals|half-time goals/.test(name);
           for (const line of ["0.5", "1.5", "2.5", "3.5"]) if (label.includes(line)) {
             const prefix = isHalfTimeMarket ? "htOver" : "over";
             const underPrefix = isHalfTimeMarket ? "htUnder" : "under";
             if (label.includes("over")) one[`${prefix}${line.replace(".", "")}`] = n;
             if (label.includes("under")) one[`${underPrefix}${line.replace(".", "")}`] = n;
           }
-        } else if (/both teams to score|both teams score|both teams/.test(name)) {
+        } else if (/both teams to score|both teams score|both teams|btts/.test(name)) {
           if (["yes", "y"].includes(label)) one.bttsYes = n;
           else if (["no", "n"].includes(label)) one.bttsNo = n;
         } else if (/asian handicap|handicap/.test(name)) {
