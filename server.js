@@ -297,36 +297,44 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
         bets: row.odds.map(item => ({ name: item.name || item.bet || "", values: Array.isArray(item.values) ? item.values : [] })) });
     }
   }
+  // Keep all bookmaker quotes. Bet365 is prioritized for the source label only;
+  // the consensus market price is the median across every available bookmaker.
   const preferred = books.find(b => /bet365/i.test(b.source));
   const ordered = preferred ? [preferred, ...books.filter(b => b !== preferred)] : books;
-  const keys = ["homeWin","draw","awayWin","over05","under05","over15","under15","over25","under25","over35","under35",
+  const keys = ["homeWin","draw","awayWin","over05","under05","over15","under15","over25","under25","over35","under35","over45","under45","over55","under55",
     "htOver05","htUnder05","htOver15","htUnder15","htOver25","htUnder25","htHomeOver05","htHomeUnder05","htAwayOver05","htAwayUnder05",
     "homeOver05","homeUnder05","homeOver15","homeUnder15","awayOver05","awayUnder05","awayOver15","awayUnder15",
     "bttsYes","bttsNo","handicapHome","handicapAway"];
-  const combined = Object.fromEntries(keys.map(k => [k, null]));
-  combined.source = null; combined.sources = {}; combined.handicapLine = null; combined.bookmakerCount = ordered.length; combined.bookmakers = ordered.map(b => b.source);
-  combined.correctScores = []; combined.halfTimeCorrectScores = [];
-  combined.marketOddsByBook = {};
-  for (const key of keys) combined.marketOddsByBook[key] = [];
+  const quotes = Object.fromEntries(keys.map(k => [k, []]));
+  const scoreQuotes = { full: {}, half: {} };
+  let handicapLine = null;
+  const median = values => {
+    const a = values.filter(v => Number.isFinite(v) && v > 1).sort((x,y) => x-y);
+    if (!a.length) return null;
+    const mid = Math.floor(a.length / 2);
+    return Number((a.length % 2 ? a[mid] : (a[mid-1] + a[mid]) / 2).toFixed(3));
+  };
   for (const book of ordered) {
     const one = Object.fromEntries(keys.map(k => [k, null]));
     let handicapHomeLine = null, handicapAwayLine = null;
     for (const bet of book.bets) {
       const name = String(bet.name || "").toLowerCase();
-      if (/correct score|correct score 1st half|half.?time correct score|ht correct score/.test(name)) {
-        const isHalfScore = /1st half|first half|half.?time|ht correct score/.test(name);
-        for (const v of (bet.values || [])) {
-          const scoreLabel = String(v.value ?? v.name ?? "").trim();
-          const scoreMatch = scoreLabel.match(/^(\d+)\s*[-:]\s*(\d+)$/);
-          const scoreOdd = toNumber(v.odd);
-          if (scoreMatch && scoreOdd != null && scoreOdd > 1) {
-            const item = { score: `${Number(scoreMatch[1])}-${Number(scoreMatch[2])}`, source: book.source, odd: scoreOdd };
-            const list = isHalfScore ? combined.halfTimeCorrectScores : combined.correctScores;
-            if (!list.some(x => x.score === item.score)) list.push(item);
-          }
+      const values = Array.isArray(bet.values) ? bet.values : [];
+      const isHalfScore = /half.?time.*correct score|correct score.*half.?time|half.?time score|1st half correct score|first half correct score/.test(name);
+      const isCorrectScore = /correct score|exact score|full.?time score/.test(name);
+      if (isCorrectScore) {
+        const target = isHalfScore ? scoreQuotes.half : scoreQuotes.full;
+        for (const v of values) {
+          const label = String(v.value ?? v.name ?? "").trim();
+          const m = label.match(/^(\d{1,2})\s*[-:]\s*(\d{1,2})$/);
+          const n = toNumber(v.odd);
+          if (!m || n == null || n <= 1) continue;
+          const score = `${Number(m[1])}-${Number(m[2])}`;
+          (target[score] ||= []).push({ odd:n, source:book.source });
         }
+        continue;
       }
-      for (const v of (bet.values || [])) {
+      for (const v of values) {
         const label = String(v.value ?? v.name ?? "").toLowerCase().trim();
         const n = toNumber(v.odd);
         if (n == null || n <= 1) continue;
@@ -346,7 +354,7 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
         } else if (/over\s*\/\s*under|goals over\s*\/\s*under|total goals|total|match goals|goal line/.test(name) &&
                    !/home team|away team|team total|team goals|home goals|away goals|home total goals|away total goals/.test(name)) {
           const isHalfTimeMarket = /first half|1st half|half time|half-time|1st period|first period|1st half goals|half-time goals/.test(name);
-          for (const line of ["0.5", "1.5", "2.5", "3.5"]) if (label.includes(line)) {
+          for (const line of ["0.5", "1.5", "2.5", "3.5", "4.5", "5.5"]) if (label.includes(line)) {
             const prefix = isHalfTimeMarket ? "htOver" : "over";
             const underPrefix = isHalfTimeMarket ? "htUnder" : "under";
             if (label.includes("over")) one[`${prefix}${line.replace(".", "")}`] = n;
@@ -366,57 +374,23 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
         }
       }
     }
-    if (one.handicapHome != null && one.handicapAway != null && handicapHomeLine != null && handicapAwayLine != null && Math.abs(handicapHomeLine + handicapAwayLine) < 0.26) {
-      combined.handicapLine ??= handicapHomeLine;
-    } else if (one.handicapHome == null || one.handicapAway == null) {
-      one.handicapHome = null; one.handicapAway = null;
-    }
-    for (const key of keys) {
-      if (one[key] != null) combined.marketOddsByBook[key].push({ source: book.source, odd: one[key] });
-      if (combined[key] == null && one[key] != null) {
-        combined[key] = one[key];
-        combined.sources[key] = book.source;
-        combined.source ??= book.source;
-      }
-    }
+    if (one.handicapHome != null && one.handicapAway != null && handicapHomeLine != null && handicapAwayLine != null && Math.abs(handicapHomeLine + handicapAwayLine) < 0.26) handicapLine ??= handicapHomeLine;
+    else if (one.handicapHome == null || one.handicapAway == null) { one.handicapHome = null; one.handicapAway = null; }
+    for (const key of keys) if (one[key] != null) quotes[key].push({ odd: one[key], source: book.source });
   }
-  // Use all returned bookmakers to calculate consensus implied probabilities.
-  // Raw odds remain internal and are never sent to the UI.
-  const pairs = [
-    ["over05", "under05", "over05Pct"], ["over15", "under15", "over15Pct"],
-    ["over25", "under25", "over25Pct"], ["over35", "under35", "over35Pct"],
-    ["htOver05", "htUnder05", "ht05Pct"], ["htOver15", "htUnder15", "ht15Pct"],
-    ["htOver25", "htUnder25", "ht25Pct"], ["homeOver05", "homeUnder05", "home05Pct"],
-    ["homeOver15", "homeUnder15", "home15Pct"], ["awayOver05", "awayUnder05", "away05Pct"],
-    ["awayOver15", "awayUnder15", "away15Pct"], ["htHomeOver05", "htHomeUnder05", "htHome05Pct"],
-    ["htAwayOver05", "htAwayUnder05", "htAway05Pct"], ["bttsYes", "bttsNo", "bttsPct"]
-  ];
-  combined.consensusProbabilities = {};
-  for (const [overKey, underKey, outKey] of pairs) {
-    const underBySource = new Map(combined.marketOddsByBook[underKey].map(x => [x.source, x.odd]));
-    const probabilities = combined.marketOddsByBook[overKey].flatMap(x => {
-      const under = underBySource.get(x.source);
-      return x.odd > 1 && under > 1 ? [100 * (1 / x.odd) / ((1 / x.odd) + (1 / under))] : [];
-    });
-    if (probabilities.length) combined.consensusProbabilities[outKey] = Number((probabilities.reduce((a,b)=>a+b,0) / probabilities.length).toFixed(1));
-  }
-  const oneXtwoBySource = {};
-  for (const key of ["homeWin","draw","awayWin"]) {
-    for (const row of combined.marketOddsByBook[key]) (oneXtwoBySource[row.source] ||= {})[key] = row.odd;
-  }
-  const oneXtwoPcts = [];
-  for (const book of Object.values(oneXtwoBySource)) {
-    if ([book.homeWin, book.draw, book.awayWin].every(x => x > 1)) {
-      const inv = [1/book.homeWin,1/book.draw,1/book.awayWin], sum = inv.reduce((a,b)=>a+b,0);
-      oneXtwoPcts.push([inv[0]/sum*100,inv[1]/sum*100,inv[2]/sum*100]);
-    }
-  }
-  if (oneXtwoPcts.length) {
-    combined.consensusProbabilities.ms1Pct = Number((oneXtwoPcts.reduce((a,b)=>a+b[0],0)/oneXtwoPcts.length).toFixed(1));
-    combined.consensusProbabilities.msXPct = Number((oneXtwoPcts.reduce((a,b)=>a+b[1],0)/oneXtwoPcts.length).toFixed(1));
-    combined.consensusProbabilities.ms2Pct = Number((oneXtwoPcts.reduce((a,b)=>a+b[2],0)/oneXtwoPcts.length).toFixed(1));
-  }
-  return keys.some(k => combined[k] != null) || combined.correctScores.length ? combined : null;
+  const combined = Object.fromEntries(keys.map(k => [k, median(quotes[k].map(x => x.odd))]));
+  combined.source = preferred?.source || ordered[0]?.source || null;
+  combined.sources = {};
+  for (const key of keys) if (quotes[key].length) combined.sources[key] = quotes[key].map(q => q.source).join(", ");
+  combined.handicapLine = handicapLine;
+  combined.bookmakerCount = ordered.length;
+  combined.bookmakers = ordered.map(b => b.source);
+  combined.bookmakerQuotes = Object.fromEntries(keys.map(k => [k, quotes[k]]));
+  const normalizeScores = obj => Object.entries(obj).map(([score, rows]) => ({ score, odd: median(rows.map(r=>r.odd)), bookmakers: [...new Set(rows.map(r=>r.source))] }))
+    .filter(x => x.odd != null).sort((a,b) => a.odd-b.odd);
+  combined.correctScores = normalizeScores(scoreQuotes.full);
+  combined.halfCorrectScores = normalizeScores(scoreQuotes.half);
+  return keys.some(k => combined[k] != null) || combined.correctScores.length || combined.halfCorrectScores.length ? combined : null;
 }
 
 async function recordLiveOddsSnapshot(fixtureId, liveOdds, marketType = "live") {
@@ -561,6 +535,8 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
     { key: "over15Pct", label: "MS 1.5 ÜST", threshold: 2, oddsKey: "over15", underKey: "under15" },
     { key: "over25Pct", label: "MS 2.5 ÜST", threshold: 3, oddsKey: "over25", underKey: "under25" },
     { key: "over35Pct", label: "MS 3.5 ÜST", threshold: 4, oddsKey: "over35", underKey: "under35" },
+    { key: "over45Pct", label: "MS 4.5 ÜST", threshold: 5, oddsKey: "over45", underKey: "under45" },
+    { key: "over55Pct", label: "MS 5.5 ÜST", threshold: 6, oddsKey: "over55", underKey: "under55" },
     { key: "ht05Pct", label: "İY 0.5 ÜST", threshold: 1, half: true, oddsKey: "htOver05", underKey: "htUnder05" },
     { key: "ht15Pct", label: "İY 1.5 ÜST", threshold: 2, half: true, oddsKey: "htOver15", underKey: "htUnder15" },
     { key: "ht25Pct", label: "İY 2.5 ÜST", threshold: 3, half: true, oddsKey: "htOver25", underKey: "htUnder25" },
@@ -598,6 +574,8 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
   implied.over15Pct = paired("over15", "under15");
   implied.over25Pct = paired("over25", "under25");
   implied.over35Pct = paired("over35", "under35");
+  implied.over45Pct = paired("over45", "under45");
+  implied.over55Pct = paired("over55", "under55");
   implied.ht05Pct = paired("htOver05", "htUnder05");
   implied.ht15Pct = paired("htOver15", "htUnder15");
   implied.ht25Pct = paired("htOver25", "htUnder25");
@@ -615,29 +593,24 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
     implied.ms1Pct = inv[0] / sum * 100; implied.msXPct = inv[1] / sum * 100; implied.ms2Pct = inv[2] / sum * 100;
   }
   const keyForLabel = {
-    "MS 0.5 ÜST": "over05Pct", "MS 1.5 ÜST": "over15Pct", "MS 2.5 ÜST": "over25Pct", "MS 3.5 ÜST": "over35Pct",
+    "MS 0.5 ÜST": "over05Pct", "MS 1.5 ÜST": "over15Pct", "MS 2.5 ÜST": "over25Pct", "MS 3.5 ÜST": "over35Pct", "MS 4.5 ÜST": "over45Pct", "MS 5.5 ÜST": "over55Pct",
     "İY 0.5 ÜST": "ht05Pct", "İY 1.5 ÜST": "ht15Pct", "İY 2.5 ÜST": "ht25Pct",
     "EV 0.5 ÜST": "home05Pct", "DEP 0.5 ÜST": "away05Pct", "EV 1.5 ÜST": "home15Pct", "DEP 1.5 ÜST": "away15Pct",
     "İY EV 0.5 ÜST": "htHome05Pct", "İY DEP 0.5 ÜST": "htAway05Pct", "KG VAR": "bttsPct", "MS 1": "ms1Pct", "MS X": "msXPct", "MS 2": "ms2Pct"
   };
   const lateZeroZeroWindow = isLive && goals === 0 && minute >= 70 && minute <= 76;
   const lateZeroZeroSupported = lateZeroZeroWindow && live.length >= 2 &&
-    (shotsOnTarget >= 1 || totalShots >= 5) &&
-    Boolean(liveOdds?.over05 != null || liveOdds?.over15 != null || liveOdds?.over25 != null);
+    (shotsOnTarget >= 1 || totalShots >= 5) && Boolean(liveOdds?.over05 != null || liveOdds?.over15 != null || liveOdds?.over25 != null);
   const liveStatsAvailable = live.length >= 2;
   const liveTempoSupported = liveStatsAvailable && (shotsOnTarget >= 2 || totalShots >= 8 || totalXg >= 0.8 || corners >= 4);
-  // Missing live statistics must not suppress analysis when real market odds exist.
-  // Statistics may strengthen/weaken a pick, but odds-only markets remain eligible.
   // Score each candidate using its own real market price. Prefer live odds for that
   // exact market; if unavailable, use only an actual pre-match quote from this fixture.
   // Never borrow an unrelated market's price or invent a price.
   const exactMarketProbability = (m) => {
-    const probabilityKey = keyForLabel[m.label];
-    if (m.oneXtwo) return (liveOdds?.consensusProbabilities?.[probabilityKey] ?? o.consensusProbabilities?.[probabilityKey] ?? implied[probabilityKey]) ?? null;
+    if (m.oneXtwo) return implied[keyForLabel[m.label]] ?? null;
     const livePrice = liveOdds;
     const sources = [livePrice, o].filter(Boolean);
     for (const src of sources) {
-      if (src.consensusProbabilities?.[probabilityKey] != null) return src.consensusProbabilities[probabilityKey];
       const over = toNumber(src[m.oddsKey]);
       const under = m.underKey ? toNumber(src[m.underKey]) : null;
       if (over != null && over > 1 && under != null && under > 1) {
@@ -650,7 +623,7 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
   let candidates = markets.map(m => ({ ...m, pct: h[m.key], marketPct: exactMarketProbability(m) }))
     .filter(m => m.marketPct != null && Number.isFinite(Number(m.marketPct)))
     .filter(m => isLive ? !m.oneXtwo : !/^MS\s*[1X2]$/.test(m.label))
-    .filter(m => true)
+    .filter(m => !isLive || (liveStatsAvailable && liveTempoSupported))
     .filter(m => !isLive || !m.half || (minute >= 10 && minute < 45))
     .filter(m => !isLive || !m.threshold || (m.half ? goals < m.threshold : (m.team === "home" ? homeGoals : m.team === "away" ? awayGoals : goals) < m.threshold))
     .filter(m => !isLive || !m.btts || !(homeGoals > 0 && awayGoals > 0))
@@ -707,18 +680,33 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
   const next = candidates.find(c => c.label !== top?.label) || null;
   const scoreSurprise = (h.ftScores || []).find(([score, pct]) => Number(pct) >= 5 && ![top?.label, next?.label].includes(score));
   const mainPick = top ? top.label : "TERCİH YOK";
-  const consensusForDisplay = { ...implied, ...(o.consensusProbabilities || {}), ...(liveOdds?.consensusProbabilities || {}) };
   const rationale = top
-    ? `Piyasa ima olasılığı %${top.marketPct.toFixed(1)} · ${isLive ? (liveStatsAvailable ? `canlı istatistik: ${shotsOnTarget} isabetli şut, ${totalShots} toplam şut, ${corners} korner${totalXg ? `, xG ${totalXg.toFixed(2)}` : ""} · ` : "canlı istatistik yok; seçim gerçek oranlara dayalı · ") : ""}${oddsBasis}: ${(isLive && liveOdds && hasUsableGoalMarketOdds(liveOdds) ? liveOdds.source : o.source) || "kaynak belirtilmedi"}${(isLive ? (liveOdds && hasUsableGoalMarketOdds(liveOdds) ? liveOdds.movement : null) : o.movement)?.trend ? ` · ${(isLive ? (liveOdds && hasUsableGoalMarketOdds(liveOdds) ? liveOdds.movement : null) : o.movement).trend}` : isLive && !(liveOdds && hasUsableGoalMarketOdds(liveOdds)) ? " · canlı oran hareketi ölçülemedi" : ""}.`
+    ? `Piyasa ima olasılığı %${top.marketPct.toFixed(1)} · ${isLive ? `canlı istatistik: ${shotsOnTarget} isabetli şut, ${totalShots} toplam şut, ${corners} korner${totalXg ? `, xG ${totalXg.toFixed(2)}` : ""} · ` : ""}${oddsBasis}: ${(isLive && liveOdds && hasUsableGoalMarketOdds(liveOdds) ? liveOdds.source : o.source) || "kaynak belirtilmedi"}${(isLive ? (liveOdds && hasUsableGoalMarketOdds(liveOdds) ? liveOdds.movement : null) : o.movement)?.trend ? ` · ${(isLive ? (liveOdds && hasUsableGoalMarketOdds(liveOdds) ? liveOdds.movement : null) : o.movement).trend}` : isLive && !(liveOdds && hasUsableGoalMarketOdds(liveOdds)) ? " · canlı oran hareketi ölçülemedi" : ""}.`
     : `Gerçek oranı bulunan uygun bir pazar tespit edilemedi.`;
   return {
     mainPick,
     alternative: next ? next.label : "—",
     confidence: top ? Number(top.marketPct) : null,
     rationale,
-    marketProbabilities: Object.fromEntries(markets.map(m => [m.key, consensusForDisplay[m.key] ?? null])),
-    marketAnalysis: markets.map(m => ({ label: m.label, impliedProbability: consensusForDisplay[keyForLabel[m.label]] ?? null, available: consensusForDisplay[keyForLabel[m.label]] != null, status: consensusForDisplay[keyForLabel[m.label]] != null ? "Mevcut şirketlerin piyasa göstergesi" : "Bu pazara ait oran API yanıtında eşleştirilemedi" })),
-    marketImpliedProbabilities: consensusForDisplay,
+    marketProbabilities: Object.fromEntries(markets.map(m => [m.key, implied[m.key] ?? null])),
+    marketAnalysis: markets.map(m => ({
+      label: m.label,
+      impliedProbability: implied[keyForLabel[m.label]] ?? null,
+      available: implied[keyForLabel[m.label]] != null,
+      bookmakerCount: Math.max(0, ...[m.oddsKey, m.underKey].filter(Boolean).map(k => (o.bookmakerQuotes?.[k] || []).length)),
+      bookmakers: [...new Set([m.oddsKey, m.underKey].filter(Boolean).flatMap(k => (o.bookmakerQuotes?.[k] || []).map(q => q.source)))],
+      quoteSource: m.oddsKey ? (o.sources?.[m.oddsKey] || null) : null
+    })),
+    bookmakerComparison: {
+      count: Number(o.bookmakerCount || 0),
+      names: Array.isArray(o.bookmakers) ? o.bookmakers : [],
+      markets: Object.fromEntries(markets.map(m => [m.label, {
+        available: implied[keyForLabel[m.label]] != null,
+        bookmakerCount: Math.max(0, ...[m.oddsKey, m.underKey].filter(Boolean).map(k => (o.bookmakerQuotes?.[k] || []).length)),
+        bookmakers: [...new Set([m.oddsKey, m.underKey].filter(Boolean).flatMap(k => (o.bookmakerQuotes?.[k] || []).map(q => q.source)))]
+      }]))
+    },
+    marketImpliedProbabilities: implied,
     surprise: "Doğru skor pazarı verisi mevcutsa ayrıca değerlendirilecek; veri yoksa skor üretilmedi.",
     oddsSource: (isLive && liveOdds && hasUsableGoalMarketOdds(liveOdds) ? liveOdds.source : o.source) || null,
     oddsBasis,
@@ -764,7 +752,6 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   const isLive = !isFinished && (matchInfo.status === "LIVE" || matchInfo.status === "HT" || (matchInfo.minute != null && matchInfo.minute > 0));
   const odds = await fetchRealOdds(fixtureId, isLive);
 
-  // Historical data is retained for legacy display only; it is not used by the prediction ranking.
   let historyData = null;
   if (pool) {
     try {
@@ -891,14 +878,18 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   } else {
     if (isLive && liveMin >= 45 && matchInfo.htHomeScore != null && matchInfo.htAwayScore != null) {
       halfTimeDisplayScore = `${matchInfo.htHomeScore}-${matchInfo.htAwayScore} (gerçek İY skoru)`;
+    } else if (Array.isArray(odds.halfCorrectScores) && odds.halfCorrectScores.length) {
+      halfTimeDisplayScore = `${odds.halfCorrectScores[0].score} (İY doğru skor piyasası)`;
     } else {
-      const htScores = (odds.liveOdds?.halfTimeCorrectScores?.length ? odds.liveOdds.halfTimeCorrectScores : odds.halfTimeCorrectScores) || [];
-      const htRanked = htScores.slice().sort((a, b) => a.odd - b.odd);
-      halfTimeDisplayScore = htRanked[0] ? `${htRanked[0].score} (doğru skor pazarından)` : "İlk yarı doğru skor oranı API'de bulunamadı";
+      halfTimeDisplayScore = "İY doğru skor oranı API yanıtında bulunamadı";
     }
-    const scoreRows = (odds.liveOdds?.correctScores?.length ? odds.liveOdds.correctScores : odds.correctScores) || [];
-    const rankedScores = scoreRows.slice().sort((a, b) => a.odd - b.odd);
-    fullTimeForecast = rankedScores[0] ? `${rankedScores[0].score} (doğru skor pazarından)` : "Doğru skor oranı API'de bulunamadı";
+    if (Array.isArray(odds.correctScores) && odds.correctScores.length) {
+      fullTimeForecast = `${odds.correctScores[0].score} (MS doğru skor piyasası)`;
+      surpriseDisplay = odds.correctScores[1] ? `${odds.correctScores[1].score} (2. olası MS skoru)` : "İkinci doğru skor seçeneği API yanıtında bulunamadı";
+    } else {
+      fullTimeForecast = "MS doğru skor oranı API yanıtında bulunamadı";
+      surpriseDisplay = "Doğru skor piyasası gelmedi; skor tahmini üretilmedi";
+    }
     if (isLive && currentTotalGoals >= 3) mainPickDisplay = "MS 2.5 ÜST (çizgi gerçekleşti)";
   }
   const confidenceScore = smartPick.confidence != null ? Math.round(smartPick.confidence) : 0;
@@ -924,7 +915,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       alternative: smartPick.alternative,
       halfTimeScore: halfTimeDisplayScore,
       fullTimeScore: fullTimeForecast,
-      alternativeFullTimeScore: isFinished ? `${matchInfo.homeScore}-${matchInfo.awayScore}` : (() => { const rows = (odds.liveOdds?.correctScores?.length ? odds.liveOdds.correctScores : odds.correctScores) || []; const ranked = rows.slice().sort((a, b) => a.odd - b.odd); return ranked[1] ? `${ranked[1].score} (doğru skor pazarından)` : "İkinci doğru skor oranı API'de bulunamadı"; })(),
+      alternativeFullTimeScore: isFinished ? `${matchInfo.homeScore}-${matchInfo.awayScore}` : (Array.isArray(odds.correctScores) && odds.correctScores[1] ? `${odds.correctScores[1].score} (2. olası MS skoru piyasası)` : "İkinci doğru skor oranı API yanıtında bulunamadı"),
       surprise: isFinished ? surpriseDisplay : (smartPick.surprise || surpriseDisplay),
       marketDirection: isLive
         ? (odds.liveOdds?.source && hasUsableGoalMarketOdds(odds.liveOdds)
@@ -1081,10 +1072,9 @@ function selectPreMatchCouponMarket(evalData) {
   ];
 
   const candidates = markets.map(m => {
-    const historicalFrequency = toNumber(history[m.historyKey]);
     const over = toNumber(odds[m.overKey]);
     const under = toNumber(odds[m.underKey]);
-    if (historicalFrequency == null || over == null || over <= 1) return null;
+    if (over == null || over <= 1) return null;
     const marketProbability = under != null && under > 1
       ? (100 * (1 / over) / ((1 / over) + (1 / under)))
       : (100 / over);
@@ -1092,13 +1082,11 @@ function selectPreMatchCouponMarket(evalData) {
     if (!source) return null;
     return {
       label: m.label,
-      historicalFrequency,
       marketProbability: Number(marketProbability.toFixed(1)),
       source,
-      rankScore: historicalFrequency * 0.55 + marketProbability * 0.45
+      rankScore: marketProbability
     };
   }).filter(Boolean)
-    .filter(m => m.historicalFrequency >= 70)
     .sort((a, b) => b.rankScore - a.rankScore);
 
   return candidates[0] || null;
@@ -1186,7 +1174,7 @@ async function generateLiveCouponLogic() {
         const specialLateZeroZero = isLateZeroZeroMarketSupported(evalData, f);
         const hasMarketReferenceOdds = hasUsableGoalMarketOdds(evalData.odds?.liveOdds) || hasUsableGoalMarketOdds(evalData.odds);
         const qualifies = isActionableMarket(evalData.smartPick?.mainPick) &&
-          evalData.historyData?.total >= 30 && evalData.smartPick?.confidence >= 65 &&
+          evalData.smartPick?.confidence >= 65 &&
           evalData.liveStats?.length >= 2 && hasMarketReferenceOdds &&
           (!/^MS\s*0[.,]5\s*ÜST$/i.test(String(evalData.smartPick?.mainPick || "")) || specialLateZeroZero);
 
@@ -1211,14 +1199,15 @@ async function generateLiveCouponLogic() {
       currentScore: `${f.homeScore}-${f.awayScore}`,
       market: evalData.smartPick.mainPick,
       odd: evalData.smartPick.odd ?? null,
-      historicalProbability: evalData.confidenceScore,
-      historicalFrequency: evalData.smartPick.confidence,
+      marketProbability: evalData.smartPick.confidence,
+      historicalProbability: null,
+      historicalFrequency: null,
       oddsDirection: evalData.odds?.liveOdds?.movement?.trend || "ölçüm bekleniyor",
       source: "WinScope Akıllı Canlı Analiz"
     }));
 
     if (!picks.length) {
-      const note = `Canlı ${diagnostics.liveFixtures} maç · uygun lig/dakika ${diagnostics.supportedLeague} · analiz edilen ${diagnostics.evaluated} · canlı istatistik bulunan ${diagnostics.withLiveStats} · gerçek canlı oran bulunan ${diagnostics.withRealOdds} · önceki oran ölçümü bulunan ${diagnostics.withOddsMovement} · 30+ benzer geçmiş maç bulunan ${diagnostics.withHistory30} · eşikleri geçen ${diagnostics.strongCandidates}. İlk tarama oran hareketini ölçemez; sonraki taramalarda önceki ölçümle kıyaslanır. Veriler yetersizse kupon zorlanmaz.`;
+      const note = `Canlı ${diagnostics.liveFixtures} maç · uygun lig/dakika ${diagnostics.supportedLeague} · analiz edilen ${diagnostics.evaluated} · canlı istatistik bulunan ${diagnostics.withLiveStats} · gerçek canlı oran bulunan ${diagnostics.withRealOdds} · önceki oran ölçümü bulunan ${diagnostics.withOddsMovement} · eşikleri geçen ${diagnostics.strongCandidates}. İlk tarama oran hareketini ölçemez; sonraki taramalarda önceki ölçümle kıyaslanır. Geçmiş maç yüzdeleri tahmin motorunda kullanılmaz.`;
       return {
         draftId: `live-empty-${Date.now()}`,
         date: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString().split("T")[0],
@@ -1239,7 +1228,7 @@ async function generateLiveCouponLogic() {
       picks,
       diagnostics,
       analysisRows: analyzedMatches,
-      note: "Canlı istatistik, gerçek piyasa oranı ve en az 30 benzer tarihsel maçla filtrelendi. Yüzde, canlı kazanma olasılığı değil tarihsel gerçekleşme sıklığıdır."
+      note: "Seçimler gerçek piyasa oranları ve mevcut canlı sinyallerle sıralanır. Geçmiş maç yüzdeleri tahmin motorunda kullanılmaz; piyasa ima olasılığı başarı garantisi değildir."
     };
 
     let tgMsg = `🎯 <b>WINSCOPE CANLI FIRSAT KOMBİNİ</b> 🎯
@@ -1250,7 +1239,7 @@ async function generateLiveCouponLogic() {
       tgMsg += `🏆 <b>${p.league}</b>
 ⚽ ${p.home} vs ${p.away}
 ⏱️ Dk: ${p.minute}' | Skor: ${p.currentScore}
-🎯 Tercih: <b>${p.market}</b> (Benzer oranlı geçmiş maçlarda gerçekleşme sıklığı: %${p.historicalFrequency})
+🎯 Tercih: <b>${p.market}</b> (Piyasa ima olasılığı: %${p.marketProbability ?? "—"})
 📉 Oran yönü: ${p.oddsDirection || "ölçüm bekleniyor"}
 -------------------
 `;
@@ -1306,20 +1295,17 @@ async function generateCouponLogic(dateStr) {
       try {
         const evalData = await evaluateMatchAdvanced(f.id, raw);
         diagnostics.analyzed++;
-        const historyOk = Number(evalData.historyData?.total || 0) >= 30;
-        // Evaluate each permitted coupon market independently. Previously the daily
-        // coupon only tested smartPick.mainPick; if that top pick was a disallowed
-        // market, a valid alternative market on the same match was silently discarded.
-        const selectedMarket = historyOk ? selectPreMatchCouponMarket(evalData) : null;
+        // Evaluate each permitted coupon market from real odds only; historical match
+        // frequency is deliberately excluded from the selection engine.
+        const selectedMarket = selectPreMatchCouponMarket(evalData);
         const marketOk = Boolean(selectedMarket && isPreMatchCouponMarketAllowed(selectedMarket.label));
         const oddsOk = Boolean(selectedMarket?.source);
-        const confidenceOk = Number(selectedMarket?.historicalFrequency || 0) >= 70;
-        if (historyOk) diagnostics.history30Plus++;
+        const confidenceOk = Number(selectedMarket?.marketProbability || 0) >= 55;
         if (marketOk) diagnostics.allowedMarket++;
         if (oddsOk) diagnostics.realOddsSource++;
         if (confidenceOk) diagnostics.confidence70Plus++;
 
-        if (confidenceOk && historyOk && marketOk && oddsOk) {
+        if (confidenceOk && marketOk && oddsOk) {
           candidates.push({
             fixtureId: f.id,
             iddaaCode: f.iddaaCode,
@@ -1328,10 +1314,10 @@ async function generateCouponLogic(dateStr) {
             league: f.league,
             kickoff: f.fixtureDate,
             market: selectedMarket.label,
-            historicalProbability: selectedMarket.historicalFrequency,
-            historicalFrequency: selectedMarket.historicalFrequency,
+            historicalProbability: null,
+            historicalFrequency: null,
             marketProbability: selectedMarket.marketProbability,
-            sampleSize: evalData.historyData.total,
+            sampleSize: null,
             oddsDirection: evalData.odds?.movement?.trend || "ilk ölçüm bekleniyor",
             source: selectedMarket.source
           });
@@ -1655,7 +1641,7 @@ async function runAutoScan() {
         const specialLateZeroZero = isLateZeroZeroMarketSupported(evalData, f);
         const hasMarketReferenceOdds = hasUsableGoalMarketOdds(evalData.odds?.liveOdds) || hasUsableGoalMarketOdds(evalData.odds);
         const qualifies = isActionableMarket(evalData.smartPick?.mainPick) &&
-          evalData.historyData?.total >= 30 && evalData.smartPick?.confidence >= 65 &&
+          evalData.smartPick?.confidence >= 65 &&
           evalData.liveStats?.length >= 2 && hasMarketReferenceOdds &&
           (!/^MS\s*0[.,]5\s*ÜST$/i.test(String(evalData.smartPick?.mainPick || "")) || specialLateZeroZero);
         if (qualifies) validMatches.push({ f, evalData });
@@ -1677,7 +1663,8 @@ async function runAutoScan() {
         fixtureId: f.id, iddaaCode: f.iddaaCode, home: f.home, away: f.away,
         league: f.league, minute: f.minute, currentScore: `${f.homeScore}-${f.awayScore}`,
         market: evalData.smartPick.mainPick,
-        historicalFrequency: evalData.smartPick.confidence,
+        marketProbability: evalData.smartPick.confidence,
+        historicalFrequency: null,
         historicalProbability: evalData.confidenceScore,
         oddsDirection: evalData.odds?.liveOdds?.movement?.trend || "ölçüm bekleniyor",
         source: "Otomatik canlı analiz"
@@ -1713,7 +1700,7 @@ async function runAutoScan() {
 ⏱️ Dakika: ${pick.minute}'
 🎯 Ana tercih: <b>${pick.market}</b>
 ↪️ Alternatif: ${item.evalData.smartPick.alternative || "—"}
-📚 Benzer geçmiş maç sıklığı: %${item.evalData.smartPick.confidence ?? "—"}
+📊 Piyasa ima olasılığı: %${item.evalData.smartPick.confidence ?? "—"}
 📉 Piyasa bilgisi: ${item.evalData.smartPick?.oddsBasis || getOddsBasis(item.evalData.odds, true)}
 📉 Canlı oran hareketi: ${item.evalData.odds?.liveOdds?.movement?.trend || "ölçülemedi"}`;
         const sent = await sendTelegramMessage(msg);
