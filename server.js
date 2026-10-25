@@ -252,6 +252,8 @@ function normalizeProviderMatch(match) {
     status: mapProviderStatus(match.status_code ?? match.status ?? match.fixture?.status?.short),
     home: String(homeName),
     away: String(awayName),
+    homeId: Number(match.teams?.home?.id ?? match.homeId) || null,
+    awayId: Number(match.teams?.away?.id ?? match.awayId) || null,
     homeScore: match.goals?.home ?? 0,
     awayScore: match.goals?.away ?? 0,
     htHomeScore: match.score?.halftime?.home ?? null,
@@ -634,6 +636,9 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
     mainPick,
     alternative: next ? next.label : "—",
     confidence: top && top.marketPct != null ? top.pct : null,
+    historicalPct: top && Number.isFinite(top.pct) ? top.pct : null,
+    marketImpliedPct: top && Number.isFinite(top.marketPct) ? Number(top.marketPct.toFixed(1)) : null,
+    rankScore: top && Number.isFinite(top.rankScore) ? Number(top.rankScore.toFixed(2)) : null,
     rationale,
     marketProbabilities: Object.fromEntries(markets.map(m => [m.key, Number.isFinite(h[m.key]) ? h[m.key] : null])),
     marketImpliedProbabilities: implied,
@@ -657,6 +662,8 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
     status: fRaw.fixture?.status?.short,
     minute: fRaw.fixture?.status?.elapsed,
     teams: fRaw.teams,
+    homeId: fRaw.teams?.home?.id,
+    awayId: fRaw.teams?.away?.id,
     goals: fRaw.goals,
     score: fRaw.score,
     kickoff_utc: fRaw.fixture?.date
@@ -877,7 +884,7 @@ async function registerTelegramPicks(draftId, picks, sourceLabel = "WinScope Tel
     sourceLabel,
     picks: valid.map(p => ({
       fixtureId: Number(p.fixtureId), home: p.home || "Ev sahibi", away: p.away || "Deplasman",
-      market: String(p.market), league: p.league || "", resultSent: false, won: null
+      market: String(p.market), league: p.league || "", resultSent: false, won: null, summaryReported: false
     })),
     checked: false
   };
@@ -1138,32 +1145,65 @@ async function generateCouponLogic(dateStr) {
   try {
     const payload = await cachedProviderRequest(`fixtures:${dateStr}`, `/fixtures?date=${dateStr}&timezone=Europe/Istanbul`, 5 * 60_000);
     const rawMatches = payload.response || [];
-    let fixtures = rawMatches.map(m => normalizeProviderMatch(m)).filter(m => m.status === "NS" && isStrictIddaaMatch(m));
+    const fixtures = rawMatches
+      .map(m => normalizeProviderMatch(m))
+      .filter(m => m.status === "NS" && isStrictIddaaMatch(m))
+      .sort((a, b) => String(a.fixtureDate || "").localeCompare(String(b.fixtureDate || "")));
 
-    fixtures.sort((a, b) => String(a.fixtureDate || "").localeCompare(String(b.fixtureDate || "")));
-    const picks = [];
+    const candidates = [];
+    const diagnostics = { fixtures: fixtures.length, evaluated: 0, enoughHistory: 0, realOdds: 0, allowedMarket: 0, qualified: 0 };
+
+    // Scan all available fixtures first; do not stop at the first two qualifying matches.
     for (const f of fixtures) {
       try {
         const evalData = await evaluateMatchAdvanced(f.id);
-        if (evalData.confidenceScore >= 70 && evalData.historyData.total >= 30 && isPreMatchCouponMarketAllowed(evalData.smartPick?.mainPick) &&
-            (evalData.odds?.source || evalData.smartPick?.mainPick?.startsWith("İY EV") || evalData.smartPick?.mainPick?.startsWith("İY DEP") || evalData.smartPick?.mainPick?.startsWith("EV 0.5") || evalData.smartPick?.mainPick?.startsWith("DEP 0.5"))) {
-          picks.push({
-            fixtureId: f.id,
-            iddaaCode: f.iddaaCode,
-            home: f.home,
-            away: f.away,
-            league: f.league,
-            kickoff: f.fixtureDate,
-            market: evalData.smartPick.mainPick,
-            odd: evalData.smartPick.odd,
-            historicalProbability: evalData.confidenceScore,
-            oddsDirection: evalData.odds?.movement?.trend || "ilk ölçüm bekleniyor",
-            source: "Veri Odaklı Maç Önü"
-          });
-          if (picks.length >= 2) break;
-        }
-      } catch (e) { continue; }
+        diagnostics.evaluated++;
+
+        const pick = evalData.smartPick || {};
+        const market = String(pick.mainPick || "");
+        const history = evalData.historyData || {};
+        const hasRealOdds = Boolean(evalData.odds?.source && Number.isFinite(Number(pick.marketImpliedPct)));
+        const allowedMarket = isPreMatchCouponMarketAllowed(market);
+        const enoughHistory = Number(history.total) >= 30;
+        const enoughHistoricalSupport = Number(pick.historicalPct) >= 70;
+        const enoughMarketSupport = Number(pick.marketImpliedPct) >= 45;
+        const validSample = history.source === "odds-nearest-historical-matches" ||
+          history.source === "recent-historical-fallback";
+
+        if (enoughHistory) diagnostics.enoughHistory++;
+        if (hasRealOdds) diagnostics.realOdds++;
+        if (allowedMarket) diagnostics.allowedMarket++;
+
+        if (!hasRealOdds || !allowedMarket || !enoughHistory || !enoughHistoricalSupport ||
+            !enoughMarketSupport || !validSample || !Number.isFinite(Number(pick.rankScore))) continue;
+
+        candidates.push({
+          fixtureId: f.id,
+          iddaaCode: f.iddaaCode,
+          home: f.home,
+          away: f.away,
+          league: f.league,
+          kickoff: f.fixtureDate,
+          market,
+          historicalProbability: Number(pick.historicalPct),
+          marketProbability: Number(pick.marketImpliedPct),
+          sampleSize: Number(history.total),
+          rankScore: Number(pick.rankScore),
+          oddsDirection: evalData.odds?.movement?.trend || "ilk ölçüm bekleniyor",
+          source: evalData.odds?.source || "API-Football oran kaynağı"
+        });
+      } catch (e) {
+        console.warn(`[Daily coupon evaluation] fixture=${f.id}: ${e.message}`);
+      }
     }
+
+    candidates.sort((a, b) =>
+      b.rankScore - a.rankScore ||
+      b.historicalProbability - a.historicalProbability ||
+      b.sampleSize - a.sampleSize
+    );
+    diagnostics.qualified = candidates.length;
+    const picks = candidates.slice(0, 2).map(({ rankScore, marketProbability, sampleSize, ...pick }) => pick);
 
     if (!picks.length) {
       return {
@@ -1171,7 +1211,8 @@ async function generateCouponLogic(dateStr) {
         date: dateStr,
         status: "NO_MATCHES",
         picks: [],
-        note: "Bu tarihte %75+ kritere uyan maç bulunamadı."
+        diagnostics,
+        note: "Gerçek ilgili pazar oranı, en az 30 geçmiş maç ve yeterli tarihsel/piyasa desteği birlikte doğrulanamadı. Kupon zorlanmadı."
       };
     }
 
@@ -1180,7 +1221,8 @@ async function generateCouponLogic(dateStr) {
       date: dateStr,
       status: "PENDING_APPROVAL",
       picks,
-      note: "Veri Odaklı Maç Önü Kombin"
+      diagnostics,
+      note: "WinScope doğrulanmış maç önü seçimi: tüm uygun maçlar puanlandı; en yüksek sıralı tercihler seçildi."
     };
 
     let tgMsg = `🎟️ <b>WINSCOPE GÜNÜN KUPONU</b> 🎟️
@@ -1191,8 +1233,7 @@ async function generateCouponLogic(dateStr) {
       tgMsg += `🏆 <b>${p.league}</b>
 ⚽ ${p.home} vs ${p.away}
 🔑 İddaa Kod: ${p.iddaaCode}
-🎯 Tercih: <b>${p.market}</b> (Benzer maç geçmişi: %${p.historicalProbability})
-📉 Oran yönü: ${p.oddsDirection || "ölçüm bekleniyor"}
+🎯 Tercih: <b>${p.market}</b>
 -------------------
 `;
     });
@@ -1201,6 +1242,7 @@ async function generateCouponLogic(dateStr) {
 
     return coupon;
   } catch (error) {
+    console.error("[Daily coupon error]", error.message);
     return {
       draftId: `iddaa-error-${Date.now()}`,
       date: dateStr,
@@ -1368,6 +1410,8 @@ app.get("/api/live", async (_req, res) => {
 const AUTO_SCAN_INTERVAL_MS = 5 * 60 * 1000;
 const notifiedLiveFixtures = new Set();
 const activeSentCoupons = new Map();
+const BATCH_SUMMARY_INTERVAL_MS = 12 * 60 * 60 * 1000;
+let lastBatchSummaryAt = Date.now();
 
 setInterval(async () => {
   try {
@@ -1376,68 +1420,71 @@ setInterval(async () => {
     const rawMatches = payload.response || [];
     await restoreTrackedPicks();
     
-    // 1. SONUÇ TAKİBİ: fixture ID ile doğrudan sorgula; biten maç canlı listesinden çıkmış olsa da bulunur.
+    // 1. SONUÇ TAKİBİ: sonuçları sessizce kaydet; maç başına Telegram mesajı gönderme.
     for (const [draftId, couponInfo] of activeSentCoupons.entries()) {
-      let allFinished = true;
       for (const pick of couponInfo.picks) {
         if (pick.resultSent) continue;
         try {
           const result = await fetchFixtureResult(pick.fixtureId);
-          if (!result || result.status !== "FT") {
-            allFinished = false;
-            continue;
-          }
+          if (!result || result.status !== "FT") continue;
           const rawScore = result.raw?.score || {};
           const rawGoals = result.raw?.goals || {};
-          if (rawGoals.home == null || rawGoals.away == null) {
-            allFinished = false;
-            continue;
-          }
+          if (rawGoals.home == null || rawGoals.away == null) continue;
           const ht = rawScore.halftime || {};
           const won = gradePick(pick.market, rawGoals.home, rawGoals.away, ht.home, ht.away);
+          // Maç tamamlandı ve değerlendirildi; sadece true/false sonuçlar özete girer.
           pick.won = won == null ? null : won;
-          let sent = false;
-          if (won == null) {
-            sent = await sendTelegramMessage(`📊 <b>WINSCOPE MAÇ SONUCU</b>
-🏆 ${pick.league || couponInfo.sourceLabel || "Maç analizi"}
-⚽ ${pick.home} ${result.homeScore}-${result.awayScore} ${pick.away}
-🎯 Tercih: ${pick.market}
-⚠️ Sonuç otomatik değerlendirilemedi; manuel kontrol gerekli.`);
-          } else {
-            sent = await sendTelegramMessage(`${won ? "✅ <b>TERCİH KAZANDI</b>" : "❌ <b>TERCİH KAYBETTİ</b>"}
-🏆 ${pick.league || couponInfo.sourceLabel || "Maç analizi"}
-⚽ ${pick.home} ${result.homeScore}-${result.awayScore} ${pick.away}
-🎯 Tercih: ${pick.market}
-📌 Sonuç: ${won ? "KAZANDI" : "KAYBETTİ"}`);
-          }
-          if (sent) {
-            pick.resultSent = true;
-            await persistTrackedPick(draftId, couponInfo);
-          } else {
-            allFinished = false;
-          }
+          pick.resultSent = true;
+          pick.summaryReported = false;
+          pick.finalScore = `${result.homeScore}-${result.awayScore}`;
+          await persistTrackedPick(draftId, couponInfo);
         } catch (e) {
-          allFinished = false;
           console.warn(`[Result tracker] ${pick.fixtureId}: ${e.message}`);
         }
       }
-      if (couponInfo.picks.every(p => p.resultSent)) {
-        const won = couponInfo.picks.filter(p => {
-          // The result marker is set only after a result was sent; result state is attached below where available.
-          return p.won === true;
-        }).length;
-        const lost = couponInfo.picks.filter(p => p.won === false).length;
-        const unresolved = couponInfo.picks.filter(p => p.won == null).length;
-        const summarySent = await sendTelegramMessage(`📋 <b>WINSCOPE KUPON ÖZETİ</b>
-📦 ${couponInfo.sourceLabel || "Telegram kuponu"}
-✅ Kazanan: ${won}
-❌ Kaybeden: ${lost}
-⚠️ Otomatik değerlendirilemeyen: ${unresolved}
-📊 Takip edilen seçim: ${couponInfo.picks.length}`);
-        if (summarySent) {
-          activeSentCoupons.delete(draftId);
-          await deleteTrackedPick(draftId);
+    }
+
+    // 2. Her 12 saatte bir, birikmiş ve daha önce özetlenmemiş sonuçları tek mesajda gönder.
+    const now = Date.now();
+    if (now - lastBatchSummaryAt >= BATCH_SUMMARY_INTERVAL_MS) {
+      const pendingResults = [];
+      for (const [draftId, couponInfo] of activeSentCoupons.entries()) {
+        for (const pick of couponInfo.picks) {
+          if (pick.resultSent && pick.summaryReported !== true && typeof pick.won === "boolean") {
+            pendingResults.push({ draftId, couponInfo, pick });
+          }
         }
+      }
+
+      if (pendingResults.length) {
+        const wonCount = pendingResults.filter(x => x.pick.won === true).length;
+        const lostCount = pendingResults.filter(x => x.pick.won === false).length;
+        const total = wonCount + lostCount;
+        const pct = total ? Math.round(wonCount / total * 100) : 0;
+        const summarySent = await sendTelegramMessage(`📊 <b>WINSCOPE TOPLU KUPON ÖZETİ</b>
+🕒 Dönem: Son 12 saat
+🎯 Sonuçlanan tercih: <b>${total}</b>
+✅ Kazandı: <b>${wonCount}</b>
+❌ Kaybetti: <b>${lostCount}</b>
+📈 Başarı oranı: <b>%${pct}</b>`);
+
+        if (summarySent) {
+          for (const item of pendingResults) {
+            item.pick.summaryReported = true;
+            await persistTrackedPick(item.draftId, item.couponInfo);
+          }
+        }
+      }
+      // Zaman penceresini ilerlet; boş pencerelerde de aynı aralık korunur.
+      lastBatchSummaryAt = now;
+    }
+
+    // Tamamlanan ve özete aktarılmış takip kayıtlarını temizle.
+    for (const [draftId, couponInfo] of activeSentCoupons.entries()) {
+      if (couponInfo.picks.length && couponInfo.picks.every(p =>
+        p.resultSent && (p.summaryReported === true || typeof p.won !== "boolean"))) {
+        activeSentCoupons.delete(draftId);
+        await deleteTrackedPick(draftId);
       }
     }
 
@@ -1500,7 +1547,7 @@ setInterval(async () => {
         autoMsg += `🏆 <b>${item.f.league}</b>
 ⚽ ${item.f.home} vs ${item.f.away}
 ⏱️ Dk: ${item.f.minute}' | Skor: ${item.f.homeScore}-${item.f.awayScore}
-🎯 Tercih: <b>${item.evalData.mainPickDisplay}</b> (Benzer maç geçmişi: %${item.evalData.confidenceScore})
+🎯 Tercih: <b>${item.evalData.mainPickDisplay}</b>
 -------------------
 `;
       }
