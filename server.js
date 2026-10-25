@@ -1419,43 +1419,44 @@ setInterval(async () => {
 
     validMatches.sort((a, b) => b.evalData.confidenceScore - a.evalData.confidenceScore);
 
-    if (validMatches.length >= 2) {
-      const selectedPicks = validMatches.slice(0, 2);
-      const draftId = `auto-alarm-coupon-${Date.now()}`;
-      
-      let autoMsg = `🎯 <b>WINSCOPE CANLI FIRSAT KOMBİNİ</b> 🎯
-🕒 Saat: ${new Date().toLocaleTimeString('tr-TR')}
+    // 2. TEKLİ CANLI ALARMLAR: Tek bir uygun maç bile varsa Telegram'a gönder.
+    // Önceki sürüm validMatches.length >= 2 şartı nedeniyle tek adayda hiç bildirim üretmiyordu.
+    for (const item of validMatches) {
+      const { f, evalData } = item;
+      if (notifiedLiveFixtures.has(f.id)) continue;
 
-`;
-      const couponPicksArray = [];
-      
-      for (const item of selectedPicks) {
-        notifiedLiveFixtures.add(item.f.id);
-        
-        couponPicksArray.push({
-          fixtureId: item.f.id,
-          home: item.f.home,
-          away: item.f.away,
-          market: item.evalData.smartPick.mainPick
-        });
+      const market = String(evalData.smartPick?.mainPick || evalData.mainPickDisplay || "").trim();
+      if (!isActionableMarket(market)) continue;
 
-        autoMsg += `🏆 <b>${item.f.league}</b>
-⚽ ${item.f.home} vs ${item.f.away}
-⏱️ Dk: ${item.f.minute}' | Skor: ${item.f.homeScore}-${item.f.awayScore}
-🎯 Tercih: <b>${item.evalData.mainPickDisplay}</b> (Benzer maç geçmişi: %${item.evalData.confidenceScore})
--------------------
-`;
-      }
+      const draftId = `auto-single-alarm-${f.id}-${Date.now()}`;
+      const confidence = Number(evalData.confidenceScore ?? evalData.smartPick?.confidence ?? 0);
+      const msg = `🎯 <b>WINSCOPE TEKLİ CANLI ALARM</b>
 
-      const autoTelegramSent = await sendTelegramMessage(autoMsg);
-      if (autoTelegramSent) {
-        await registerTelegramPicks(draftId, couponPicksArray, "Otomatik canlı fırsat kombini");
-        console.log("[Auto-Scan OK] Telegram'a yeni 2'li kombin alarmı başarıyla gönderildi.");
+🏆 <b>${f.league}</b>
+⚽ ${f.home} vs ${f.away}
+⏱️ Dakika: ${f.minute}' | Skor: ${f.homeScore}-${f.awayScore}
+🎯 Ana tercih: <b>${market}</b>
+📊 Benzer geçmiş maç sıklığı: %${Number.isFinite(confidence) ? confidence : 0}
+📉 Piyasa yönü: ${evalData.odds?.liveOdds?.movement?.trend || evalData.odds?.movement?.trend || "ölçüm bekleniyor"}
+
+<i>Gerçek canlı veri ve mevcut geçmiş örneklem üzerinden oluşturuldu; garanti değildir.</i>`;
+
+      const sent = await sendTelegramMessage(msg);
+      if (sent) {
+        notifiedLiveFixtures.add(f.id);
+        await registerTelegramPicks(draftId, [{
+          fixtureId: f.id,
+          home: f.home,
+          away: f.away,
+          league: f.league,
+          market
+        }], "Otomatik tekli canlı alarm");
+        console.log(`[Auto-Scan OK] Tekli canlı alarm gönderildi: fixture=${f.id}, market=${market}`);
       } else {
-        for (const item of selectedPicks) notifiedLiveFixtures.delete(item.f.id);
-        console.warn("[Auto-Scan] Telegram gönderimi başarısız; seçimler sonraki taramada yeniden denenebilir.");
+        console.warn(`[Auto-Scan] Tekli Telegram alarmı gönderilemedi: fixture=${f.id}`);
       }
     }
+
   } catch (err) {
     console.error("[Auto-Scan Error]", err.message);
   }
