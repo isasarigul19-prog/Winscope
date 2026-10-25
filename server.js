@@ -437,7 +437,7 @@ async function fetchRealOdds(fixtureId, liveMatch = false) {
       if (liveOdds) liveOdds.movement = await recordLiveOddsSnapshot(fixtureId, liveOdds);
       if (!liveOdds) {
         const first = Array.isArray(livePayload) ? livePayload[0] : null;
-        console.warn(`[Live odds parse empty] fixture=${fixtureId}; rows=${Array.isArray(livePayload) ? livePayload.length : 0}; rowKeys=${first && typeof first === "object" ? Object.keys(first).join(",") : "none"}; oddsRows=${Array.isArray(first?.odds) ? first.odds.length : 0}; bookmakerRows=${Array.isArray(first?.bookmakers) ? first.bookmakers.length : 0}`);
+        console.warn(`[Live odds unavailable/empty response] fixture=${fixtureId}; rows=${Array.isArray(livePayload) ? livePayload.length : 0}; rowKeys=${first && typeof first === "object" ? Object.keys(first).join(",") : "none"}; oddsRows=${Array.isArray(first?.odds) ? first.odds.length : 0}; bookmakerRows=${Array.isArray(first?.bookmakers) ? first.bookmakers.length : 0}; preMatchFallback=${Boolean(preMatchOdds && hasUsableGoalMarketOdds(preMatchOdds))}`);
       }
     } catch (error) {
       console.warn(`[Live odds unavailable] fixture=${fixtureId}: ${error.message}`);
@@ -456,6 +456,22 @@ function isActionableMarket(marketText) {
   if (!market || market === "—") return false;
   if (/GERÇEKLEŞTİ|ÇİZGİ GERÇEKLEŞTİ|TAKİP:|ANALİZ:|VERİ YETERSİZ|TERCİH YOK|MAÇ TAMAMLANDI/.test(market)) return false;
   return /(?:MS\s*)?\d+(?:[.,]\d+)?\s*(?:ÜST|ALT)|KG\s*(?:VAR|YOK)|(?:EV|EV SAHİBİ|DEP|DEPLASMAN)\s*\d+(?:[.,]\d+)?\s*ÜST|MS\s*[1X2]\b|BERABERLİK/.test(market);
+}
+
+function hasUsableGoalMarketOdds(odds = {}) {
+  const fields = [
+    "over05", "over15", "over25", "over35",
+    "homeOver05", "awayOver05", "homeOver15", "awayOver15",
+    "bttsYes"
+  ];
+  return fields.some(key => toNumber(odds?.[key]) != null && Number(odds[key]) > 1);
+}
+
+function getOddsBasis(odds, isLive) {
+  if (!isLive) return odds?.source && hasUsableGoalMarketOdds(odds) ? "maç önü oranı" : "oran yok";
+  if (odds?.liveOdds?.isLive && hasUsableGoalMarketOdds(odds.liveOdds)) return "canlı oran";
+  if (hasUsableGoalMarketOdds(odds)) return "maç önü referans oranı (canlı gol pazarı yok)";
+  return "oran yok";
 }
 
 function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matchInfo) {
@@ -507,8 +523,12 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
     { key: "ms2Pct", label: "MS 2", oneXtwo: "awayWin" }
   ];
   const liveOdds = o.liveOdds?.isLive ? o.liveOdds : null;
-  // A live recommendation must never borrow pre-match odds as if they were live prices.
-  const priceSource = isLive ? (liveOdds || {}) : o;
+  // If the provider has no live market for this fixture, real pre-match odds may
+  // be used as a clearly labelled reference only. They are never presented as live prices.
+  const priceSource = isLive
+    ? (liveOdds && hasUsableGoalMarketOdds(liveOdds) ? liveOdds : o)
+    : o;
+  const oddsBasis = getOddsBasis(o, isLive);
   const implied = {};
   const paired = (over, under) => {
     const a = toNumber(priceSource[over]), b = toNumber(priceSource[under]);
@@ -578,7 +598,8 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
   for (const c of candidates) {
     // Exact market odds are mandatory: no pick is manufactured from historical frequency alone.
     c.rankScore = c.marketPct * 0.58 + Number(c.pct) * 0.42 + scoreLive(c);
-    const movement = liveOdds?.movement || o.movement;
+    // Never let pre-match movement masquerade as live movement.
+    const movement = isLive ? liveOdds?.movement : o.movement;
     if (movement?.changed && movement?.trend === "oran düşüyor") c.rankScore += 1.5;
     if (movement?.changed && movement?.trend === "oran yükseliyor") c.rankScore -= 1.5;
   }
@@ -588,7 +609,7 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
   const scoreSurprise = (h.ftScores || []).find(([score, pct]) => Number(pct) >= 5 && ![top?.label, next?.label].includes(score));
   const mainPick = top ? top.label : "TERCİH YOK";
   const rationale = top
-    ? `${h.total} geçmiş maç · tarihsel sıklık %${Number(top.pct).toFixed(1)} · oranlardan arındırılmış piyasa göstergesi %${top.marketPct.toFixed(1)} · ${isLive ? `canlı istatistik: ${shotsOnTarget} isabetli şut, ${totalShots} toplam şut, ${corners} korner${totalXg ? `, xG ${totalXg.toFixed(2)}` : ""} · ` : ""}oran kaynağı ${liveOdds?.source || o.source || "API oranı"}${(liveOdds?.movement || o.movement)?.trend ? ` · ${(liveOdds?.movement || o.movement).trend}` : ""}.`
+    ? `${h.total} geçmiş maç · tarihsel sıklık %${Number(top.pct).toFixed(1)} · piyasa göstergesi %${top.marketPct.toFixed(1)} · ${isLive ? `canlı istatistik: ${shotsOnTarget} isabetli şut, ${totalShots} toplam şut, ${corners} korner${totalXg ? `, xG ${totalXg.toFixed(2)}` : ""} · ` : ""}${oddsBasis}: ${(isLive && liveOdds && hasUsableGoalMarketOdds(liveOdds) ? liveOdds.source : o.source) || "kaynak belirtilmedi"}${(isLive ? (liveOdds && hasUsableGoalMarketOdds(liveOdds) ? liveOdds.movement : null) : o.movement)?.trend ? ` · ${(isLive ? (liveOdds && hasUsableGoalMarketOdds(liveOdds) ? liveOdds.movement : null) : o.movement).trend}` : isLive && !(liveOdds && hasUsableGoalMarketOdds(liveOdds)) ? " · canlı oran hareketi ölçülemedi" : ""}.`
     : `Gerçek oranı ve geçmiş örneklemi eşleşen, canlıysa maç istatistikleriyle desteklenen bir pazar bulunmadı.`;
   return {
     mainPick,
@@ -598,8 +619,9 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
     marketProbabilities: Object.fromEntries(markets.map(m => [m.key, Number.isFinite(Number(h[m.key])) ? Number(h[m.key]) : null])),
     marketImpliedProbabilities: implied,
     surprise: scoreSurprise ? `${scoreSurprise[0]} (%${scoreSurprise[1]} tarihsel)` : ((h.ftScores || [])[1] ? `${h.ftScores[1][0]} (%${h.ftScores[1][1]} tarihsel)` : "—"),
-    oddsSource: liveOdds?.source || o.source || null,
-    oddsDirection: (liveOdds?.movement || o.movement)?.trend || "İlk ölçüm bekleniyor"
+    oddsSource: (isLive && liveOdds && hasUsableGoalMarketOdds(liveOdds) ? liveOdds.source : o.source) || null,
+    oddsBasis,
+    oddsDirection: (isLive ? (liveOdds && hasUsableGoalMarketOdds(liveOdds) ? liveOdds.movement : null) : o.movement)?.trend || (isLive && !(liveOdds && hasUsableGoalMarketOdds(liveOdds)) ? "Canlı oran hareketi ölçülemedi" : "İlk ölçüm bekleniyor")
   };
 }
 
@@ -802,9 +824,9 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       alternativeFullTimeScore: isFinished ? `${matchInfo.homeScore}-${matchInfo.awayScore}` : "—",
       surprise: isFinished ? surpriseDisplay : (smartPick.surprise || surpriseDisplay),
       marketDirection: isLive
-        ? (odds.liveOdds?.source
+        ? (odds.liveOdds?.source && hasUsableGoalMarketOdds(odds.liveOdds)
             ? `Canlı oran kaynağı: ${odds.liveOdds.source} · ${odds.liveOdds.movement?.trend || "hareket ölçülmedi"} · ${odds.liveOdds.movement?.state || "ilk ölçüm bekleniyor"}`
-            : (odds.source ? `Maç önü oran kaynağı: ${odds.source}; canlı oran bulunamadı` : "Canlı ve maç önü oranı bulunamadı"))
+            : (odds.source && hasUsableGoalMarketOdds(odds) ? `Maç önü referans oranı: ${odds.source}; canlı gol oranı/hareketi bulunamadı` : "Canlı ve maç önü gol oranı bulunamadı"))
         : (odds.source ? `Oran kaynağı: ${odds.source} · ${odds.movement?.trend || "hareket ölçülmedi"} · ${odds.movement?.state || "ilk ölçüm bekleniyor"}` : "Piyasa oranı bulunamadı"),
       confidence: confidenceScore > 0 ? `Tarihsel eşleşme göstergesi · %${confidenceScore}` : "Güven puanı hesaplanamadı",
       statsAvailable: liveStats.length > 0,
@@ -1012,20 +1034,21 @@ async function generateLiveCouponLogic() {
           historicalFrequency: evalData.smartPick?.confidence ?? null,
           sampleSize: evalData.historyData?.total || 0,
           rationale: evalData.smartPick?.rationale || "Analiz gerekçesi oluşturulamadı.",
-          marketDirection: evalData.odds?.liveOdds?.movement?.trend || "Hareket ölçümü bekleniyor",
+          marketDirection: evalData.odds?.liveOdds?.movement?.trend || (hasUsableGoalMarketOdds(evalData.odds) ? "Canlı hareket yok; maç önü referans oranı" : "Hareket ölçümü bekleniyor"),
+          oddsBasis: evalData.smartPick?.oddsBasis || getOddsBasis(evalData.odds, true),
           hasLiveStats: (evalData.liveStats?.length || 0) >= 2,
-          hasLiveOdds: Boolean(evalData.odds?.liveOdds?.isLive && [evalData.odds.liveOdds.over05, evalData.odds.liveOdds.over15, evalData.odds.liveOdds.over25, evalData.odds.liveOdds.over35, evalData.odds.liveOdds.homeOver05, evalData.odds.liveOdds.awayOver05, evalData.odds.liveOdds.homeOver15, evalData.odds.liveOdds.awayOver15, evalData.odds.liveOdds.bttsYes].some(v => v != null)),
+          hasLiveOdds: Boolean(evalData.odds?.liveOdds?.isLive && hasUsableGoalMarketOdds(evalData.odds.liveOdds)),
+          hasReferenceOdds: hasUsableGoalMarketOdds(evalData.odds),
           markets: { ht00: evalData.historyData?.ht00Pct, ht05: evalData.historyData?.ht05Pct, ht15: evalData.historyData?.ht15Pct, ht25: evalData.historyData?.ht25Pct, htHome05: evalData.historyData?.htHome05Pct, htAway05: evalData.historyData?.htAway05Pct, ft05: evalData.historyData?.ft05Pct, ft15: evalData.historyData?.over15Pct, ft25: evalData.historyData?.over25Pct, ft35: evalData.historyData?.over35Pct, home05: evalData.historyData?.home05Pct, away05: evalData.historyData?.away05Pct, btts: evalData.historyData?.bttsPct, ms1: evalData.historyData?.ms1Pct, msx: evalData.historyData?.msXPct, ms2: evalData.historyData?.ms2Pct },
           topHalfTimeScores: evalData.historyData?.htScores || [],
           topFullTimeScores: evalData.historyData?.ftScores || []
         });
 
         const specialLateZeroZero = isLateZeroZeroMarketSupported(evalData, f);
-        const hasLiveMarketOdds = Boolean(evalData.odds?.liveOdds?.isLive &&
-          [evalData.odds.liveOdds.over05, evalData.odds.liveOdds.over15, evalData.odds.liveOdds.over25, evalData.odds.liveOdds.over35, evalData.odds.liveOdds.homeOver05, evalData.odds.liveOdds.awayOver05, evalData.odds.liveOdds.homeOver15, evalData.odds.liveOdds.awayOver15, evalData.odds.liveOdds.bttsYes].some(v => v != null));
+        const hasMarketReferenceOdds = hasUsableGoalMarketOdds(evalData.odds?.liveOdds) || hasUsableGoalMarketOdds(evalData.odds);
         const qualifies = isActionableMarket(evalData.smartPick?.mainPick) &&
           evalData.historyData?.total >= 30 && evalData.smartPick?.confidence >= 65 &&
-          evalData.liveStats?.length >= 2 && hasLiveMarketOdds &&
+          evalData.liveStats?.length >= 2 && hasMarketReferenceOdds &&
           (!/^MS\s*0[.,]5\s*ÜST$/i.test(String(evalData.smartPick?.mainPick || "")) || specialLateZeroZero);
 
         if (qualifies) {
@@ -1487,11 +1510,10 @@ async function runAutoScan() {
       try {
         const evalData = await evaluateMatchAdvanced(f.id, mRaw);
         const specialLateZeroZero = isLateZeroZeroMarketSupported(evalData, f);
-        const hasLiveMarketOdds = Boolean(evalData.odds?.liveOdds?.isLive &&
-          [evalData.odds.liveOdds.over05, evalData.odds.liveOdds.over15, evalData.odds.liveOdds.over25, evalData.odds.liveOdds.over35, evalData.odds.liveOdds.homeOver05, evalData.odds.liveOdds.awayOver05, evalData.odds.liveOdds.homeOver15, evalData.odds.liveOdds.awayOver15, evalData.odds.liveOdds.bttsYes].some(v => v != null));
+        const hasMarketReferenceOdds = hasUsableGoalMarketOdds(evalData.odds?.liveOdds) || hasUsableGoalMarketOdds(evalData.odds);
         const qualifies = isActionableMarket(evalData.smartPick?.mainPick) &&
           evalData.historyData?.total >= 30 && evalData.smartPick?.confidence >= 65 &&
-          evalData.liveStats?.length >= 2 && hasLiveMarketOdds &&
+          evalData.liveStats?.length >= 2 && hasMarketReferenceOdds &&
           (!/^MS\s*0[.,]5\s*ÜST$/i.test(String(evalData.smartPick?.mainPick || "")) || specialLateZeroZero);
         if (qualifies) validMatches.push({ f, evalData });
       } catch (e) {
@@ -1519,7 +1541,7 @@ async function runAutoScan() {
       })),
       analysisRows: [],
       note: validMatches.length
-        ? "Otomatik canlı tarama · canlı istatistik, canlı piyasa oranı ve geçmiş örneklem eşiğini geçen adaylar."
+        ? "Otomatik canlı tarama · canlı istatistik, gerçek canlı oran veya açıkça etiketlenmiş maç önü referans oranı ve geçmiş örneklem eşiğini geçen adaylar."
         : "Otomatik tarama tamamlandı; bu turda tüm veri eşiklerini geçen canlı tercih bulunmadı."
     };
 
@@ -1549,7 +1571,8 @@ async function runAutoScan() {
 🎯 Ana tercih: <b>${pick.market}</b>
 ↪️ Alternatif: ${item.evalData.smartPick.alternative || "—"}
 📚 Benzer geçmiş maç sıklığı: %${item.evalData.smartPick.confidence ?? "—"}
-📉 Oran hareketi: ${item.evalData.odds?.liveOdds?.movement?.trend || "ilk ölçüm bekleniyor"}`;
+📉 Piyasa bilgisi: ${item.evalData.smartPick?.oddsBasis || getOddsBasis(item.evalData.odds, true)}
+📉 Canlı oran hareketi: ${item.evalData.odds?.liveOdds?.movement?.trend || "ölçülemedi"}`;
         const sent = await sendTelegramMessage(msg);
         if (sent) {
           notifiedLiveFixtures.add(item.f.id); // informational only; no longer blocks later re-analysis
