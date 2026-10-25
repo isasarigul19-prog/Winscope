@@ -927,9 +927,10 @@ async function fetchFixtureResult(fixtureId) {
 
 function isPreMatchCouponMarketAllowed(marketText) {
   const market = String(marketText || "").toLocaleUpperCase("tr-TR").replace(/\s+/g, " ").trim();
-  // Maç önü kuponunda düşük 0.5 çizgileri kullanılmaz. Bunlar canlı analizde,
-  // maç dakikası/skoru, canlı istatistik ve canlı oran birlikte uygunsa değerlendirilebilir.
-  return /^(EV\s*1[.,]5\s*ÜST|DEP\s*1[.,]5\s*ÜST|MS\s*2[.,]5\s*ÜST|MS\s*3[.,]5\s*ÜST|KG\s*VAR|İY\s*(?:1[.,]5|2[.,]5)\s*ÜST|İY\s*(?:EV|DEP)\s*0[.,]5\s*ÜST)$/.test(market);
+  // Günün maç önü kuponunda İY/MS 0.5 ve 1.5 toplam gol çizgileri YASAK.
+  // Yalnızca daha anlamlı veri desteği varsa takım golü 1.5+, MS 2.5/3.5 ÜST
+  // veya KG VAR kullanılabilir. İY pazarları günlük kupona alınmaz; canlıda ayrı değerlendirilir.
+  return /^(EV\s*1[.,]5\s*ÜST|DEP\s*1[.,]5\s*ÜST|MS\s*2[.,]5\s*ÜST|MS\s*3[.,]5\s*ÜST|KG\s*VAR)$/.test(market);
 }
 
 function isLateZeroZeroMarketSupported(evalData, fixture) {
@@ -1416,11 +1417,14 @@ setInterval(async () => {
       }
     }
 
-    // 2. YENİ 2 MAÇLIK OTOMATİK KOMBİN VE TELEGRAM ALARMI (10 - 80 DAKİKA ARASI)
+    // 2. TEK MAÇLIK DİNAMİK CANLI ANALİZ VE TELEGRAM ALARMI (10 - 80 DAKİKA ARASI)
     const validMatches = [];
+    // Re-evaluate live fixtures every scan, even if an earlier alert was sent.
+    // We suppress duplicate unresolved markets per fixture, not the entire fixture,
+    // so a genuinely different live recommendation can be sent later in the match.
     const scanCandidates = rawMatches.map(raw => ({ raw, f: normalizeProviderMatch(raw) }))
       .filter(({ f }) => ["LIVE", "HT"].includes(f.status) && f.minute != null &&
-        f.minute >= 10 && f.minute <= 80 && isStrictIddaaMatch(f) && !notifiedLiveFixtures.has(f.id))
+        f.minute >= 10 && f.minute <= 80 && isStrictIddaaMatch(f))
       .sort((a, b) => {
         const aScore = (a.f.minute >= 20 && a.f.minute <= 75 ? 2 : 0) + (a.f.homeScore + a.f.awayScore <= 2 ? 1 : 0);
         const bScore = (b.f.minute >= 20 && b.f.minute <= 75 ? 2 : 0) + (b.f.homeScore + b.f.awayScore <= 2 ? 1 : 0);
@@ -1454,7 +1458,16 @@ setInterval(async () => {
 
     if (validMatches.length >= 1) {
       for (const item of validMatches) {
-        if (notifiedLiveFixtures.has(item.f.id)) continue;
+        const proposedMarket = String(item.evalData.smartPick?.mainPick || "").toLocaleUpperCase("tr-TR").replace(/\s+/g, " ").trim();
+        const sameUnresolvedMarketAlreadySent = [...activeSentCoupons.values()].some(coupon =>
+          (coupon.picks || []).some(existing => Number(existing.fixtureId) === Number(item.f.id) &&
+            existing.resultSent !== true &&
+            String(existing.market || "").toLocaleUpperCase("tr-TR").replace(/\s+/g, " ").trim() === proposedMarket)
+        );
+        // Do not repeat the same still-pending pick every five minutes. But allow
+        // a new market for this fixture if the live score, time, stats and odds
+        // make a different selection the strongest supported candidate.
+        if (sameUnresolvedMarketAlreadySent) continue;
         const draftId = `auto-live-pick-${item.f.id}-${Date.now()}`;
         const pick = {
           fixtureId: item.f.id, iddaaCode: item.f.iddaaCode,
@@ -1472,7 +1485,7 @@ setInterval(async () => {
 📉 Oran hareketi: ${item.evalData.odds?.liveOdds?.movement?.trend || "ilk ölçüm bekleniyor"}`;
         const sent = await sendTelegramMessage(msg);
         if (sent) {
-          notifiedLiveFixtures.add(item.f.id);
+          notifiedLiveFixtures.add(item.f.id); // informational only; no longer blocks later re-analysis
           await registerTelegramPicks(draftId, [pick], "Tekli otomatik canlı analiz");
           console.log(`[Auto-Scan OK] Tekli canlı bildirimi gönderildi: ${item.f.id}`);
         } else {
