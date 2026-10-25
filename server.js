@@ -727,11 +727,14 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
       ms1Pct: null, ms2Pct: null, msXPct: null, ftScores: [], htScores: [], source: "unavailable" };
   }
 
+  // Pre-match fixtures have no live statistics. Do not spend API quota requesting them.
   let liveStats = [];
-  try {
-    const statsRes = await apiGet(`/fixtures/statistics?fixture=${fixtureId}`);
-    if (Array.isArray(statsRes) && statsRes.length > 0) liveStats = statsRes;
-  } catch (e) {}
+  if (isLive) {
+    try {
+      const statsRes = await apiGet(`/fixtures/statistics?fixture=${fixtureId}`);
+      if (Array.isArray(statsRes) && statsRes.length > 0) liveStats = statsRes;
+    } catch (e) {}
+  }
 
   if (liveStats && liveStats.length >= 2) {
     const getShotVal = (teamObj) => {
@@ -1118,19 +1121,40 @@ app.post("/api/coupon/live", async (_req, res) => {
 });
 
 async function generateCouponLogic(dateStr) {
+  const diagnostics = {
+    apiFixtures: 0, prematchFixtures: 0, analyzed: 0, evaluationErrors: 0,
+    history30Plus: 0, allowedMarket: 0, realOddsSource: 0, confidence70Plus: 0, qualified: 0
+  };
   try {
     const payload = await cachedProviderRequest(`fixtures:${dateStr}`, `/fixtures?date=${dateStr}&timezone=Europe/Istanbul`, 5 * 60_000);
     const rawMatches = payload.response || [];
-    let fixtures = rawMatches.map(m => normalizeProviderMatch(m)).filter(m => m.status === "NS" && isStrictIddaaMatch(m));
+    diagnostics.apiFixtures = rawMatches.length;
 
-    fixtures.sort((a, b) => String(a.fixtureDate || "").localeCompare(String(b.fixtureDate || "")));
-    const picks = [];
-    for (const f of fixtures) {
+    // Keep each provider fixture beside its normalized form. This avoids an extra API
+    // request per match when evaluating the full bulletin.
+    const fixtures = rawMatches
+      .map(raw => ({ raw, match: normalizeProviderMatch(raw) }))
+      .filter(({ match }) => match.status === "NS")
+      .filter(({ match }) => isStrictIddaaMatch(match));
+    diagnostics.prematchFixtures = fixtures.length;
+    fixtures.sort((a, b) => String(a.match.fixtureDate || "").localeCompare(String(b.match.fixtureDate || "")));
+
+    const candidates = [];
+    for (const { raw, match: f } of fixtures) {
       try {
-        const evalData = await evaluateMatchAdvanced(f.id);
-        if (evalData.confidenceScore >= 70 && evalData.historyData.total >= 30 && isPreMatchCouponMarketAllowed(evalData.smartPick?.mainPick) &&
-            (evalData.odds?.source || evalData.smartPick?.mainPick?.startsWith("İY EV") || evalData.smartPick?.mainPick?.startsWith("İY DEP") || evalData.smartPick?.mainPick?.startsWith("EV 0.5") || evalData.smartPick?.mainPick?.startsWith("DEP 0.5"))) {
-          picks.push({
+        const evalData = await evaluateMatchAdvanced(f.id, raw);
+        diagnostics.analyzed++;
+        const historyOk = Number(evalData.historyData?.total || 0) >= 30;
+        const marketOk = isPreMatchCouponMarketAllowed(evalData.smartPick?.mainPick);
+        const oddsOk = Boolean(evalData.odds?.source || evalData.smartPick?.mainPick?.startsWith("İY EV") || evalData.smartPick?.mainPick?.startsWith("İY DEP") || evalData.smartPick?.mainPick?.startsWith("EV 0.5") || evalData.smartPick?.mainPick?.startsWith("DEP 0.5"));
+        const confidenceOk = Number(evalData.confidenceScore || 0) >= 70;
+        if (historyOk) diagnostics.history30Plus++;
+        if (marketOk) diagnostics.allowedMarket++;
+        if (oddsOk) diagnostics.realOddsSource++;
+        if (confidenceOk) diagnostics.confidence70Plus++;
+
+        if (confidenceOk && historyOk && marketOk && oddsOk) {
+          candidates.push({
             fixtureId: f.id,
             iddaaCode: f.iddaaCode,
             home: f.home,
@@ -1140,13 +1164,24 @@ async function generateCouponLogic(dateStr) {
             market: evalData.smartPick.mainPick,
             odd: evalData.smartPick.odd,
             historicalProbability: evalData.confidenceScore,
+            historicalFrequency: evalData.smartPick.confidence,
+            sampleSize: evalData.historyData.total,
             oddsDirection: evalData.odds?.movement?.trend || "ilk ölçüm bekleniyor",
             source: "Veri Odaklı Maç Önü"
           });
-          if (picks.length >= 2) break;
         }
-      } catch (e) { continue; }
+      } catch (e) {
+        diagnostics.evaluationErrors++;
+        console.warn(`[Daily coupon evaluation] fixture=${f.id}: ${e.message}`);
+      }
     }
+
+    // Scan the complete eligible bulletin before ranking; do not stop at the first two
+    // matches that happen to pass. Select the strongest two by score, then sample size.
+    candidates.sort((a, b) => Number(b.historicalProbability || 0) - Number(a.historicalProbability || 0) || Number(b.sampleSize || 0) - Number(a.sampleSize || 0));
+    diagnostics.qualified = candidates.length;
+    const picks = candidates.slice(0, 2);
+    const scanNote = `Bülten: ${diagnostics.apiFixtures} maç · maç önü uygun lig: ${diagnostics.prematchFixtures} · analiz edilen: ${diagnostics.analyzed} · 30+ geçmiş örneklem: ${diagnostics.history30Plus} · izinli pazar: ${diagnostics.allowedMarket} · gerçek oran kaynağı: ${diagnostics.realOddsSource} · %70+ güven puanı: ${diagnostics.confidence70Plus} · tüm şartları geçen: ${diagnostics.qualified} · analiz hatası: ${diagnostics.evaluationErrors}. En güçlü adaylar listelendi; oranlar arayüzde gösterilmez.`;
 
     if (!picks.length) {
       return {
@@ -1154,7 +1189,8 @@ async function generateCouponLogic(dateStr) {
         date: dateStr,
         status: "NO_MATCHES",
         picks: [],
-        note: "Bu tarihte %75+ kritere uyan maç bulunamadı."
+        diagnostics,
+        note: `${scanNote} Kupon eşiğini geçen maç yok; seçim zorlanmadı.`
       };
     }
 
@@ -1163,7 +1199,8 @@ async function generateCouponLogic(dateStr) {
       date: dateStr,
       status: "PENDING_APPROVAL",
       picks,
-      note: "Veri Odaklı Maç Önü Kombin"
+      diagnostics,
+      note: scanNote
     };
 
     let tgMsg = `🎟️ <b>WINSCOPE GÜNÜN KUPONU</b> 🎟️
@@ -1181,15 +1218,16 @@ async function generateCouponLogic(dateStr) {
     });
     const telegramSent = await sendTelegramMessage(tgMsg);
     if (telegramSent) await registerTelegramPicks(coupon.draftId, coupon.picks, "Günün kuponu");
-
     return coupon;
   } catch (error) {
+    console.error("[Daily coupon error]", error.message);
     return {
       draftId: `iddaa-error-${Date.now()}`,
       date: dateStr,
       status: "ERROR",
       picks: [],
-      note: "Bülten taranırken hata oluştu."
+      diagnostics,
+      note: `Bülten taraması başarısız: ${error.message}`
     };
   }
 }
