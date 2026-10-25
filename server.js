@@ -581,7 +581,7 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
     .filter(m => !isLive || !m.btts || !(homeGoals > 0 && awayGoals > 0))
     .filter(m => !isLive || !m.team || (m.team === "home" ? homeGoals : awayGoals) < m.threshold)
     .filter(m => !isLive || m.label !== "MS 0.5 ÜST" || lateZeroZeroSupported)
-    .filter(m => isLive || !["MS 0.5 ÜST", "MS 1.5 ÜST", "EV 0.5 ÜST", "DEP 0.5 ÜST", "İY 0.5 ÜST"].includes(m.label));
+    .filter(m => isLive || !["MS 0.5 ÜST", "MS 1.5 ÜST", "EV 0.5 ÜST", "DEP 0.5 ÜST"].includes(m.label));
 
   const scoreLive = (c) => {
     if (!isLive) return 0;
