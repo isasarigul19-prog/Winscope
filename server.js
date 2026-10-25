@@ -528,20 +528,19 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
   const candidates = markets.map(m => ({...m, pct: h[m.key], marketPct: implied[impliedKey[m.label]] ?? null}))
     // Keep all historical percentages visible, but a main recommendation needs a price for that exact market.
     .filter(m => m.label !== "MS 0.5 ÜST" || lateZeroZeroSupported)
-    .filter(m => Number.isFinite(m.pct) && h.total >= 30)
+    .filter(m => (Number.isFinite(m.pct) && h.total > 0) || m.marketPct != null)
     .filter(m => isLive
       ? !["MS 1","MS X","MS 2","İY EV 0.5 ÜST","İY DEP 0.5 ÜST"].includes(m.label)
       : /^(EV 0.5 ÜST|DEP 0.5 ÜST|EV 1.5 ÜST|DEP 1.5 ÜST|MS 2.5 ÜST|MS 3.5 ÜST|KG VAR|İY 0.5 ÜST|İY 1.5 ÜST|İY 2.5 ÜST|İY EV 0.5 ÜST|İY DEP 0.5 ÜST)$/.test(m.label))
     .filter(m => !m.half || !isLive || minute < 45)
     .filter(m => !isLive || !m.team || (m.team === "home" ? homeScoreNow === 0 : awayScoreNow === 0))
-    .filter(m => !isLive || !m.liveEligible || m.threshold == null || goals < m.threshold)
-    .filter(m => m.marketPct != null)
-    .filter(m => !isLive || (live.length >= 2 && !!liveOdds));
+    .filter(m => !isLive || m.liveEligible !== false)
+    ;
   const liveSupport = live.length >= 2 ? Math.min(8, shotsOnTarget * 0.9 + totalShots * 0.15 + corners * 0.25 + dangerousAttacks * 0.1) : 0;
   for (const c of candidates) {
     // When the market has a real price, rank using both its normalized market-implied probability and the historical frequency.
     // Historical percentages shown in the UI remain separate and are never presented as live win probabilities.
-    c.rankScore = c.marketPct != null ? (c.marketPct * 0.65 + c.pct * 0.35) : (c.pct - 5);
+    c.rankScore = c.marketPct != null && Number.isFinite(c.pct) ? (c.marketPct * 0.65 + c.pct * 0.35) : (c.marketPct != null ? c.marketPct : Number(c.pct || 0) - 5);
     if (isLive && c.threshold) c.rankScore += liveSupport;
     const handicapSource = liveOdds?.handicapHome != null && liveOdds?.handicapAway != null ? liveOdds : o;
     const handicapHome = toNumber(handicapSource.handicapHome), handicapAway = toNumber(handicapSource.handicapAway);
@@ -570,8 +569,8 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
     ? `oranlarına en yakın ${h.total} geçmiş maçta`
     : `son ${h.total || 0} tamamlanmış geçmiş maçlık karşılaştırma örnekleminde`;
   let rationale = top
-    ? `${sampleDescription} ${top.label} gerçekleşme sıklığı %${top.pct}; bu pazar için oranlardan arındırılmış piyasa olasılığı yaklaşık %${top.marketPct.toFixed(1)}. Canlı istatistikler ${live.length >= 2 ? `mevcut (${shotsOnTarget} isabetli şut, ${totalShots} toplam şut, ${corners} korner)` : "bulunamadı"}. Oran kaynağı: ${liveOdds?.source || o.source || "bulunamadı"}.`
-    : `Tarihsel pazar yüzdeleri hesaplandı (örneklem: ${h.total || 0}), ancak seçilebilir pazarda doğrulanmış ilgili oran${isLive ? " ve canlı istatistik" : ""} bulunmadığı için ana tercih üretilmedi. ${h.source === "recent-historical-fallback" ? "Bu örneklem oran eşleşmesi değil, son tamamlanmış maçlardan oluşur." : ""}`;
+    ? `${sampleDescription} ${top.label} gerçekleşme sıklığı ${Number.isFinite(top.pct) ? `%${top.pct}` : "hesaplanamadı"}; ${top.marketPct != null ? `bu pazarın gerçek oranlarından arındırılmış piyasa olasılığı yaklaşık %${top.marketPct.toFixed(1)}` : "bu pazar için okunabilir gerçek oran bulunmadığından sıralama tarihsel gerçekleşme sıklığına dayanıyor; fiyat avantajı doğrulanmış değil"}. Canlı istatistik özeti: ${live.length >= 2 ? `${shotsOnTarget} isabetli şut, ${totalShots} toplam şut, ${corners} korner` : "bu maç için canlı istatistik akışı alınamadı"}. Oran kaynağı: ${liveOdds?.source || o.source || "bu pazarda oran kaydı yok"}.`
+    : `Mevcut gerçek oranlar ve ${h.total || 0} tamamlanmış geçmiş maçın skor/pazar dağılımı kontrol edildi. Bu verilerle belirli bir bahis pazarı için güvenilir sıralama üretilemedi; skor tahmini yine mevcut geçmiş skor dağılımından seçilecek. ${h.source === "recent-historical-fallback" ? "Geçmiş örneklem oran eşleşmesi değil, son tamamlanmış maçlardan oluşuyor." : ""}`;
   if (isLive && top && top.threshold && goals >= top.threshold) {
     const nextUnmet = eligible.find(c => c.threshold && goals < c.threshold);
     if (nextUnmet) { mainPick = nextUnmet.label; rationale += ` Mevcut skor ${goals} gol; gerçekleşmiş çizgiler yeni tercih yapılmadı.`; }
@@ -587,6 +586,21 @@ function decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matc
     oddsSource: o.source || null,
     oddsDirection: "Hareket için en az iki zaman damgalı oran ölçümü gerekir"
   };
+}
+
+function mostLikelyHistoricalScore(scoreRows, minHome = 0, minAway = 0) {
+  const rows = Array.isArray(scoreRows) ? scoreRows : [];
+  const parsed = rows.map(([score, pct]) => {
+    const m = String(score || "").match(/^(\d+)\s*[-:]\s*(\d+)$/);
+    return m ? { score: `${Number(m[1])}-${Number(m[2])}`, home: Number(m[1]), away: Number(m[2]), pct: toNumber(pct) } : null;
+  }).filter(x => x && x.home >= minHome && x.away >= minAway)
+    .sort((a, b) => (b.pct ?? 0) - (a.pct ?? 0));
+  return parsed[0] || null;
+}
+
+function formatScoreForecast(row, kind = "tarihsel örneklem") {
+  if (!row) return "Skor tahmini: tarihsel skor dağılımı bulunamadı";
+  return `${row.score} (${kind}${row.pct != null ? ` · %${row.pct}` : ""})`;
 }
 
 async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
@@ -677,13 +691,13 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
             const score = `${r.ft_home_goals}-${r.ft_away_goals}`;
             acc[score] = (acc[score] || 0) + 1;
             return acc;
-          }, {})).sort((a, b) => b[1] - a[1]).slice(0, 3)
+          }, {})).sort((a, b) => b[1] - a[1]).slice(0, 50)
             .map(([score, count]) => [score, Number((100 * count / total).toFixed(1))]),
           htScores: Object.entries(ranked.filter(r => r.ht_home_goals != null && r.ht_away_goals != null).reduce((acc, r) => {
             const score = `${r.ht_home_goals}-${r.ht_away_goals}`;
             acc[score] = (acc[score] || 0) + 1;
             return acc;
-          }, {})).sort((a, b) => b[1] - a[1]).slice(0, 5)
+          }, {})).sort((a, b) => b[1] - a[1]).slice(0, 50)
             .map(([score, count]) => [score, Number((100 * count / total).toFixed(1))]),
           source: (odds.homeWin != null || odds.over25 != null) ? "odds-nearest-historical-matches" : "recent-historical-fallback"
         };
@@ -720,19 +734,30 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
 
   const smartPick = decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matchInfo);
   let halfTimeDisplayScore = "";
-  let surpriseDisplay = "Veri yetersiz";
+  let fullTimeForecast = "";
+  let surpriseDisplay = historyData.ftScores?.[1] ? `Sürpriz aday: ${historyData.ftScores[1][0]} (geçmiş örneklem %${historyData.ftScores[1][1]})` : (historyData.ftScores?.[0] ? `Skor alternatifi: ${historyData.ftScores[0][0]} (geçmiş örneklem %${historyData.ftScores[0][1]})` : "Sürpriz skor için gerçek geçmiş skor dağılımı bekleniyor");
   let mainPickDisplay = smartPick.mainPick;
+  const currentHome = Number(matchInfo.homeScore || 0);
+  const currentAway = Number(matchInfo.awayScore || 0);
+  const htHistorical = mostLikelyHistoricalScore(historyData.htScores, isLive && liveMin < 45 ? currentHome : 0, isLive && liveMin < 45 ? currentAway : 0)
+    || mostLikelyHistoricalScore(historyData.htScores);
+  const ftHistorical = mostLikelyHistoricalScore(historyData.ftScores, isLive ? currentHome : 0, isLive ? currentAway : 0)
+    || (isLive ? { score: `${currentHome}-${currentAway}`, home: currentHome, away: currentAway, pct: null } : mostLikelyHistoricalScore(historyData.ftScores));
   if (isFinished) {
-    halfTimeDisplayScore = `${matchInfo.htHomeScore ?? "?"}-${matchInfo.htAwayScore ?? "?"} (İY)`;
-    surpriseDisplay = "Maç Bitti";
+    halfTimeDisplayScore = `${matchInfo.htHomeScore ?? htHistorical?.score.split("-")[0] ?? "0"}-${matchInfo.htAwayScore ?? htHistorical?.score.split("-")[1] ?? "0"} (gerçek İY skoru)`;
+    fullTimeForecast = `${matchInfo.homeScore}-${matchInfo.awayScore} (gerçek MS skoru)`;
+    surpriseDisplay = "Maç tamamlandı";
     mainPickDisplay = "Maç tamamlandı — sonuç analizi";
-  } else if (isLive) {
-    halfTimeDisplayScore = `${matchInfo.htHomeScore ?? "?"}-${matchInfo.htAwayScore ?? "?"} (Canlı ${liveMin}')`;
-    if (currentTotalGoals >= 3) mainPickDisplay = "MS 2.5 ÜST (çizgi gerçekleşti)";
   } else {
-    halfTimeDisplayScore = "İY skor tahmini için yeterli veri yok";
+    if (isLive && liveMin >= 45 && matchInfo.htHomeScore != null && matchInfo.htAwayScore != null) {
+      halfTimeDisplayScore = `${matchInfo.htHomeScore}-${matchInfo.htAwayScore} (gerçek İY skoru)`;
+    } else {
+      halfTimeDisplayScore = formatScoreForecast(htHistorical, isLive ? "mevcut skorla uyumlu tarihsel İY tahmini" : "en sık tarihsel İY skoru");
+    }
+    fullTimeForecast = formatScoreForecast(ftHistorical, isLive ? "mevcut skorla uyumlu tarihsel MS tahmini" : "en sık tarihsel MS skoru");
+    if (isLive && currentTotalGoals >= 3) mainPickDisplay = "MS 2.5 ÜST (çizgi gerçekleşti)";
   }
-  const confidenceScore = smartPick.confidence != null && historyData.total >= 30
+  const confidenceScore = smartPick.confidence != null && historyData.total > 0
     ? Math.round(smartPick.confidence) : 0;
 
   return {
@@ -755,7 +780,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       mainPick: mainPickDisplay,
       alternative: smartPick.alternative,
       halfTimeScore: halfTimeDisplayScore,
-      fullTimeScore: isFinished ? `${matchInfo.homeScore}-${matchInfo.awayScore}` : "Tahmin: yeterli doğrulanmış veri yok",
+      fullTimeScore: fullTimeForecast,
       alternativeFullTimeScore: isFinished ? `${matchInfo.homeScore}-${matchInfo.awayScore}` : "—",
       surprise: isFinished ? surpriseDisplay : (smartPick.surprise || surpriseDisplay),
       marketDirection: isLive
@@ -791,7 +816,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
         resultDistribution: { "MS 1": { percent: historyData.ms1Pct }, "MS X": { percent: historyData.msXPct }, "MS 2": { percent: historyData.ms2Pct } }
       },
       oddsMovement: isLive ? (odds.liveOdds?.movement || null) : null,
-      reasons: [smartPick.rationale, confidenceScore > 0 ? `Tarihsel eşleşme göstergesi: %${confidenceScore}` : "Yeterli doğrulanmış veri yok; kupon adayı olarak seçilmemeli"]
+      reasons: [smartPick.rationale, confidenceScore > 0 ? `Tarihsel gerçekleşme sıklığı göstergesi: %${confidenceScore} (kazanma garantisi değildir)` : "Skor tahmini geçmiş skor dağılımından; bahis pazarı değerlendirmesi gerçek oranlar mevcutsa fiyat avantajıyla doğrulanır."]
     });
   } catch (error) {
     res.status(502).json({ error: "Analiz üretilemedi.", detail: error.message });
@@ -1419,44 +1444,43 @@ setInterval(async () => {
 
     validMatches.sort((a, b) => b.evalData.confidenceScore - a.evalData.confidenceScore);
 
-    // 2. TEKLİ CANLI ALARMLAR: Tek bir uygun maç bile varsa Telegram'a gönder.
-    // Önceki sürüm validMatches.length >= 2 şartı nedeniyle tek adayda hiç bildirim üretmiyordu.
-    for (const item of validMatches) {
-      const { f, evalData } = item;
-      if (notifiedLiveFixtures.has(f.id)) continue;
+    if (validMatches.length >= 2) {
+      const selectedPicks = validMatches.slice(0, 2);
+      const draftId = `auto-alarm-coupon-${Date.now()}`;
+      
+      let autoMsg = `🎯 <b>WINSCOPE CANLI FIRSAT KOMBİNİ</b> 🎯
+🕒 Saat: ${new Date().toLocaleTimeString('tr-TR')}
 
-      const market = String(evalData.smartPick?.mainPick || evalData.mainPickDisplay || "").trim();
-      if (!isActionableMarket(market)) continue;
+`;
+      const couponPicksArray = [];
+      
+      for (const item of selectedPicks) {
+        notifiedLiveFixtures.add(item.f.id);
+        
+        couponPicksArray.push({
+          fixtureId: item.f.id,
+          home: item.f.home,
+          away: item.f.away,
+          market: item.evalData.smartPick.mainPick
+        });
 
-      const draftId = `auto-single-alarm-${f.id}-${Date.now()}`;
-      const confidence = Number(evalData.confidenceScore ?? evalData.smartPick?.confidence ?? 0);
-      const msg = `🎯 <b>WINSCOPE TEKLİ CANLI ALARM</b>
+        autoMsg += `🏆 <b>${item.f.league}</b>
+⚽ ${item.f.home} vs ${item.f.away}
+⏱️ Dk: ${item.f.minute}' | Skor: ${item.f.homeScore}-${item.f.awayScore}
+🎯 Tercih: <b>${item.evalData.mainPickDisplay}</b> (Benzer maç geçmişi: %${item.evalData.confidenceScore})
+-------------------
+`;
+      }
 
-🏆 <b>${f.league}</b>
-⚽ ${f.home} vs ${f.away}
-⏱️ Dakika: ${f.minute}' | Skor: ${f.homeScore}-${f.awayScore}
-🎯 Ana tercih: <b>${market}</b>
-📊 Benzer geçmiş maç sıklığı: %${Number.isFinite(confidence) ? confidence : 0}
-📉 Piyasa yönü: ${evalData.odds?.liveOdds?.movement?.trend || evalData.odds?.movement?.trend || "ölçüm bekleniyor"}
-
-<i>Gerçek canlı veri ve mevcut geçmiş örneklem üzerinden oluşturuldu; garanti değildir.</i>`;
-
-      const sent = await sendTelegramMessage(msg);
-      if (sent) {
-        notifiedLiveFixtures.add(f.id);
-        await registerTelegramPicks(draftId, [{
-          fixtureId: f.id,
-          home: f.home,
-          away: f.away,
-          league: f.league,
-          market
-        }], "Otomatik tekli canlı alarm");
-        console.log(`[Auto-Scan OK] Tekli canlı alarm gönderildi: fixture=${f.id}, market=${market}`);
+      const autoTelegramSent = await sendTelegramMessage(autoMsg);
+      if (autoTelegramSent) {
+        await registerTelegramPicks(draftId, couponPicksArray, "Otomatik canlı fırsat kombini");
+        console.log("[Auto-Scan OK] Telegram'a yeni 2'li kombin alarmı başarıyla gönderildi.");
       } else {
-        console.warn(`[Auto-Scan] Tekli Telegram alarmı gönderilemedi: fixture=${f.id}`);
+        for (const item of selectedPicks) notifiedLiveFixtures.delete(item.f.id);
+        console.warn("[Auto-Scan] Telegram gönderimi başarısız; seçimler sonraki taramada yeniden denenebilir.");
       }
     }
-
   } catch (err) {
     console.error("[Auto-Scan Error]", err.message);
   }
