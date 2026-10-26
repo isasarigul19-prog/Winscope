@@ -411,16 +411,12 @@ function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, mat
   const liveAllowed = ["İY 0.5 ÜST","İY 1.5 ÜST","İY 2.5 ÜST","MS 0.5 ÜST","MS 1.5 ÜST","MS 2.5 ÜST","MS 3.5 ÜST","KG VAR","EV 0.5 ÜST","DEP 0.5 ÜST"];
   const allowed = isLive ? liveAllowed : prematchAllowed;
   const currentHome = Number(matchInfo?.homeScore || 0), currentAway = Number(matchInfo?.awayScore || 0);
-  const oneGoalLeadScore = goals === 1 && (
-    (currentHome === 1 && currentAway === 0) ||
-    (currentHome === 0 && currentAway === 1)
-  );
   const candidates = allowed.map(label => ({label, pct:probs[label]})).filter(x => x.pct != null).filter(x => {
     if (!isLive) return true;
-    // Never recommend a market whose line has already been reached.
+    // Do not recommend a market whose goal line has already been reached.
     if (x.label.startsWith("İY ")) {
       if (minute >= 45) return false;
-      const htLine = Number((x.label.match(/İY\\s*(0[.,]5|1[.,]5|2[.,]5)/i) || [])[1]?.replace(',', '.') || 0.5);
+      const htLine = Number((x.label.match(/İY\s*(0[.,]5|1[.,]5|2[.,]5)/i) || [])[1]?.replace(',', '.') || 0.5);
       if (goals > htLine) return false;
     }
     if (x.label === "MS 0.5 ÜST" && goals >= 1) return false;
@@ -429,43 +425,25 @@ function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, mat
     if (x.label === "MS 3.5 ÜST" && goals >= 4) return false;
     if (x.label === "EV 0.5 ÜST" && currentHome > 0) return false;
     if (x.label === "DEP 0.5 ÜST" && currentAway > 0) return false;
-
-    // With a 1-0 or 0-1 score, the trailing team's 0.5+ goal and BTTS
-    // depend on the same goal. Avoid presenting the team-goal market as a
-    // separate main pick beside KG VAR; compare MS 1.5 and KG VAR instead.
-    if (oneGoalLeadScore && (x.label === "EV 0.5 ÜST" || x.label === "DEP 0.5 ÜST")) return false;
-
-    // Late-game guardrail: don't recommend high totals that require multiple
-    // additional goals without enough time remaining.
+    // Late-game guardrail: avoid aggressive overs requiring several new goals.
+    // At 65'+, 3.5 needs at least three more goals when total is 1; do not surface it.
     if (minute >= 65 && x.label === "MS 3.5 ÜST" && goals < 3) return false;
+    // At 65'+, prefer the reachable 1.5 line over 2.5 when only one goal has been scored.
     if (minute >= 65 && goals === 1 && x.label === "MS 2.5 ÜST") return false;
+    // At 75'+, only keep 2.5 if two goals have already been scored (one more needed).
     if (minute >= 75 && x.label === "MS 2.5 ÜST" && goals < 2) return false;
     return live.length >= 2;
   });
   candidates.forEach(x => {
-    const line = Number((x.label.match(/MS\\s*(0[.,]5|1[.,]5|2[.,]5|3[.,]5)\\s*ÜST/i) || [])[1]?.replace(',', '.') || 0);
+    const line = Number((x.label.match(/MS\s*(0[.,]5|1[.,]5|2[.,]5|3[.,]5)\s*ÜST/i) || [])[1]?.replace(',', '.') || 0);
     const goalsNeeded = line ? Math.max(0, Math.floor(line) + 1 - goals) : 0;
-    // Penalize totals that need multiple goals late in the match.
+    // Penalize high goal lines late in the match; market probability alone must not dominate.
     const latePenalty = isLive && line ? Math.max(0, minute - 45) * Math.max(0, goalsNeeded - 1) * 0.22 : 0;
-    // When exactly one goal has been scored late, give MS 1.5 a small
-    // reachability preference, but only if its real market probability exists.
-    const reachableLineBonus = isLive && goals === 1 && minute >= 65 && x.label === "MS 1.5 ÜST" ? 3 : 0;
-    x.rank = x.pct + (isLive ? Math.min(8, shotsOnTarget*.8 + totalShots*.12 + corners*.2) : 0) - latePenalty + reachableLineBonus;
+    x.rank = x.pct + (isLive ? Math.min(8, shotsOnTarget*.8 + totalShots*.12 + corners*.2) : 0) - latePenalty;
   });
   candidates.sort((a,b)=>b.rank-a.rank);
-  const top = candidates[0];
-  // Avoid a redundant alternative: team 0.5+ and KG VAR are the same
-  // required-goal scenario when the other team has already scored.
-  const next = candidates.find(x => {
-    if (x.label === top?.label) return false;
-    if (oneGoalLeadScore && (
-      (top?.label === "KG VAR" && /^(EV|DEP) 0.5 ÜST$/.test(x.label)) ||
-      (/^(EV|DEP) 0.5 ÜST$/.test(top?.label || "") && x.label === "KG VAR")
-    )) return false;
-    return true;
-  });
-
-  const scoreText = top ? `${top.label} maç önü oranlarından hesaplanan piyasa göstergesi %${top.pct.toFixed(1)}${isLive ? `; canlı skor ${currentHome}-${currentAway}, dakika ${minute}; canlı istatistik: ${shotsOnTarget} isabetli şut, ${totalShots} şut, ${corners} korner; kalan süre ve gereken gol sayısı için geç maç filtresi uygulandı${oneGoalLeadScore ? "; 1-0/0-1 skorunda takım 0.5 üst pazarı tekrar/bağımlı tercih olarak elendi" : ""}` : ""}.` : "İzin verilen pazarlarda kullanılabilir maç önü oranı bulunamadı.";
+  const top=candidates[0], next=candidates.find(x=>x.label!==top?.label);
+  const scoreText = top ? `${top.label} maç önü oranlarından hesaplanan piyasa göstergesi %${top.pct.toFixed(1)}${isLive ? `; canlı skor ${currentHome}-${currentAway}, dakika ${minute}; canlı istatistik: ${shotsOnTarget} isabetli şut, ${totalShots} şut, ${corners} korner; kalan süre ve gereken gol sayısı için geç maç filtresi uygulandı` : ""}.` : "İzin verilen pazarlarda kullanılabilir maç önü oranı bulunamadı.";
   return { mainPick:top?.label || "PİYASA ORANI YETERSİZ", alternative:next?.label || "—",
     confidence:top ? Math.round(top.pct) : null, rationale:scoreText,
     marketProbabilities:{}, marketImpliedProbabilities:probs, surprise:"Ayrı skor olasılık modelinden hesaplanır",
@@ -1223,21 +1201,23 @@ const trackedFixtureScores = new Map();
 const BATCH_SUMMARY_INTERVAL_MS = 12 * 60 * 60 * 1000;
 let lastBatchSummaryAt = Date.now();
 
+// FAST GOAL ALERT: ayrı döngü; kupon/analiz taramasını beklemez.
+// Yalnızca Günün Kuponu veya canlı sistemin Telegram'a gönderdiği/takibe aldığı maçlar izlenir.
+let goalScanInFlight = false;
+const GOAL_SCAN_INTERVAL_MS = 60 * 1000;
 setInterval(async () => {
+  if (goalScanInFlight) return;
+  goalScanInFlight = true;
   try {
-    console.log("[Auto-Scan Alarm Fix] Canlı maçlar ve Telegram alarmları taranıyor...");
+    await restoreTrackedPicks();
     const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 30_000);
     const rawMatches = payload.response || [];
-    await restoreTrackedPicks();
-
-    // 0. GOL ALARMI: yalnızca Günün Kuponu / canlı sistem tahminlerine kaydedilmiş maçlar.
-    // İlk görülen skor başlangıç kabul edilir; sonraki skor değişikliği Telegram'a bildirilir.
     const liveById = new Map(rawMatches.map(raw => {
       const f = normalizeProviderMatch(raw);
-      return [Number(f.id), { raw, f }];
+      return [Number(f.id), f];
     }));
     const trackedPicks = new Map();
-    for (const [draftId, couponInfo] of activeSentCoupons.entries()) {
+    for (const [, couponInfo] of activeSentCoupons.entries()) {
       for (const pick of (couponInfo.picks || [])) {
         if (pick.resultSent || !Number(pick.fixtureId)) continue;
         const id = Number(pick.fixtureId);
@@ -1245,37 +1225,48 @@ setInterval(async () => {
       }
     }
     for (const [fixtureId, tracked] of trackedPicks.entries()) {
-      const liveEntry = liveById.get(fixtureId);
-      if (!liveEntry) continue;
-      const { f } = liveEntry;
-      if (!["LIVE", "HT"].includes(f.status)) continue;
+      const f = liveById.get(fixtureId);
+      if (!f || !["LIVE", "HT"].includes(f.status)) continue;
       const score = `${f.homeScore}-${f.awayScore}`;
       const previous = trackedFixtureScores.get(fixtureId);
+      // İlk gözlem yalnızca başlangıç skorudur; geriye dönük sahte gol alarmı üretme.
       if (previous == null) {
         trackedFixtureScores.set(fixtureId, score);
+        console.log(`[Goal Alert Baseline] ${fixtureId} ${score}`);
         continue;
       }
-      if (previous !== score) {
-        const goalMsg = `⚽ <b>WINSCOPE GOL ALARMI</b>
+      if (previous === score) continue;
+      const goalMsg = `⚽ <b>WINSCOPE GOOOOOL!</b>
 🏆 ${f.league}
 ⚽ ${f.home} - ${f.away}
 📣 Skor değişti: <b>${previous} → ${score}</b>
 ⏱️ Dakika: ${f.minute ?? "?"}'
 🎯 Takip nedeni: ${tracked.sourceLabel}`;
-        const sent = await sendTelegramMessage(goalMsg);
-        if (sent) {
-          trackedFixtureScores.set(fixtureId, score);
-          console.log(`[Goal Alert] ${fixtureId} ${previous} -> ${score}`);
-        } else {
-          console.warn(`[Goal Alert] Telegram gönderilemedi; ${fixtureId} sonraki taramada yeniden denenecek.`);
-        }
+      const sent = await sendTelegramMessage(goalMsg);
+      if (sent) {
+        trackedFixtureScores.set(fixtureId, score);
+        console.log(`[GOOOOL Alert OK] ${fixtureId} ${previous} -> ${score}`);
+      } else {
+        console.warn(`[GOOOOL Alert Retry] Telegram gönderilemedi; ${fixtureId} sonraki taramada yeniden denenecek.`);
       }
     }
-    // Takibi biten maçların skor önbelleğini temizle.
     for (const fixtureId of trackedFixtureScores.keys()) {
       if (!trackedPicks.has(fixtureId)) trackedFixtureScores.delete(fixtureId);
     }
-    
+  } catch (err) {
+    console.error("[GOOOOL Scan Error]", err.message);
+  } finally {
+    goalScanInFlight = false;
+  }
+}, GOAL_SCAN_INTERVAL_MS);
+
+setInterval(async () => {
+  try {
+    console.log("[Auto-Scan Alarm Fix] Canlı maçlar ve Telegram alarmları taranıyor...");
+    const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 30_000);
+    const rawMatches = payload.response || [];
+    await restoreTrackedPicks();
+
     // 1. SONUÇ TAKİBİ: sonuçları sessizce kaydet; maç başına Telegram mesajı gönderme.
     for (const [draftId, couponInfo] of activeSentCoupons.entries()) {
       for (const pick of couponInfo.picks) {
