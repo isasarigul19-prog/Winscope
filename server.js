@@ -33,25 +33,6 @@ let providerRateLimitedUntil = 0;
 
 const savedAnalyses = new Map();
 const savedCoupons = new Map();
-// Gol alarmı yalnızca Günün Kuponu veya canlı sistem tahmini tarafından seçilen maçları izler.
-const goalAlertFixtures = new Map();
-function trackGoalAlertFixture(pick, sourceLabel = "WinScope tahmini") {
-  const fixtureId = Number(pick?.fixtureId || pick?.id);
-  if (!Number.isFinite(fixtureId) || fixtureId <= 0) return;
-  const scoreText = String(pick?.currentScore || pick?.score || "");
-  const scoreMatch = scoreText.match(/(\d+)\s*[-:]\s*(\d+)/);
-  const existing = goalAlertFixtures.get(fixtureId);
-  goalAlertFixtures.set(fixtureId, {
-    fixtureId, home: pick?.home || existing?.home || "Ev sahibi",
-    away: pick?.away || existing?.away || "Deplasman",
-    league: pick?.league || existing?.league || "",
-    sourceLabel: sourceLabel || existing?.sourceLabel || "WinScope tahmini",
-    lastScore: existing?.lastScore ?? (scoreMatch ? `${Number(scoreMatch[1])}-${Number(scoreMatch[2])}` : null),
-    lastMinute: existing?.lastMinute ?? (Number(pick?.minute) || null),
-    initialized: Boolean(existing?.initialized) || Boolean(scoreMatch),
-    lastAlertKey: existing?.lastAlertKey || null
-  });
-}
 let liveCouponScanCursor = 0;
 let autoAlarmScanCursor = 0;
 
@@ -699,7 +680,6 @@ async function registerTelegramPicks(draftId, picks, sourceLabel = "WinScope Tel
     checked: false
   };
   activeSentCoupons.set(String(draftId), entry);
-  for (const pick of valid) trackGoalAlertFixture(pick, sourceLabel);
   await persistTrackedPick(draftId, entry);
 }
 
@@ -709,10 +689,7 @@ async function restoreTrackedPicks() {
     await initDatabase();
     const result = await pool.query("SELECT id, payload FROM telegram_result_tracking");
     for (const row of result.rows) {
-      if (row.payload && Array.isArray(row.payload.picks)) {
-        activeSentCoupons.set(String(row.id), row.payload);
-        for (const pick of row.payload.picks) trackGoalAlertFixture(pick, row.payload.sourceLabel || "WinScope kuponu");
-      }
+      if (row.payload && Array.isArray(row.payload.picks)) activeSentCoupons.set(String(row.id), row.payload);
     }
     if (result.rows.length) console.log(`[Result tracker] ${result.rows.length} takip kaydı veritabanından geri yüklendi.`);
   } catch (error) {
@@ -834,7 +811,7 @@ async function generateLiveCouponLogic() {
     });
 
     // Bounded round-robin batch: limits API use without permanently ignoring later fixtures.
-    const batchSize = Math.min(8, liveCandidates.length);
+    const batchSize = Math.min(12, liveCandidates.length);
     const startAt = liveCandidates.length ? liveCouponScanCursor % liveCandidates.length : 0;
     const batch = liveCandidates.length
       ? Array.from({ length: batchSize }, (_, i) => liveCandidates[(startAt + i) % liveCandidates.length])
@@ -862,11 +839,6 @@ async function generateLiveCouponLogic() {
           hasLiveStats: (evalData.liveStats?.length || 0) >= 2,
           hasLiveOdds: Boolean(evalData.odds?.liveOdds?.isLive && [evalData.odds.liveOdds.over05, evalData.odds.liveOdds.over15, evalData.odds.liveOdds.over25, evalData.odds.liveOdds.over35, evalData.odds.liveOdds.homeOver05, evalData.odds.liveOdds.awayOver05, evalData.odds.liveOdds.homeOver15, evalData.odds.liveOdds.awayOver15, evalData.odds.liveOdds.bttsYes].some(v => v != null)),
         });
-        if (isLiveCouponMarketAllowed(evalData.smartPick?.mainPick) &&
-            Number(evalData.smartPick?.confidence) >= 55 && (evalData.liveStats?.length || 0) >= 2) {
-          trackGoalAlertFixture({ fixtureId: f.id, home: f.home, away: f.away, league: f.league,
-            minute: f.minute, currentScore: `${f.homeScore}-${f.awayScore}` }, "Canlı sistem tahmini");
-        }
 
         const hasPrematchMarketOdds = Boolean(evalData.odds?.source && [
           evalData.odds.over05, evalData.odds.over15, evalData.odds.over25, evalData.odds.over35,
@@ -888,7 +860,7 @@ async function generateLiveCouponLogic() {
     }
 
     validMatches.sort((a, b) => (b.evalData.smartPick.confidence || 0) - (a.evalData.smartPick.confidence || 0));
-    const picks = validMatches.slice(0, 2).map(({ f, evalData }) => ({
+    const picks = validMatches.slice(0, 3).map(({ f, evalData }) => ({
       fixtureId: f.id,
       iddaaCode: f.iddaaCode,
       home: f.home,
@@ -1206,6 +1178,8 @@ app.get("/api/live", async (_req, res) => {
 const AUTO_SCAN_INTERVAL_MS = 5 * 60 * 1000;
 const notifiedLiveFixtures = new Set();
 const activeSentCoupons = new Map();
+// Score baseline is held per tracked fixture; only selected/predicted matches are monitored.
+const trackedFixtureScores = new Map();
 const BATCH_SUMMARY_INTERVAL_MS = 12 * 60 * 60 * 1000;
 let lastBatchSummaryAt = Date.now();
 
@@ -1216,41 +1190,50 @@ setInterval(async () => {
     const rawMatches = payload.response || [];
     await restoreTrackedPicks();
 
-    // GOL ALARMI: sadece kupon veya canlı sistem tahminiyle takip listesine alınmış maçlar.
-    const liveById = new Map(rawMatches.map(raw => { const f = normalizeProviderMatch(raw); return [Number(f.id), { raw, f }]; }));
-    for (const [fixtureId, tracked] of goalAlertFixtures.entries()) {
-      const current = liveById.get(Number(fixtureId));
-      if (!current) continue; // Maç başlamadı, devre arası veri gelmedi veya canlı listede değil; listede kalır.
-      const f = current.f;
-      if (["FT", "AET", "PEN", "CANC", "ABD", "AWD", "WO"].includes(f.status)) {
-        goalAlertFixtures.delete(fixtureId);
+    // 0. GOL ALARMI: yalnızca Günün Kuponu / canlı sistem tahminlerine kaydedilmiş maçlar.
+    // İlk görülen skor başlangıç kabul edilir; sonraki skor değişikliği Telegram'a bildirilir.
+    const liveById = new Map(rawMatches.map(raw => {
+      const f = normalizeProviderMatch(raw);
+      return [Number(f.id), { raw, f }];
+    }));
+    const trackedPicks = new Map();
+    for (const [draftId, couponInfo] of activeSentCoupons.entries()) {
+      for (const pick of (couponInfo.picks || [])) {
+        if (pick.resultSent || !Number(pick.fixtureId)) continue;
+        const id = Number(pick.fixtureId);
+        if (!trackedPicks.has(id)) trackedPicks.set(id, { pick, sourceLabel: couponInfo.sourceLabel || "WinScope tahmini" });
+      }
+    }
+    for (const [fixtureId, tracked] of trackedPicks.entries()) {
+      const liveEntry = liveById.get(fixtureId);
+      if (!liveEntry) continue;
+      const { f } = liveEntry;
+      if (!["LIVE", "HT"].includes(f.status)) continue;
+      const score = `${f.homeScore}-${f.awayScore}`;
+      const previous = trackedFixtureScores.get(fixtureId);
+      if (previous == null) {
+        trackedFixtureScores.set(fixtureId, score);
         continue;
       }
-      const currentScore = `${Number(f.homeScore) || 0}-${Number(f.awayScore) || 0}`;
-      if (!tracked.initialized || !tracked.lastScore) {
-        tracked.lastScore = currentScore;
-        tracked.lastMinute = f.minute ?? tracked.lastMinute;
-        tracked.initialized = true;
-        goalAlertFixtures.set(fixtureId, tracked);
-        console.log(`[Goal alert baseline] ${tracked.home} - ${tracked.away}: ${currentScore}`);
-        continue;
-      }
-      if (currentScore !== tracked.lastScore) {
-        const alertKey = `${tracked.lastScore}>${currentScore}`;
-        if (tracked.lastAlertKey !== alertKey) {
-          const goalMsg = `⚽ <b>WINSCOPE GOL ALARMI</b>\n🏆 ${tracked.league ? `<b>${tracked.league}</b>\n` : ""}⚽ ${tracked.home} - ${tracked.away}\n📊 Skor: <b>${tracked.lastScore} → ${currentScore}</b>\n⏱️ Dakika: <b>${f.minute == null ? "bilgi yok" : `${f.minute}'`}</b>\n🔎 Takip nedeni: ${tracked.sourceLabel}`;
-          const sent = await sendTelegramMessage(goalMsg);
-          if (sent) {
-            tracked.lastAlertKey = alertKey;
-            tracked.lastScore = currentScore;
-            tracked.lastMinute = f.minute ?? tracked.lastMinute;
-            goalAlertFixtures.set(fixtureId, tracked);
-            console.log(`[Goal alert OK] fixture=${fixtureId} score=${currentScore}`);
-          } else {
-            console.warn(`[Goal alert retry] fixture=${fixtureId}; skor değişikliği sonraki taramada yeniden denenecek.`);
-          }
+      if (previous !== score) {
+        const goalMsg = `⚽ <b>WINSCOPE GOL ALARMI</b>
+🏆 ${f.league}
+⚽ ${f.home} - ${f.away}
+📣 Skor değişti: <b>${previous} → ${score}</b>
+⏱️ Dakika: ${f.minute ?? "?"}'
+🎯 Takip nedeni: ${tracked.sourceLabel}`;
+        const sent = await sendTelegramMessage(goalMsg);
+        if (sent) {
+          trackedFixtureScores.set(fixtureId, score);
+          console.log(`[Goal Alert] ${fixtureId} ${previous} -> ${score}`);
+        } else {
+          console.warn(`[Goal Alert] Telegram gönderilemedi; ${fixtureId} sonraki taramada yeniden denenecek.`);
         }
       }
+    }
+    // Takibi biten maçların skor önbelleğini temizle.
+    for (const fixtureId of trackedFixtureScores.keys()) {
+      if (!trackedPicks.has(fixtureId)) trackedFixtureScores.delete(fixtureId);
     }
     
     // 1. SONUÇ TAKİBİ: sonuçları sessizce kaydet; maç başına Telegram mesajı gönderme.
@@ -1321,7 +1304,7 @@ setInterval(async () => {
       }
     }
 
-    // 2. YENİ 2 MAÇLIK OTOMATİK KOMBİN VE TELEGRAM ALARMI (10 - 80 DAKİKA ARASI)
+    // 2. Sistem tahminlerinden otomatik bildirim (1-3 uygun maç; zorunlu ikili yok)
     const validMatches = [];
     const scanCandidates = rawMatches.map(raw => ({ raw, f: normalizeProviderMatch(raw) }))
       .filter(({ f }) => ["LIVE", "HT"].includes(f.status) && f.minute != null &&
@@ -1332,7 +1315,7 @@ setInterval(async () => {
         return bScore - aScore || Number(a.f.minute) - Number(b.f.minute);
       });
 
-    const autoBatchSize = Math.min(4, scanCandidates.length);
+    const autoBatchSize = Math.min(8, scanCandidates.length);
     const autoStartAt = scanCandidates.length ? autoAlarmScanCursor % scanCandidates.length : 0;
     const autoBatch = scanCandidates.length
       ? Array.from({ length: autoBatchSize }, (_, i) => scanCandidates[(autoStartAt + i) % scanCandidates.length])
@@ -1355,11 +1338,11 @@ setInterval(async () => {
 
     validMatches.sort((a, b) => b.evalData.confidenceScore - a.evalData.confidenceScore);
 
-    if (validMatches.length >= 2) {
-      const selectedPicks = validMatches.slice(0, 2);
+    if (validMatches.length >= 1) {
+      const selectedPicks = validMatches.slice(0, 3);
       const draftId = `auto-alarm-coupon-${Date.now()}`;
       
-      let autoMsg = `🎯 <b>WINSCOPE CANLI FIRSAT KOMBİNİ</b> 🎯
+      let autoMsg = `🎯 <b>WINSCOPE CANLI SİSTEM TAHMİNİ</b> 🎯
 🕒 Saat: ${new Date().toLocaleTimeString('tr-TR')}
 
 `;
@@ -1386,7 +1369,7 @@ setInterval(async () => {
       const autoTelegramSent = await sendTelegramMessage(autoMsg);
       if (autoTelegramSent) {
         await registerTelegramPicks(draftId, couponPicksArray, "Otomatik canlı fırsat kombini");
-        console.log("[Auto-Scan OK] Telegram'a yeni 2'li kombin alarmı başarıyla gönderildi.");
+        console.log(`[Auto-Scan OK] Telegram'a ${selectedPicks.length} uygun canlı tahmin gönderildi.`);
       } else {
         for (const item of selectedPicks) notifiedLiveFixtures.delete(item.f.id);
         console.warn("[Auto-Scan] Telegram gönderimi başarısız; seçimler sonraki taramada yeniden denenebilir.");
