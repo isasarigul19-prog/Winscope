@@ -413,27 +413,37 @@ function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, mat
   const currentHome = Number(matchInfo?.homeScore || 0), currentAway = Number(matchInfo?.awayScore || 0);
   const candidates = allowed.map(label => ({label, pct:probs[label]})).filter(x => x.pct != null).filter(x => {
     if (!isLive) return true;
-    if (x.label.startsWith("İY ") && minute >= 45) return false;
+    // Do not recommend a market whose goal line has already been reached.
+    if (x.label.startsWith("İY ")) {
+      if (minute >= 45) return false;
+      const htLine = Number((x.label.match(/İY\s*(0[.,]5|1[.,]5|2[.,]5)/i) || [])[1]?.replace(',', '.') || 0.5);
+      if (goals > htLine) return false;
+    }
     if (x.label === "MS 0.5 ÜST" && goals >= 1) return false;
     if (x.label === "MS 1.5 ÜST" && goals >= 2) return false;
     if (x.label === "MS 2.5 ÜST" && goals >= 3) return false;
     if (x.label === "MS 3.5 ÜST" && goals >= 4) return false;
-    // Late high goal lines must not be selected from pre-match odds alone.
-    // After 70', only consider Over 3.5 when at least 3 goals are already scored
-    // and live stats support an active match.
-    if (x.label === "MS 3.5 ÜST" && minute >= 70 && (goals < 3 || live.length < 2 || shotsOnTarget < 4 || totalShots < 10)) return false;
     if (x.label === "EV 0.5 ÜST" && currentHome > 0) return false;
     if (x.label === "DEP 0.5 ÜST" && currentAway > 0) return false;
-    // At 1-0 / 0-1, prefer BTTS if the market exists rather than a team 0.5+ line.
-    if ((currentHome === 1 && currentAway === 0) || (currentHome === 0 && currentAway === 1)) {
-      if (x.label === "EV 0.5 ÜST" || x.label === "DEP 0.5 ÜST") return false;
-    }
+    // Late-game guardrail: avoid aggressive overs requiring several new goals.
+    // At 65'+, 3.5 needs at least three more goals when total is 1; do not surface it.
+    if (minute >= 65 && x.label === "MS 3.5 ÜST" && goals < 3) return false;
+    // At 65'+, prefer the reachable 1.5 line over 2.5 when only one goal has been scored.
+    if (minute >= 65 && goals === 1 && x.label === "MS 2.5 ÜST") return false;
+    // At 75'+, only keep 2.5 if two goals have already been scored (one more needed).
+    if (minute >= 75 && x.label === "MS 2.5 ÜST" && goals < 2) return false;
     return live.length >= 2;
   });
-  candidates.forEach(x => { x.rank = x.pct + (isLive ? Math.min(8, shotsOnTarget*.8 + totalShots*.12 + corners*.2) : 0); });
+  candidates.forEach(x => {
+    const line = Number((x.label.match(/MS\s*(0[.,]5|1[.,]5|2[.,]5|3[.,]5)\s*ÜST/i) || [])[1]?.replace(',', '.') || 0);
+    const goalsNeeded = line ? Math.max(0, Math.floor(line) + 1 - goals) : 0;
+    // Penalize high goal lines late in the match; market probability alone must not dominate.
+    const latePenalty = isLive && line ? Math.max(0, minute - 45) * Math.max(0, goalsNeeded - 1) * 0.22 : 0;
+    x.rank = x.pct + (isLive ? Math.min(8, shotsOnTarget*.8 + totalShots*.12 + corners*.2) : 0) - latePenalty;
+  });
   candidates.sort((a,b)=>b.rank-a.rank);
   const top=candidates[0], next=candidates.find(x=>x.label!==top?.label);
-  const scoreText = top ? `${top.label} maç önü oranlarından hesaplanan piyasa göstergesi %${top.pct.toFixed(1)}${isLive ? `; canlı istatistik: ${shotsOnTarget} isabetli şut, ${totalShots} şut, ${corners} korner` : ""}.` : "İzin verilen pazarlarda kullanılabilir maç önü oranı bulunamadı.";
+  const scoreText = top ? `${top.label} maç önü oranlarından hesaplanan piyasa göstergesi %${top.pct.toFixed(1)}${isLive ? `; canlı skor ${currentHome}-${currentAway}, dakika ${minute}; canlı istatistik: ${shotsOnTarget} isabetli şut, ${totalShots} şut, ${corners} korner; kalan süre ve gereken gol sayısı için geç maç filtresi uygulandı` : ""}.` : "İzin verilen pazarlarda kullanılabilir maç önü oranı bulunamadı.";
   return { mainPick:top?.label || "PİYASA ORANI YETERSİZ", alternative:next?.label || "—",
     confidence:top ? Math.round(top.pct) : null, rationale:scoreText,
     marketProbabilities:{}, marketImpliedProbabilities:probs, surprise:"Ayrı skor olasılık modelinden hesaplanır",
@@ -499,18 +509,17 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
     if (line) return total > Number(line[1].replace(",", "."));
     return true;
   };
-  // Exact-score prediction is calculated independently from the selected market.
-  // Filtering scores to satisfy a high-goal pick artificially inflated scores
-  // (e.g. 3-1 / 4-0 at minute 80), so do not condition the score model on the pick.
-  const selected = scores;
+  const marketIsKnown = /KG\s*VAR|EV\s*1[.,]5\s*ÜST|DEP\s*1[.,]5\s*ÜST|MS\s*(?:0[.,]5|1[.,]5|2[.,]5|3[.,]5)\s*ÜST/i.test(String(preferredMarket || ""));
+  const compatible = marketIsKnown
+    ? scores.filter(x => marketSatisfiedByScore(preferredMarket, x.home, x.away))
+    : scores;
+  const selected = compatible.length ? compatible : scores;
 
   // Keep the half-time prediction internally consistent with the current score
   // during the first half; after half-time, use the actual half-time score.
   let ht;
   if (isLive && minute >= 45) {
-    ht = (matchInfo?.htHomeScore != null && matchInfo?.htAwayScore != null)
-      ? `${matchInfo.htHomeScore}-${matchInfo.htAwayScore}`
-      : "İY skoru verisi yok";
+    ht = `${matchInfo?.htHomeScore ?? hs}-${matchInfo?.htAwayScore ?? as}`;
   } else {
     const htBaseH = isLive ? hs : 0;
     const htBaseA = isLive ? as : 0;
