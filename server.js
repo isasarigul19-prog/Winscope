@@ -380,56 +380,128 @@ function isActionableMarket(marketText) {
   return /(?:MS\s*)?\d+(?:[.,]\d+)?\s*(?:ÜST|ALT)|KG\s*(?:VAR|YOK)|(?:EV|EV SAHİBİ|DEP|DEPLASMAN)\s*\d+(?:[.,]\d+)?\s*ÜST|MS\s*[1X2]\b|BERABERLİK/.test(market);
 }
 
+function decideLiveMarketFromStats(liveStats, matchInfo) {
+  const stats = Array.isArray(liveStats) ? liveStats : [];
+  const minute = Math.max(0, Math.min(120, Number(matchInfo?.minute) || 0));
+  const status = String(matchInfo?.status || "").toUpperCase();
+  const isHalfTime = status === "HT" || minute >= 45;
+  const homeScore = Math.max(0, Number(matchInfo?.homeScore) || 0);
+  const awayScore = Math.max(0, Number(matchInfo?.awayScore) || 0);
+  const totalGoals = homeScore + awayScore;
+  const teamStats = stats.slice(0, 2).map(team => {
+    const out = { shots: 0, sot: 0, corners: 0, dangerous: 0, attacks: 0, possession: 50 };
+    for (const item of (Array.isArray(team.statistics) ? team.statistics : [])) {
+      const type = String(item.type || "").toLowerCase();
+      const raw = item.value;
+      const n = typeof raw === "string" && raw.includes("%") ? Number(raw.replace("%", "")) : toNumber(raw);
+      if (n == null) continue;
+      if (type === "total shots") out.shots = n;
+      else if (type === "shots on goal" || type === "shots on target") out.sot = n;
+      else if (type.includes("corner")) out.corners = n;
+      else if (type.includes("dangerous attack")) out.dangerous = n;
+      else if (type === "total attacks" || type === "attacks") out.attacks = n;
+      else if (type === "ball possession") out.possession = n;
+    }
+    return out;
+  });
+  const enoughStats = teamStats.length >= 2 && stats.length >= 2 && teamStats.some(t => t.shots + t.sot + t.dangerous + t.attacks > 0);
+  if (!enoughStats) return {
+    mainPick: "CANLI VERİ YETERSİZ", alternative: "—", confidence: null,
+    rationale: "Canlı istatistikler alınamadı veya eksik. Maç önü oranları canlı analizin yerine kullanılmadı.",
+    marketProbabilities: {}, marketImpliedProbabilities: {}, surprise: "Veri yetersiz",
+    oddsSource: null, oddsDirection: "Canlı istatistik bekleniyor", dataBasis: "live-stats-only"
+  };
+
+  const total = teamStats[0].shots + teamStats[1].shots;
+  const sot = teamStats[0].sot + teamStats[1].sot;
+  const corners = teamStats[0].corners + teamStats[1].corners;
+  const danger = teamStats[0].dangerous + teamStats[1].dangerous;
+  const attacks = teamStats[0].attacks + teamStats[1].attacks;
+  const remainingMinutes = Math.max(0, 90 - Math.min(minute, 90));
+  // Heuristic live goal rate uses only current score, elapsed time and API-Football live stats.
+  // It is a ranking signal, not a calibrated betting probability.
+  const pressure = Math.min(1.8, sot * 0.22 + total * 0.035 + corners * 0.045 + danger * 0.012 + attacks * 0.002);
+  const paceFactor = Math.max(0.25, Math.min(1.8, 0.65 + pressure));
+  const expectedRemainingGoals = remainingMinutes <= 0 ? 0 : Math.max(0.02, (remainingMinutes / 90) * (1.35 * paceFactor));
+  const poissonAtLeast = (lambda, k) => {
+    if (k <= 0) return 1;
+    let p0 = Math.exp(-lambda), cumulative = p0;
+    for (let i = 1; i < k; i++) { p0 *= lambda / i; cumulative += p0; }
+    return Math.max(0, Math.min(1, 1 - cumulative));
+  };
+  const currentHalfGoals = homeScore + awayScore;
+  const firstHalfRemaining = status === "HT" || minute >= 45 ? 0 : Math.max(0, 45 - minute);
+  const halfLambda = firstHalfRemaining > 0 ? expectedRemainingGoals * firstHalfRemaining / Math.max(1, remainingMinutes) : 0;
+  const teamLambda = (team, remaining) => {
+    const share = (team.sot * 0.50 + team.shots * 0.10 + team.corners * 0.05 + team.dangerous * 0.015 + team.attacks * 0.002 + 0.15);
+    const other = teamStats.find(t => t !== team) || team;
+    const otherShare = (other.sot * 0.50 + other.shots * 0.10 + other.corners * 0.05 + other.dangerous * 0.015 + other.attacks * 0.002 + 0.15);
+    const ratio = share / Math.max(0.1, share + otherShare);
+    return expectedRemainingGoals * ratio * (remaining / Math.max(1, remainingMinutes));
+  };
+  const candidates = [];
+  const add = (label, probability, alreadyHit = false) => {
+    if (!alreadyHit && probability != null && Number.isFinite(probability)) candidates.push({ label, probability: Math.max(0, Math.min(0.99, probability)) });
+  };
+  if (firstHalfRemaining > 0) {
+    add("İY 0.5 ÜST", poissonAtLeast(halfLambda, Math.max(0, 1 - currentHalfGoals)), currentHalfGoals >= 1);
+    add("İY 1.5 ÜST", poissonAtLeast(halfLambda, Math.max(0, 2 - currentHalfGoals)), currentHalfGoals >= 2);
+    add("İY 2.5 ÜST", poissonAtLeast(halfLambda, Math.max(0, 3 - currentHalfGoals)), currentHalfGoals >= 3);
+    if (homeScore > 0 && awayScore > 0) add("İY KG VAR", 0.99, true);
+    else if (homeScore === 0 && awayScore === 0) {
+      const h = teamLambda(teamStats[0], firstHalfRemaining), a = teamLambda(teamStats[1], firstHalfRemaining);
+      add("İY KG VAR", (1 - Math.exp(-h)) * (1 - Math.exp(-a)));
+    }
+  }
+  add("MS 0.5 ÜST", poissonAtLeast(expectedRemainingGoals, Math.max(0, 1 - totalGoals)), totalGoals >= 1);
+  add("MS 1.5 ÜST", poissonAtLeast(expectedRemainingGoals, Math.max(0, 2 - totalGoals)), totalGoals >= 2);
+  add("MS 2.5 ÜST", poissonAtLeast(expectedRemainingGoals, Math.max(0, 3 - totalGoals)), totalGoals >= 3);
+  add("MS 3.5 ÜST", poissonAtLeast(expectedRemainingGoals, Math.max(0, 4 - totalGoals)), totalGoals >= 4);
+  if (homeScore > 0 && awayScore > 0) add("KG VAR", 0.99, true);
+  else if (homeScore === 0 || awayScore === 0) {
+    const unscoredTeam = homeScore === 0 ? teamStats[0] : teamStats[1];
+    const lam = teamLambda(unscoredTeam, remainingMinutes);
+    add("KG VAR", 1 - Math.exp(-lam));
+  }
+  if (homeScore === 0) add("EV 0.5 ÜST", 1 - Math.exp(-teamLambda(teamStats[0], remainingMinutes)));
+  if (awayScore === 0) add("DEP 0.5 ÜST", 1 - Math.exp(-teamLambda(teamStats[1], remainingMinutes)));
+  candidates.sort((a,b) => b.probability - a.probability);
+  const top = candidates[0], next = candidates.find(c => c.label !== top?.label);
+  const pct = c => c ? Math.round(c.probability * 100) : null;
+  const probs = Object.fromEntries(candidates.map(c => [c.label, pct(c)]));
+  const statsSummary = `${sot} isabetli şut, ${total} toplam şut, ${corners} korner${danger ? `, ${danger} tehlikeli atak` : ""}`;
+  return {
+    mainPick: top?.label || "CANLI TERCİH YOK", alternative: next?.label || "—",
+    confidence: pct(top), rationale: top
+      ? `Canlı istatistik modeli: ${statsSummary}. Mevcut skor ${homeScore}-${awayScore}, dakika ${minute}. Tahmini olasılık yaklaşık %${pct(top)}; maç önü oranları kullanılmadı.`
+      : `Canlı veriler pazar seçimi için yeterli sinyal üretmedi. ${statsSummary}.`,
+    marketProbabilities: probs, marketImpliedProbabilities: {}, surprise: "Canlı skor ve istatistiklerden ayrıca değerlendirilir",
+    oddsSource: null, oddsDirection: "Canlı istatistik modeli · oran bağımsız", dataBasis: "live-stats-only"
+  };
+}
+
 function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, matchInfo) {
-  const o = odds || {};
-  const live = Array.isArray(liveStats) ? liveStats : [];
   const minute = Number(matchInfo?.minute || 0);
   const isLive = !!matchInfo && (matchInfo.status === "LIVE" || matchInfo.status === "HT" || (minute > 0 && matchInfo.status !== "FT"));
-  const goals = Number(currentTotalGoals || 0);
-  let shotsOnTarget = 0, totalShots = 0, corners = 0;
-  for (const team of live) for (const st of (Array.isArray(team.statistics) ? team.statistics : [])) {
-    const n = toNumber(st.value) || 0, type = String(st.type || "").toLowerCase();
-    if (type === "shots on goal" || type === "shots on target") shotsOnTarget += n;
-    if (type === "total shots") totalShots += n;
-    if (type.includes("corner")) corners += n;
-  }
+  if (isLive) return decideLiveMarketFromStats(liveStats, matchInfo);
+  const o = odds || {};
   const paired = (over, under) => {
     const a=toNumber(o[over]), b=toNumber(o[under]);
     return a>1 && b>1 ? 100*(1/a)/((1/a)+(1/b)) : null;
   };
   const yes=toNumber(o.bttsYes), no=toNumber(o.bttsNo);
   const probs = {
-    "MS 0.5 ÜST": paired("over05","under05"), "MS 1.5 ÜST": paired("over15","under15"),
+    "EV 1.5 ÜST": paired("homeOver15","homeUnder15"), "DEP 1.5 ÜST": paired("awayOver15","awayUnder15"),
     "MS 2.5 ÜST": paired("over25","under25"), "MS 3.5 ÜST": paired("over35","under35"),
-    "İY 0.5 ÜST": paired("htOver05","htUnder05"), "İY 1.5 ÜST": paired("htOver15","htUnder15"),
-    "İY 2.5 ÜST": paired("htOver25","htUnder25"), "EV 0.5 ÜST": paired("homeOver05","homeUnder05"),
-    "DEP 0.5 ÜST": paired("awayOver05","awayUnder05"), "EV 1.5 ÜST": paired("homeOver15","homeUnder15"),
-    "DEP 1.5 ÜST": paired("awayOver15","awayUnder15"),
     "KG VAR": yes>1 && no>1 ? 100*(1/yes)/((1/yes)+(1/no)) : null
   };
-  const prematchAllowed = ["EV 1.5 ÜST","DEP 1.5 ÜST","MS 2.5 ÜST","MS 3.5 ÜST","KG VAR"];
-  const liveAllowed = ["İY 0.5 ÜST","İY 1.5 ÜST","İY 2.5 ÜST","MS 0.5 ÜST","MS 1.5 ÜST","MS 2.5 ÜST","MS 3.5 ÜST","KG VAR","EV 0.5 ÜST","DEP 0.5 ÜST"];
-  const allowed = isLive ? liveAllowed : prematchAllowed;
-  const currentHome = Number(matchInfo?.homeScore || 0), currentAway = Number(matchInfo?.awayScore || 0);
-  const candidates = allowed.map(label => ({label, pct:probs[label]})).filter(x => x.pct != null).filter(x => {
-    if (!isLive) return true;
-    if (x.label.startsWith("İY ") && minute >= 45) return false;
-    if (x.label === "MS 0.5 ÜST" && goals >= 1) return false;
-    if (x.label === "MS 1.5 ÜST" && goals >= 2) return false;
-    if (x.label === "MS 2.5 ÜST" && goals >= 3) return false;
-    if (x.label === "MS 3.5 ÜST" && goals >= 4) return false;
-    if (x.label === "EV 0.5 ÜST" && currentHome > 0) return false;
-    if (x.label === "DEP 0.5 ÜST" && currentAway > 0) return false;
-    return live.length >= 2;
-  });
-  candidates.forEach(x => { x.rank = x.pct + (isLive ? Math.min(8, shotsOnTarget*.8 + totalShots*.12 + corners*.2) : 0); });
-  candidates.sort((a,b)=>b.rank-a.rank);
+  const candidates = Object.entries(probs).filter(([,v]) => v != null).map(([label,pct]) => ({label,pct})).sort((a,b)=>b.pct-a.pct);
   const top=candidates[0], next=candidates.find(x=>x.label!==top?.label);
-  const scoreText = top ? `${top.label} maç önü oranlarından hesaplanan piyasa göstergesi %${top.pct.toFixed(1)}${isLive ? `; canlı istatistik: ${shotsOnTarget} isabetli şut, ${totalShots} şut, ${corners} korner` : ""}.` : "İzin verilen pazarlarda kullanılabilir maç önü oranı bulunamadı.";
   return { mainPick:top?.label || "PİYASA ORANI YETERSİZ", alternative:next?.label || "—",
-    confidence:top ? Math.round(top.pct) : null, rationale:scoreText,
+    confidence:top ? Math.round(top.pct) : null,
+    rationale:top ? `${top.label} gerçek maç önü oranlarından hesaplanan piyasa göstergesi %${top.pct.toFixed(1)}.` : "İzin verilen pazarlarda kullanılabilir gerçek maç önü oranı bulunamadı.",
     marketProbabilities:{}, marketImpliedProbabilities:probs, surprise:"Ayrı skor olasılık modelinden hesaplanır",
-    oddsSource:o.source || null, oddsDirection:"Oran hareketi kullanılmıyor" };
+    oddsSource:o.source || null, oddsDirection:"Maç önü piyasa göstergesi", dataBasis:"prematch-odds" };
 }
 
 function poissonPmf(k, lambda) {
@@ -452,6 +524,24 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
   }
   if (o25 != null && o25 > 1 && o25 < 1.85) { lh += 0.25; la += 0.25; }
   else if (o25 != null && o25 > 2.20) { lh -= 0.15; la -= 0.15; }
+  const statusForModel = String(matchInfo?.status || "NS").toUpperCase();
+  const liveForModel = !["FT", "AET", "PEN", "NS"].includes(statusForModel) && (Number(matchInfo?.minute) > 0 || ["LIVE", "HT", "1H", "2H"].includes(statusForModel));
+  if (liveForModel && Array.isArray(liveStats) && liveStats.length >= 2) {
+    const teamPressure = liveStats.slice(0, 2).map(team => {
+      const values = { sot: 0, shots: 0, corners: 0, dangerous: 0 };
+      for (const st of (Array.isArray(team.statistics) ? team.statistics : [])) {
+        const type = String(st.type || "").toLowerCase(); const n = toNumber(st.value) || 0;
+        if (type === "shots on goal" || type === "shots on target") values.sot = n;
+        else if (type === "total shots") values.shots = n;
+        else if (type.includes("corner")) values.corners = n;
+        else if (type.includes("dangerous attack")) values.dangerous = n;
+      }
+      return Math.max(0.15, values.sot * 0.28 + values.shots * 0.06 + values.corners * 0.04 + values.dangerous * 0.008);
+    });
+    const sumPressure = Math.max(0.3, teamPressure[0] + teamPressure[1]);
+    lh = 1.25 * teamPressure[0] / sumPressure * 2;
+    la = 1.25 * teamPressure[1] / sumPressure * 2;
+  }
   lh = Math.max(0.25, Math.min(2.8, lh));
   la = Math.max(0.25, Math.min(2.8, la));
 
@@ -568,9 +658,10 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
 
   const isFinished = matchInfo.status === "FT";
   const isLive = !isFinished && (matchInfo.status === "LIVE" || matchInfo.status === "HT" || (matchInfo.minute != null && matchInfo.minute > 0));
-  const odds = await fetchRealOdds(fixtureId, isLive);
+  // Live analysis is deliberately isolated from pre-match odds; do not spend an API call on odds here.
+  const odds = isLive ? { source: null, sources: {}, liveOdds: null, isLive: false } : await fetchRealOdds(fixtureId, false);
 
-  // Historical match samples are disabled; predictions use real pre-match odds only.
+  // Historical samples are disabled. Prematch analysis uses real odds; live analysis uses current match data only.
 
   let liveStats = [];
   try {
@@ -594,7 +685,7 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
 
   const teamForm = null;
   const smartPick = decideSmartMarket(null, odds, currentTotalGoals, liveStats, matchInfo);
-  const scorePrediction = scorePredictionFromPrematchOdds(odds, matchInfo, liveStats, smartPick.mainPick);
+  const scorePrediction = scorePredictionFromPrematchOdds(isLive ? {} : odds, matchInfo, liveStats, smartPick.mainPick);
   let halfTimeDisplayScore = "";
   let surpriseDisplay = "Veri yetersiz";
   let mainPickDisplay = smartPick.mainPick;
@@ -604,7 +695,7 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
     mainPickDisplay = "Maç tamamlandı — sonuç analizi";
   } else if (isLive) {
     halfTimeDisplayScore = `${matchInfo.htHomeScore ?? "?"}-${matchInfo.htAwayScore ?? "?"} (Canlı ${liveMin}')`;
-    if (currentTotalGoals >= 3) mainPickDisplay = "MS 2.5 ÜST (çizgi gerçekleşti)";
+    // Never present a market whose line has already been achieved as a new recommendation.
   } else {
     halfTimeDisplayScore = `Tahmin: ${scorePrediction.ht}`;
   }
@@ -634,20 +725,19 @@ app.get("/api/match/:id/analyze", async (req, res) => {
         : `Tahmin: ${scorePrediction.ht}`,
       fullTimeScore: isFinished ? `${matchInfo.homeScore}-${matchInfo.awayScore}` : `Tahmin: ${scorePrediction.main}`,
       alternativeFullTimeScore: isFinished ? `${matchInfo.homeScore}-${matchInfo.awayScore}` : `Tahmin: ${scorePrediction.alternative}`,
-      scorePredictionBasis: scorePrediction.basis || "Maç önü oranlarından kalibre edilen olasılık modeli",
+      scorePredictionBasis: isLive ? "Canlı skor ve canlı istatistikler · yaklaşık tahmin; maç önü oranı kullanılmadı" : (scorePrediction.basis || "Maç önü oranlarından kalibre edilen olasılık modeli"),
       scoreConfidence: scorePrediction.confidence,
       surprise: isFinished ? surpriseDisplay : (smartPick.surprise || surpriseDisplay),
       marketDirection: isLive
-        ? (odds.liveOdds?.source
-            ? `Canlı oran kaynağı: ${odds.liveOdds.source} · ${odds.liveOdds.movement?.trend || "hareket ölçülmedi"} · ${odds.liveOdds.movement?.state || "ilk ölçüm bekleniyor"}`
-            : (odds.source ? `Maç önü oran kaynağı: ${odds.source}; canlı oran bulunamadı` : "Canlı ve maç önü oranı bulunamadı"))
+        ? "Canlı istatistik modeli · maç önü oranlarından bağımsız"
         : (odds.source ? `Oran kaynağı: ${odds.source} · ${odds.movement?.trend || "hareket ölçülmedi"} · ${odds.movement?.state || "ilk ölçüm bekleniyor"}` : "Piyasa oranı bulunamadı"),
-      confidence: confidenceScore > 0 ? `Maç önü oran modeli · %${confidenceScore}` : "Güven puanı hesaplanamadı",
+      liveMarkets: isLive ? Object.entries(smartPick.marketProbabilities || {}).map(([market, probability]) => ({ market, probability, basis: "canlı istatistiklerden türetilen yaklaşık olasılık" })) : [],
+      confidence: confidenceScore > 0 ? `${isLive ? "Canlı istatistik modeli" : "Maç önü oran modeli"} · %${confidenceScore}` : "Güven puanı hesaplanamadı",
       statsAvailable: liveStats.length > 0,
       stats: liveStats,
       history: { available: false, sampleSize: 0, sampleBasis: "historical-analysis-disabled" },
       oddsMovement: isLive ? (odds.liveOdds?.movement || null) : null,
-      reasons: [smartPick.rationale, confidenceScore > 0 ? `Maç önü oran modeli: %${confidenceScore}` : "Yeterli doğrulanmış veri yok; kupon adayı olarak seçilmemeli"]
+      reasons: [smartPick.rationale, confidenceScore > 0 ? `${isLive ? "Canlı istatistik modeli" : "Maç önü oran modeli"}: %${confidenceScore}` : "Yeterli doğrulanmış veri yok; kupon adayı olarak seçilmemeli"]
     });
   } catch (error) {
     res.status(502).json({ error: "Analiz üretilemedi.", detail: error.message });
@@ -835,7 +925,7 @@ async function generateLiveCouponLogic() {
           alternative: evalData.smartPick?.alternative || "—",
           marketConfidence: evalData.smartPick?.confidence ?? null,
           rationale: evalData.smartPick?.rationale || "Analiz gerekçesi oluşturulamadı.",
-          marketDirection: evalData.odds?.liveOdds?.movement?.trend || "Hareket ölçümü bekleniyor",
+          marketDirection: evalData.smartPick?.dataBasis === "live-stats-only" ? "Canlı istatistik modeli · oran bağımsız" : (evalData.odds?.liveOdds?.movement?.trend || "Hareket ölçümü bekleniyor"),
           hasLiveStats: (evalData.liveStats?.length || 0) >= 2,
           hasLiveOdds: Boolean(evalData.odds?.liveOdds?.isLive && [evalData.odds.liveOdds.over05, evalData.odds.liveOdds.over15, evalData.odds.liveOdds.over25, evalData.odds.liveOdds.over35, evalData.odds.liveOdds.homeOver05, evalData.odds.liveOdds.awayOver05, evalData.odds.liveOdds.homeOver15, evalData.odds.liveOdds.awayOver15, evalData.odds.liveOdds.bttsYes].some(v => v != null)),
         });
@@ -847,7 +937,7 @@ async function generateLiveCouponLogic() {
           evalData.odds.htOver15, evalData.odds.homeWin, evalData.odds.draw, evalData.odds.awayWin
         ].some(v => v != null));
         const qualifies = isLiveCouponMarketAllowed(evalData.smartPick?.mainPick) &&
-          evalData.smartPick?.confidence >= 55 && evalData.liveStats?.length >= 2 && hasPrematchMarketOdds;
+          evalData.smartPick?.confidence >= 55 && evalData.liveStats?.length >= 2;
 
         if (qualifies) {
           diagnostics.strongCandidates++;
