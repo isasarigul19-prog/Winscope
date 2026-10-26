@@ -1,8 +1,5 @@
 import express from "express";
 import pg from "pg";
-import { parse } from "csv-parse/sync";
-import { readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,7 +12,6 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 const BASE_URL = "https://v3.football.api-sports.io";
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const HISTORICAL_CSV = path.join(ROOT, "winscope_historical_odds.csv");
 const { Pool } = pg;
 
 app.use(express.json({ limit: "500kb" }));
@@ -117,72 +113,11 @@ function toNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-async function importHistoricalCsvOnce() {
-  if (!pool || !existsSync(HISTORICAL_CSV)) return;
-  const existing = await pool.query("SELECT COUNT(*)::int AS total FROM historical_matches");
-  if (existing.rows[0].total > 0) return;
-  const csvText = await readFile(HISTORICAL_CSV, "utf8");
-  const records = parse(csvText, { columns: true, bom: true, skip_empty_lines: true, trim: true });
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    for (let start = 0; start < records.length; start += 300) {
-      const batch = records.slice(start, start + 300);
-      const values = [];
-      const placeholders = batch.map((row, index) => {
-        const offset = index * 27;
-        const rawDate = String(row.Date || "").trim();
-        const dateParts = rawDate.includes("/") ? rawDate.split("/") : rawDate.split("-");
-        let isoDate = null;
-        if (dateParts.length === 3) {
-          if (/^\d{4}$/.test(dateParts[0])) {
-            isoDate = `${dateParts[0]}-${dateParts[1].padStart(2, "0")}-${dateParts[2].padStart(2, "0")}`;
-          } else {
-            let year = dateParts[2];
-            if (/^\d{2}$/.test(year)) year = Number(year) < 50 ? `20${year}` : `19${year}`;
-            isoDate = `${year}-${dateParts[1].padStart(2, "0")}-${dateParts[0].padStart(2, "0")}`;
-          }
-        }
-        values.push(
-          row.Div || null, isoDate, row.Time || null, row.HomeTeam || null, row.AwayTeam || null,
-          toNumber(row.HTHG), toNumber(row.HTAG), toNumber(row.FTHG), toNumber(row.FTAG), row.FTR || null,
-          toNumber(row.B365H), toNumber(row.B365D), toNumber(row.B365A), toNumber(row.AvgH), toNumber(row.AvgD), toNumber(row.AvgA),
-          toNumber(row["B365>2.5"]), toNumber(row["B365<2.5"]), toNumber(row["Avg>2.5"]), toNumber(row["Avg<2.5"]),
-          toNumber(row["B365C>2.5"]), toNumber(row["B365C<2.5"]), toNumber(row.TotalGoals), toNumber(row.Over25Result),
-          toNumber(row.B365AHH), toNumber(row.B365AHA), toNumber(row.AHh)
-        );
-        return `(${Array.from({ length: 27 }, (_, i) => `$${offset + i + 1}`).join(",")})`;
-      });
-      await client.query(`INSERT INTO historical_matches (
-        league_code, match_date, match_time, home_team, away_team, ht_home_goals, ht_away_goals,
-        ft_home_goals, ft_away_goals, full_time_result, b365_home, b365_draw, b365_away,
-        avg_home, avg_draw, avg_away, b365_over25, b365_under25, avg_over25, avg_under25,
-        b365_close_over25, b365_close_under25, total_goals, over25_result, b365_ah_home, b365_ah_away, ah_line
-      ) VALUES ${placeholders.join(",")}`, values);
-    }
-    await client.query("COMMIT");
-  } catch (error) {
-    await client.query("ROLLBACK");
-  } finally { client.release(); }
-}
-
 async function initDatabase() {
   if (!pool) return;
   if (!dbReady) {
     dbReady = (async () => {
       await pool.query(`
-        CREATE TABLE IF NOT EXISTS historical_matches (
-          id BIGSERIAL PRIMARY KEY, league_code TEXT, match_date DATE, match_time TEXT,
-          home_team TEXT NOT NULL, away_team TEXT NOT NULL, ht_home_goals INTEGER, ht_away_goals INTEGER,
-          ft_home_goals INTEGER, ft_away_goals INTEGER, full_time_result TEXT,
-          b365_home NUMERIC, b365_draw NUMERIC, b365_away NUMERIC, avg_home NUMERIC, avg_draw NUMERIC, avg_away NUMERIC,
-          b365_over25 NUMERIC, b365_under25 NUMERIC, avg_over25 NUMERIC, avg_under25 NUMERIC,
-          b365_close_over25 NUMERIC, b365_close_under25 NUMERIC, b365_ah_home NUMERIC, b365_ah_away NUMERIC, ah_line NUMERIC,
-          total_goals INTEGER, over25_result INTEGER
-        );
-        ALTER TABLE historical_matches ADD COLUMN IF NOT EXISTS b365_ah_home NUMERIC;
-        ALTER TABLE historical_matches ADD COLUMN IF NOT EXISTS b365_ah_away NUMERIC;
-        ALTER TABLE historical_matches ADD COLUMN IF NOT EXISTS ah_line NUMERIC;
         CREATE TABLE IF NOT EXISTS user_saved_analyses (
           id TEXT PRIMARY KEY, fixture_id NUMERIC, payload JSONB, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -218,7 +153,6 @@ async function initDatabase() {
         CREATE INDEX IF NOT EXISTS live_odds_snapshots_fixture_time_idx
           ON live_odds_snapshots (fixture_id, observed_at DESC);
       `);
-      await importHistoricalCsvOnce();
       return true;
     })().catch(e => { dbReady = null; });
   }
