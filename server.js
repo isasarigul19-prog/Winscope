@@ -496,7 +496,7 @@ function formMarketSignal(label, form) {
   return 0;
 }
 
-function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, matchInfo) {
+function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, matchInfo, scorePrediction = null) {
   const o = odds || {};
   const live = Array.isArray(liveStats) ? liveStats : [];
   const minute = Number(matchInfo?.minute || 0);
@@ -527,7 +527,19 @@ function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, mat
   const liveAllowed = ["İY 0.5 ÜST","İY 1.5 ÜST","İY 2.5 ÜST","MS 0.5 ÜST","MS 1.5 ÜST","MS 2.5 ÜST","MS 3.5 ÜST","KG VAR","EV 0.5 ÜST","DEP 0.5 ÜST"];
   const allowed = isLive ? liveAllowed : prematchAllowed;
   const currentHome = Number(matchInfo?.homeScore || 0), currentAway = Number(matchInfo?.awayScore || 0);
-  const candidates = allowed.map(label => ({label, pct:probs[label]})).filter(x => x.pct != null).filter(x => {
+  const modelProbs = {
+    "MS 1.5 ÜST": scorePrediction?.probabilities?.over15,
+    "MS 2.5 ÜST": scorePrediction?.probabilities?.over25,
+    "MS 3.5 ÜST": scorePrediction?.probabilities?.over35,
+    "KG VAR": scorePrediction?.probabilities?.btts,
+    "EV 1.5 ÜST": scorePrediction?.expectedGoals?.home == null ? null : 100 * (1 - Math.exp(-scorePrediction.expectedGoals.home) * (1 + scorePrediction.expectedGoals.home)),
+    "DEP 1.5 ÜST": scorePrediction?.expectedGoals?.away == null ? null : 100 * (1 - Math.exp(-scorePrediction.expectedGoals.away) * (1 + scorePrediction.expectedGoals.away)),
+    "MS 0.5 ÜST": scorePrediction?.expectedGoals?.total == null ? null : 100 * (1 - Math.exp(-scorePrediction.expectedGoals.total)),
+    "İY 0.5 ÜST": null, "İY 1.5 ÜST": null, "İY 2.5 ÜST": null,
+    "EV 0.5 ÜST": scorePrediction?.expectedGoals?.home == null ? null : 100 * (1 - Math.exp(-scorePrediction.expectedGoals.home)),
+    "DEP 0.5 ÜST": scorePrediction?.expectedGoals?.away == null ? null : 100 * (1 - Math.exp(-scorePrediction.expectedGoals.away))
+  };
+  const candidates = allowed.map(label => ({label, pct:probs[label], modelPct:toNumber(modelProbs[label])})).filter(x => x.pct != null).filter(x => {
     if (!isLive) return true;
     const htGoals = (toNumber(matchInfo?.htHomeScore) ?? (minute >= 45 ? currentHome : 0)) +
       (toNumber(matchInfo?.htAwayScore) ?? (minute >= 45 ? currentAway : 0));
@@ -543,12 +555,16 @@ function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, mat
     if (x.label === "DEP 0.5 ÜST" && currentAway > 0) return false;
     return live.length >= 2;
   });
-  candidates.forEach(x => { x.rank = x.pct + (isLive ? Math.min(8, shotsOnTarget*.8 + totalShots*.12 + corners*.2) : 0); });
+  candidates.forEach(x => {
+    // Market probability is corroborated by the same score model; no historical frequencies are used.
+    x.rank = x.modelPct == null ? x.pct : (x.pct * 0.55 + x.modelPct * 0.45);
+    if (isLive) x.rank += Math.min(8, shotsOnTarget*.8 + totalShots*.12 + corners*.2);
+  });
   candidates.sort((a,b)=>b.rank-a.rank);
   const top=candidates[0], next=candidates.find(x=>x.label!==top?.label);
-  const scoreText = top ? `${top.label} maç önü oranlarından hesaplanan piyasa göstergesi %${top.pct.toFixed(1)}${isLive ? `; canlı istatistik: ${shotsOnTarget} isabetli şut, ${totalShots} şut, ${corners} korner` : ""}.` : "İzin verilen pazarlarda kullanılabilir maç önü oranı bulunamadı.";
+  const scoreText = top ? `${top.label}: maç önü piyasa göstergesi %${top.pct.toFixed(1)}${top.modelPct != null ? `; skor modelinin destek göstergesi %${top.modelPct.toFixed(1)}` : "; skor modeli için ilgili pazar olasılığı hesaplanamadı"}${isLive ? `; canlı istatistik: ${shotsOnTarget} isabetli şut, ${totalShots} şut, ${corners} korner` : ""}.` : "İzin verilen pazarlarda kullanılabilir maç önü oranı bulunamadı.";
   return { mainPick:top?.label || "PİYASA ORANI YETERSİZ", alternative:next?.label || "—",
-    confidence:top ? Math.round(top.pct) : null, rationale:scoreText,
+    confidence:top ? Math.round(top.rank) : null, rationale:scoreText,
     marketProbabilities:{}, marketImpliedProbabilities:probs, surprise:"Ayrı skor olasılık modelinden hesaplanır",
     oddsSource:o.source || null, oddsDirection:"Oran hareketi kullanılmıyor" };
 }
@@ -716,8 +732,8 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   let currentTotalGoals = currentHomeScore + currentAwayScore;
 
   const teamForm = null;
-  const smartPick = decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matchInfo);
   const scorePrediction = scorePredictionFromPrematchOdds(odds, matchInfo, liveStats);
+  const smartPick = decideSmartMarket(historyData, odds, currentTotalGoals, liveStats, matchInfo, scorePrediction);
   let halfTimeDisplayScore = "";
   let surpriseDisplay = "Veri yetersiz";
   let mainPickDisplay = smartPick.mainPick;
