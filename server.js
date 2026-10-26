@@ -413,12 +413,7 @@ function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, mat
   const currentHome = Number(matchInfo?.homeScore || 0), currentAway = Number(matchInfo?.awayScore || 0);
   const candidates = allowed.map(label => ({label, pct:probs[label]})).filter(x => x.pct != null).filter(x => {
     if (!isLive) return true;
-    // Never recommend a live market whose goal line has already been reached.
-    // During the first half, use the current score to reject already-won HT over lines.
     if (x.label.startsWith("İY ") && minute >= 45) return false;
-    if (x.label === "İY 0.5 ÜST" && goals >= 1) return false;
-    if (x.label === "İY 1.5 ÜST" && goals >= 2) return false;
-    if (x.label === "İY 2.5 ÜST" && goals >= 3) return false;
     if (x.label === "MS 0.5 ÜST" && goals >= 1) return false;
     if (x.label === "MS 1.5 ÜST" && goals >= 2) return false;
     if (x.label === "MS 2.5 ÜST" && goals >= 3) return false;
@@ -1221,7 +1216,7 @@ setInterval(async () => {
         continue;
       }
       if (previous !== score) {
-        const goalMsg = `⚽ <b>WINSCOPE GOL ALARMI</b>
+        const goalMsg = `🚨 <b>GOOOOOL!</b>
 🏆 ${f.league}
 ⚽ ${f.home} - ${f.away}
 📣 Skor değişti: <b>${previous} → ${score}</b>
