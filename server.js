@@ -84,14 +84,6 @@ function isStrictIddaaMatch(match) {
   return false;
 }
 
-// Live analysis is intentionally broader than the final coupon league filter.
-// This lets WinScope inspect other real live fixtures without automatically
-// promoting them to a coupon or Telegram prediction.
-function isAllowedLiveAnalysisMatch(match) {
-  const fullText = `${match.country || ""} ${match.league || ""} ${match.home || ""} ${match.away || ""}`.toLowerCase();
-  return !STRICT_UNWANTED_REGEX.test(fullText);
-}
-
 async function cachedProviderRequest(cacheKey, pathname, ttlMs) {
   const now = Date.now();
   const cached = providerCache.get(cacheKey);
@@ -421,7 +413,12 @@ function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, mat
   const currentHome = Number(matchInfo?.homeScore || 0), currentAway = Number(matchInfo?.awayScore || 0);
   const candidates = allowed.map(label => ({label, pct:probs[label]})).filter(x => x.pct != null).filter(x => {
     if (!isLive) return true;
+    // Never recommend a live market whose goal line has already been reached.
+    // During the first half, use the current score to reject already-won HT over lines.
     if (x.label.startsWith("İY ") && minute >= 45) return false;
+    if (x.label === "İY 0.5 ÜST" && goals >= 1) return false;
+    if (x.label === "İY 1.5 ÜST" && goals >= 2) return false;
+    if (x.label === "İY 2.5 ÜST" && goals >= 3) return false;
     if (x.label === "MS 0.5 ÜST" && goals >= 1) return false;
     if (x.label === "MS 1.5 ÜST" && goals >= 2) return false;
     if (x.label === "MS 2.5 ÜST" && goals >= 3) return false;
@@ -583,15 +580,8 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   let liveStats = [];
   try {
     const statsRes = await apiGet(`/fixtures/statistics?fixture=${fixtureId}`);
-    if (Array.isArray(statsRes) && statsRes.length > 0) {
-      liveStats = statsRes;
-    } else if (isLive) {
-      console.log(`[Live stats empty] fixture=${fixtureId}; API-Football bu maç için istatistik döndürmedi.`);
-    }
-  } catch (e) {
-    // Do not silently hide provider errors: Render logs should explain why stats are missing.
-    console.warn(`[Live stats error] fixture=${fixtureId}: ${e.message}`);
-  }
+    if (Array.isArray(statsRes) && statsRes.length > 0) liveStats = statsRes;
+  } catch (e) {}
 
   if (liveStats && liveStats.length >= 2) {
     const getShotVal = (teamObj) => {
@@ -816,10 +806,7 @@ async function generateLiveCouponLogic() {
     const liveCandidates = rawMatches.map(raw => ({ raw, f: normalizeProviderMatch(raw) }))
       .filter(({ f }) => ["LIVE", "HT"].includes(f.status) &&
         f.minute != null && f.minute >= 10 && f.minute <= 80)
-      .filter(({ f }) => isAllowedLiveAnalysisMatch(f));
-    // Kept for compatibility with the current UI diagnostics; this now means
-    // eligible live matches after minute/status and unwanted-competition filters,
-    // not only the narrow official-league whitelist used for coupon selection.
+      .filter(({ f }) => isStrictIddaaMatch(f));
     diagnostics.supportedLeague = liveCandidates.length;
 
     liveCandidates.sort((a, b) => {
@@ -894,7 +881,7 @@ async function generateLiveCouponLogic() {
     }));
 
     if (!picks.length) {
-      const note = `Canlı ${diagnostics.liveFixtures} maç · analize uygun ${diagnostics.supportedLeague} · analiz edilen ${diagnostics.evaluated} · canlı istatistik bulunan ${diagnostics.withLiveStats} · gerçek canlı oran bulunan ${diagnostics.withRealOdds} · önceki oran ölçümü bulunan ${diagnostics.withOddsMovement} · eşikleri geçen ${diagnostics.strongCandidates}. İlk tarama oran hareketini ölçemez; sonraki taramalarda önceki ölçümle kıyaslanır. İstatistik sağlayıcıdan gelmezse Render Logs içinde sebep kaydedilir; veri yetersizse kupon zorlanmaz.`;
+      const note = `Canlı ${diagnostics.liveFixtures} maç · uygun lig/dakika ${diagnostics.supportedLeague} · analiz edilen ${diagnostics.evaluated} · canlı istatistik bulunan ${diagnostics.withLiveStats} · gerçek canlı oran bulunan ${diagnostics.withRealOdds} · önceki oran ölçümü bulunan ${diagnostics.withOddsMovement} · eşikleri geçen ${diagnostics.strongCandidates}. İlk tarama oran hareketini ölçemez; sonraki taramalarda önceki ölçümle kıyaslanır. Veriler yetersizse kupon zorlanmaz.`;
       return {
         draftId: `live-empty-${Date.now()}`,
         date: new Date().toISOString().split("T")[0],
