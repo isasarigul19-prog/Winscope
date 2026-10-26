@@ -413,7 +413,15 @@ function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, mat
   const currentHome = Number(matchInfo?.homeScore || 0), currentAway = Number(matchInfo?.awayScore || 0);
   const candidates = allowed.map(label => ({label, pct:probs[label]})).filter(x => x.pct != null).filter(x => {
     if (!isLive) return true;
-    if (x.label.startsWith("İY ") && minute >= 45) return false;
+    // Never recommend a first-half over that has already been achieved by the current score.
+    if (x.label.startsWith("İY ")) {
+      if (minute >= 45) return false;
+      const htLine = Number((x.label.match(/İY\s*(0[.,]5|1[.,]5|2[.,]5)/i) || [])[1]?.replace(",", "."));
+      if (Number.isFinite(htLine) && goals > htLine) return false;
+    }
+    // At 1-0 / 0-1, prefer BTTS over a one-sided team 0.5+ market when available.
+    const oneNilScore = (currentHome === 1 && currentAway === 0) || (currentHome === 0 && currentAway === 1);
+    if (oneNilScore && (x.label === "EV 0.5 ÜST" || x.label === "DEP 0.5 ÜST")) return false;
     if (x.label === "MS 0.5 ÜST" && goals >= 1) return false;
     if (x.label === "MS 1.5 ÜST" && goals >= 2) return false;
     if (x.label === "MS 2.5 ÜST" && goals >= 3) return false;
@@ -1176,12 +1184,69 @@ app.get("/api/live", async (_req, res) => {
 
 // OTOMATİK TARAMA (Gerçek Zamanlı Telegram Alarm Tetikleyicisi + Sonuç Takipçisi)
 const AUTO_SCAN_INTERVAL_MS = 5 * 60 * 1000;
+const GOAL_POLL_INTERVAL_MS = 60 * 1000;
 const notifiedLiveFixtures = new Set();
 const activeSentCoupons = new Map();
 // Score baseline is held per tracked fixture; only selected/predicted matches are monitored.
 const trackedFixtureScores = new Map();
 const BATCH_SUMMARY_INTERVAL_MS = 12 * 60 * 60 * 1000;
 let lastBatchSummaryAt = Date.now();
+
+// Hızlı gol kontrolü ayrı çalışır; analiz/kupon taramasını beklemez.
+// Yalnızca Telegram'a gönderilmiş ve sonuç takibine kaydedilmiş tahmin maçlarını izler.
+let goalPollRunning = false;
+setInterval(async () => {
+  if (goalPollRunning) return;
+  goalPollRunning = true;
+  try {
+    const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 30_000);
+    const rawMatches = payload.response || [];
+    await restoreTrackedPicks();
+    const liveById = new Map(rawMatches.map(raw => {
+      const f = normalizeProviderMatch(raw);
+      return [Number(f.id), f];
+    }));
+    const trackedPicks = new Map();
+    for (const couponInfo of activeSentCoupons.values()) {
+      for (const pick of (couponInfo.picks || [])) {
+        if (pick.resultSent || !Number(pick.fixtureId)) continue;
+        const id = Number(pick.fixtureId);
+        if (!trackedPicks.has(id)) trackedPicks.set(id, { pick, sourceLabel: couponInfo.sourceLabel || "WinScope tahmini" });
+      }
+    }
+    for (const [fixtureId, tracked] of trackedPicks.entries()) {
+      const f = liveById.get(fixtureId);
+      if (!f || !["LIVE", "HT"].includes(f.status)) continue;
+      const score = `${f.homeScore}-${f.awayScore}`;
+      const previous = trackedFixtureScores.get(fixtureId);
+      if (previous == null) {
+        trackedFixtureScores.set(fixtureId, score);
+        continue;
+      }
+      if (previous === score) continue;
+      const goalMsg = `⚽ <b>WINSCOPE GOOOOOL!</b>
+🏆 ${f.league}
+⚽ ${f.home} - ${f.away}
+📣 Skor değişti: <b>${previous} → ${score}</b>
+⏱️ Dakika: ${f.minute ?? "?"}'
+🎯 Takip nedeni: ${tracked.sourceLabel}`;
+      const sent = await sendTelegramMessage(goalMsg);
+      if (sent) {
+        trackedFixtureScores.set(fixtureId, score);
+        console.log(`[Goal Alert OK] ${fixtureId} ${previous} -> ${score}`);
+      } else {
+        console.warn(`[Goal Alert Retry] Telegram gönderilemedi; ${fixtureId} sonraki dakika tekrar denenecek.`);
+      }
+    }
+    for (const fixtureId of trackedFixtureScores.keys()) {
+      if (!trackedPicks.has(fixtureId)) trackedFixtureScores.delete(fixtureId);
+    }
+  } catch (err) {
+    console.error("[Goal Poll Error]", err.message);
+  } finally {
+    goalPollRunning = false;
+  }
+}, GOAL_POLL_INTERVAL_MS);
 
 setInterval(async () => {
   try {
@@ -1190,52 +1255,6 @@ setInterval(async () => {
     const rawMatches = payload.response || [];
     await restoreTrackedPicks();
 
-    // 0. GOL ALARMI: yalnızca Günün Kuponu / canlı sistem tahminlerine kaydedilmiş maçlar.
-    // İlk görülen skor başlangıç kabul edilir; sonraki skor değişikliği Telegram'a bildirilir.
-    const liveById = new Map(rawMatches.map(raw => {
-      const f = normalizeProviderMatch(raw);
-      return [Number(f.id), { raw, f }];
-    }));
-    const trackedPicks = new Map();
-    for (const [draftId, couponInfo] of activeSentCoupons.entries()) {
-      for (const pick of (couponInfo.picks || [])) {
-        if (pick.resultSent || !Number(pick.fixtureId)) continue;
-        const id = Number(pick.fixtureId);
-        if (!trackedPicks.has(id)) trackedPicks.set(id, { pick, sourceLabel: couponInfo.sourceLabel || "WinScope tahmini" });
-      }
-    }
-    for (const [fixtureId, tracked] of trackedPicks.entries()) {
-      const liveEntry = liveById.get(fixtureId);
-      if (!liveEntry) continue;
-      const { f } = liveEntry;
-      if (!["LIVE", "HT"].includes(f.status)) continue;
-      const score = `${f.homeScore}-${f.awayScore}`;
-      const previous = trackedFixtureScores.get(fixtureId);
-      if (previous == null) {
-        trackedFixtureScores.set(fixtureId, score);
-        continue;
-      }
-      if (previous !== score) {
-        const goalMsg = `🚨 <b>GOOOOOL!</b>
-🏆 ${f.league}
-⚽ ${f.home} - ${f.away}
-📣 Skor değişti: <b>${previous} → ${score}</b>
-⏱️ Dakika: ${f.minute ?? "?"}'
-🎯 Takip nedeni: ${tracked.sourceLabel}`;
-        const sent = await sendTelegramMessage(goalMsg);
-        if (sent) {
-          trackedFixtureScores.set(fixtureId, score);
-          console.log(`[Goal Alert] ${fixtureId} ${previous} -> ${score}`);
-        } else {
-          console.warn(`[Goal Alert] Telegram gönderilemedi; ${fixtureId} sonraki taramada yeniden denenecek.`);
-        }
-      }
-    }
-    // Takibi biten maçların skor önbelleğini temizle.
-    for (const fixtureId of trackedFixtureScores.keys()) {
-      if (!trackedPicks.has(fixtureId)) trackedFixtureScores.delete(fixtureId);
-    }
-    
     // 1. SONUÇ TAKİBİ: sonuçları sessizce kaydet; maç başına Telegram mesajı gönderme.
     for (const [draftId, couponInfo] of activeSentCoupons.entries()) {
       for (const pick of couponInfo.picks) {
