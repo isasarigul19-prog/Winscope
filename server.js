@@ -245,9 +245,13 @@ async function fetchTeamRecentForm(teamId, currentFixtureId, season) {
       goalsConcededPct: pct(conceded.filter(Boolean).length),
       over15Pct: pct(over15.filter(Boolean).length),
       over25Pct: pct(over25.filter(Boolean).length),
+      over25Count: over25.filter(Boolean).length,
       bttsPct: pct(btts.filter(Boolean).length),
+      bttsCount: btts.filter(Boolean).length,
       htOver05Pct: htOver05.length ? pct(htOver05.filter(Boolean).length) : null,
+      htOver05Count: htOver05.length ? htOver05.filter(Boolean).length : null,
       htOver15Pct: htOver15.length ? pct(htOver15.filter(Boolean).length) : null,
+      htOver15Count: htOver15.length ? htOver15.filter(Boolean).length : null,
       halftimeSampleSize: htOver05.length,
       matches: finished.map(row => ({
         date: row.fixture?.date || row.kickoff_utc || null,
