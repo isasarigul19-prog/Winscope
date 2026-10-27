@@ -719,7 +719,7 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   const confidenceScore = smartPick.confidence != null ? Math.round(smartPick.confidence) : 0;
 
   return {
-    matchInfo, isLive, isFinished, odds, liveStats,
+    matchInfo, isLive, isFinished, odds, liveStats, history,
     halfTimeDisplayScore, surpriseDisplay, mainPickDisplay, isSecondHalf, smartPick,
     scorePrediction, confidenceScore
   };
@@ -729,7 +729,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
   const fixtureId = req.params.id;
   try {
     const resEval = await evaluateMatchAdvanced(fixtureId);
-    const { matchInfo, isLive, isFinished, odds, liveStats, halfTimeDisplayScore, surpriseDisplay, mainPickDisplay, isSecondHalf, smartPick, scorePrediction, confidenceScore } = resEval;
+    const { matchInfo, isLive, isFinished, odds, liveStats, history, halfTimeDisplayScore, surpriseDisplay, mainPickDisplay, isSecondHalf, smartPick, scorePrediction, confidenceScore } = resEval;
 
     res.json({
       fixtureId: Number(fixtureId),
