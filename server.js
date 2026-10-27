@@ -413,10 +413,6 @@ function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, mat
   const currentHome = Number(matchInfo?.homeScore || 0), currentAway = Number(matchInfo?.awayScore || 0);
   const candidates = allowed.map(label => ({label, pct:probs[label]})).filter(x => x.pct != null).filter(x => {
     if (!isLive) return true;
-    // Late in the match, do not force a new-goal market from pre-match odds alone.
-    // After 80', a fresh goal-dependent recommendation requires a separate strong
-    // live signal; this selector has no calibrated live probability model, so abstain.
-    if (minute > 80) return false;
     // Do not recommend a market whose goal line has already been reached.
     if (x.label.startsWith("İY ")) {
       if (minute >= 45) return false;
@@ -436,10 +432,7 @@ function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, mat
     if (minute >= 65 && goals === 1 && x.label === "MS 2.5 ÜST") return false;
     // At 75'+, only keep 2.5 if two goals have already been scored (one more needed).
     if (minute >= 75 && x.label === "MS 2.5 ÜST" && goals < 2) return false;
-    if (live.length < 2) return false;
-    // Pre-match market percentages alone must not trigger a live pick.
-    if (!(shotsOnTarget >= 2 || totalShots >= 8 || corners >= 5)) return false;
-    return true;
+    return live.length >= 2;
   });
   candidates.forEach(x => {
     const line = Number((x.label.match(/MS\s*(0[.,]5|1[.,]5|2[.,]5|3[.,]5)\s*ÜST/i) || [])[1]?.replace(',', '.') || 0);
@@ -449,21 +442,10 @@ function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, mat
     x.rank = x.pct + (isLive ? Math.min(8, shotsOnTarget*.8 + totalShots*.12 + corners*.2) : 0) - latePenalty;
   });
   candidates.sort((a,b)=>b.rank-a.rank);
-  const top=candidates[0];
-  const needsAwayGoal = label => /^(?:DEP\s*0[.,]5\s*ÜST|KG\s*VAR)$/.test(label);
-  const needsHomeGoal = label => /^(?:EV\s*0[.,]5\s*ÜST|KG\s*VAR)$/.test(label);
-  const next=candidates.find(x=>x.label!==top?.label &&
-    !(currentHome > 0 && currentAway === 0 && needsAwayGoal(x.label)) &&
-    !(currentAway > 0 && currentHome === 0 && needsHomeGoal(x.label)));
+  const top=candidates[0], next=candidates.find(x=>x.label!==top?.label);
   const scoreText = top ? `${top.label} maç önü oranlarından hesaplanan piyasa göstergesi %${top.pct.toFixed(1)}${isLive ? `; canlı skor ${currentHome}-${currentAway}, dakika ${minute}; canlı istatistik: ${shotsOnTarget} isabetli şut, ${totalShots} şut, ${corners} korner; kalan süre ve gereken gol sayısı için geç maç filtresi uygulandı` : ""}.` : "İzin verilen pazarlarda kullanılabilir maç önü oranı bulunamadı.";
-  const abstainLate = isLive && minute > 80;
-  const chosenTop = abstainLate ? null : top;
-  const chosenNext = abstainLate ? null : next;
-  const finalRationale = abstainLate
-    ? `Dakika ${minute}: canlı olasılık modeli yeterince kalibre edilmediği için yeni gol gerektiren tercih üretilmedi.`
-    : scoreText;
-  return { mainPick:chosenTop?.label || "VERİ YETERSİZ — TERCİH YOK", alternative:chosenNext?.label || "—",
-    confidence:chosenTop ? Math.round(chosenTop.pct) : null, rationale:finalRationale,
+  return { mainPick:top?.label || "PİYASA ORANI YETERSİZ", alternative:next?.label || "—",
+    confidence:top ? Math.round(top.pct) : null, rationale:scoreText,
     marketProbabilities:{}, marketImpliedProbabilities:probs, surprise:"Ayrı skor olasılık modelinden hesaplanır",
     oddsSource:o.source || null, oddsDirection:"Oran hareketi kullanılmıyor" };
 }
@@ -605,6 +587,11 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   const isFinished = matchInfo.status === "FT";
   const isLive = !isFinished && (matchInfo.status === "LIVE" || matchInfo.status === "HT" || (matchInfo.minute != null && matchInfo.minute > 0));
   const odds = await fetchRealOdds(fixtureId, isLive);
+  const oddsMarketKeys = odds
+    ? ["over05", "over15", "over25", "over35", "homeOver05", "awayOver05", "homeOver15", "awayOver15", "bttsYes", "htOver05", "htOver15", "homeWin", "draw", "awayWin"]
+        .filter(key => toNumber(odds[key]) != null)
+    : [];
+  console.log(`[LIVE_STATS_DEBUG] fixture=${fixtureId} match="${matchInfo.home} vs ${matchInfo.away}" status=${matchInfo.status} minute=${matchInfo.minute ?? "?"} score=${matchInfo.homeScore}-${matchInfo.awayScore} prematchOddsSource=${odds?.source || "NONE"} prematchMarkets=${oddsMarketKeys.length ? oddsMarketKeys.join(",") : "NONE"}`);
 
   // Historical match samples are disabled; predictions use real pre-match odds only.
 
@@ -612,7 +599,14 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   try {
     const statsRes = await apiGet(`/fixtures/statistics?fixture=${fixtureId}`);
     if (Array.isArray(statsRes) && statsRes.length > 0) liveStats = statsRes;
-  } catch (e) {}
+    const statsTeams = liveStats.map(team => ({
+      name: String(team.team?.name || "unknown"),
+      statisticCount: Array.isArray(team.statistics) ? team.statistics.length : 0
+    }));
+    console.log(`[LIVE_STATS_DEBUG] fixture=${fixtureId} endpoint=fixtures/statistics resultCount=${Array.isArray(statsRes) ? statsRes.length : "NON_ARRAY"} teams=${JSON.stringify(statsTeams)} usableTwoTeamStats=${liveStats.length >= 2}`);
+  } catch (e) {
+    console.warn(`[LIVE_STATS_DEBUG] fixture=${fixtureId} endpoint=fixtures/statistics error=${String(e?.message || e).slice(0, 240)}`);
+  }
 
   if (liveStats && liveStats.length >= 2) {
     const getShotVal = (teamObj) => {
@@ -630,10 +624,7 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
 
   const teamForm = null;
   const smartPick = decideSmartMarket(null, odds, currentTotalGoals, liveStats, matchInfo);
-  const scorePrediction = scorePredictionFromPrematchOdds(
-    odds, matchInfo, liveStats,
-    smartPick.mainPick === "VERİ YETERSİZ — TERCİH YOK" ? "" : smartPick.mainPick
-  );
+  const scorePrediction = scorePredictionFromPrematchOdds(odds, matchInfo, liveStats, smartPick.mainPick);
   let halfTimeDisplayScore = "";
   let surpriseDisplay = "Veri yetersiz";
   let mainPickDisplay = smartPick.mainPick;
