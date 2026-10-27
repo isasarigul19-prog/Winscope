@@ -15,19 +15,20 @@ async function analyze(id){let box=$('a'+id);box.innerHTML='<div class="empty">A
     <div class="stats-grid common-grid">
       ${(() => {
         const h=j.history.home, a=j.history.away;
-        const avg=(hp,hn,ap,an)=>{
+        const avg=(hp,hn,ap,an,hc,ac)=>{
           const n1=Number(hn)||0, n2=Number(an)||0;
           if(hp==null || ap==null || n1<=0 || n2<=0) return 'Veri yok';
-          const c1=Math.round(Number(hp)*n1/100), c2=Math.round(Number(ap)*n2/100);
+          const c1=hc!=null ? Number(hc) : Math.round(Number(hp)*n1/100);
+          const c2=ac!=null ? Number(ac) : Math.round(Number(ap)*n2/100);
           const total=c1+c2, sample=n1+n2;
           return `%${Math.round(total/sample*100)} (${total}/${sample})`;
         };
         const team15=(team)=>team?.teamGoalsOver15Pct==null || !(Number(team?.sampleSize)>0)
           ? 'Veri yok' : `%${Number(team.teamGoalsOver15Pct)} (${Number(team.teamGoalsOver15Count ?? Math.round(Number(team.teamGoalsOver15Pct)*Number(team.sampleSize)/100))}/${Number(team.sampleSize)})`;
         return [
-          ['İY 0.5 ÜST · ortak', avg(h.htOver05Pct,h.halftimeSampleSize,a.htOver05Pct,a.halftimeSampleSize)],
-          ['MS KG VAR · ortak', avg(h.bttsPct,h.sampleSize,a.bttsPct,a.sampleSize)],
-          ['MS 2.5 ÜST · ortak', avg(h.over25Pct,h.sampleSize,a.over25Pct,a.sampleSize)],
+          ['İY 0.5 ÜST · ortak', avg(h.htOver05Pct,h.halftimeSampleSize,a.htOver05Pct,a.halftimeSampleSize,h.htOver05Count,a.htOver05Count)],
+          ['MS KG VAR · ortak', avg(h.bttsPct,h.sampleSize,a.bttsPct,a.sampleSize,h.bttsCount,a.bttsCount)],
+          ['MS 2.5 ÜST · ortak', avg(h.over25Pct,h.sampleSize,a.over25Pct,a.sampleSize,h.over25Count,a.over25Count)],
           ['Ev 1.5 ÜST', team15(h)],
           ['Dep 1.5 ÜST', team15(a)]
         ].map(([label,value])=>`<div class="stat-item"><span class="stat-name">${label}</span><span class="stat-value">${value}</span></div>`).join('');
