@@ -196,6 +196,95 @@ function normalizeProviderMatch(match) {
   };
 }
 
+// Son tamamlanmış takım maçlarını API-Football'dan alır ve gerçek skorlarla yüzdeleri hesaplar.
+// İstekler önbelleğe alınır; geçmiş maç verisi canlı taramada her iki dakikada bir yeniden çekilmez.
+async function fetchTeamRecentForm(teamId, currentFixtureId, season) {
+  const id = Number(teamId);
+  if (!Number.isFinite(id) || id <= 0) {
+    return { teamId: id || null, available: false, sampleSize: 0, error: "Takım ID'si yok" };
+  }
+  const seasonPart = Number.isFinite(Number(season)) && Number(season) > 1900
+    ? `&season=${encodeURIComponent(Number(season))}` : "";
+  const pathname = `/fixtures?team=${id}&last=10${seasonPart}`;
+  try {
+    const payload = await cachedProviderRequest(`team-form:${id}:${season || "any"}`, pathname, 6 * 60 * 60 * 1000);
+    const rows = Array.isArray(payload.response) ? payload.response : (Array.isArray(payload.data) ? payload.data : []);
+    const finished = rows
+      .filter(row => Number(row.fixture?.id ?? row.id) !== Number(currentFixtureId))
+      .filter(row => ["FT", "AET", "PEN"].includes(String(row.fixture?.status?.short ?? row.status ?? "").toUpperCase()))
+      .filter(row => Number.isFinite(Number(row.goals?.home)) && Number.isFinite(Number(row.goals?.away)))
+      .sort((a, b) => new Date(b.fixture?.date || b.kickoff_utc || 0) - new Date(a.fixture?.date || a.kickoff_utc || 0))
+      .slice(0, 5);
+    if (!finished.length) {
+      console.warn(`[Team Form] team=${id} sample=0 raw=${rows.length} season=${season || "none"}`);
+      return { teamId: id, available: false, sampleSize: 0, error: "API yanıtında tamamlanmış maç bulunamadı" };
+    }
+    const pct = count => Math.round((count / finished.length) * 100);
+    const scored = [], conceded = [], over15 = [], over25 = [], btts = [], htOver05 = [], htOver15 = [];
+    for (const row of finished) {
+      const homeId = Number(row.teams?.home?.id);
+      const isHome = homeId === id;
+      const gf = Number(isHome ? row.goals.home : row.goals.away);
+      const ga = Number(isHome ? row.goals.away : row.goals.home);
+      const total = Number(row.goals.home) + Number(row.goals.away);
+      const htH = row.score?.halftime?.home;
+      const htA = row.score?.halftime?.away;
+      scored.push(gf > 0); conceded.push(ga > 0);
+      over15.push(total >= 2); over25.push(total >= 3);
+      btts.push(Number(row.goals.home) > 0 && Number(row.goals.away) > 0);
+      if (htH != null && htA != null) {
+        const htTotal = Number(htH) + Number(htA);
+        htOver05.push(htTotal >= 1); htOver15.push(htTotal >= 2);
+      }
+    }
+    const result = {
+      teamId: id, available: true, sampleSize: finished.length,
+      goalsScoredPct: pct(scored.filter(Boolean).length),
+      goalsConcededPct: pct(conceded.filter(Boolean).length),
+      over15Pct: pct(over15.filter(Boolean).length),
+      over25Pct: pct(over25.filter(Boolean).length),
+      bttsPct: pct(btts.filter(Boolean).length),
+      htOver05Pct: htOver05.length ? pct(htOver05.filter(Boolean).length) : null,
+      htOver15Pct: htOver15.length ? pct(htOver15.filter(Boolean).length) : null,
+      halftimeSampleSize: htOver05.length,
+      matches: finished.map(row => ({
+        date: row.fixture?.date || row.kickoff_utc || null,
+        home: row.teams?.home?.name || "Ev sahibi", away: row.teams?.away?.name || "Deplasman",
+        score: `${row.goals.home}-${row.goals.away}`,
+        halftimeScore: row.score?.halftime?.home != null && row.score?.halftime?.away != null
+          ? `${row.score.halftime.home}-${row.score.halftime.away}` : null
+      }))
+    };
+    console.log(`[Team Form] team=${id} sample=${result.sampleSize}/5 HT=${result.halftimeSampleSize} source=API-Football cache=6h`);
+    return result;
+  } catch (error) {
+    console.warn(`[Team Form Error] team=${id}: ${error.message}`);
+    return { teamId: id, available: false, sampleSize: 0, error: error.message };
+  }
+}
+
+async function fetchMatchRecentForm(fRaw, fixtureId) {
+  const homeId = Number(fRaw?.teams?.home?.id);
+  const awayId = Number(fRaw?.teams?.away?.id);
+  const season = fRaw?.league?.season;
+  const [home, away] = await Promise.all([
+    fetchTeamRecentForm(homeId, fixtureId, season),
+    fetchTeamRecentForm(awayId, fixtureId, season)
+  ]);
+  const available = home.available && away.available;
+  const mean = key => home[key] != null && away[key] != null
+    ? Math.round((home[key] + away[key]) / 2) : null;
+  return {
+    available, sampleSize: Math.min(home.sampleSize || 0, away.sampleSize || 0),
+    sampleBasis: "API-Football son 5 tamamlanmış maç; yüzdeler gerçek skorlarla hesaplandı",
+    home, away,
+    matchPercentages: {
+      over15Pct: mean("over15Pct"), over25Pct: mean("over25Pct"), bttsPct: mean("bttsPct"),
+      htOver05Pct: mean("htOver05Pct"), htOver15Pct: mean("htOver15Pct")
+    }
+  };
+}
+
 async function footballDataRequest(pathname) {
   if (!API_KEY) throw new Error("API_FOOTBALL_KEY yok.");
   const response = await fetch(`${BASE_URL}${pathname}`, {
@@ -565,119 +654,7 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
   };
 }
 
-function pct(numerator, denominator) {
-  return denominator > 0 ? Math.round((numerator / denominator) * 100) : null;
-}
-
-function summarizeTeamRecentMatches(rows, teamId) {
-  const finished = (Array.isArray(rows) ? rows : []).filter(row => {
-    const status = String(row?.fixture?.status?.short || "").toUpperCase();
-    return ["FT", "AET", "PEN"].includes(status) &&
-      Number.isFinite(Number(row?.goals?.home)) && Number.isFinite(Number(row?.goals?.away));
-  }).slice(0, 5);
-  const matches = finished.map(row => {
-    const homeId = Number(row?.teams?.home?.id);
-    const awayId = Number(row?.teams?.away?.id);
-    const isHome = homeId === Number(teamId);
-    const teamGoals = Number(isHome ? row.goals.home : row.goals.away);
-    const opponentGoals = Number(isHome ? row.goals.away : row.goals.home);
-    const htHome = row?.score?.halftime?.home;
-    const htAway = row?.score?.halftime?.away;
-    const htKnown = htHome != null && htAway != null && Number.isFinite(Number(htHome)) && Number.isFinite(Number(htAway));
-    const htTeam = htKnown ? Number(isHome ? htHome : htAway) : null;
-    const htOpponent = htKnown ? Number(isHome ? htAway : htHome) : null;
-    return {
-      date: row?.fixture?.date || null,
-      opponent: isHome ? (row?.teams?.away?.name || "Rakip") : (row?.teams?.home?.name || "Rakip"),
-      venue: isHome ? "Ev" : "Dep",
-      score: `${row.goals.home}-${row.goals.away}`,
-      halfTimeScore: htKnown ? `${htHome}-${htAway}` : null,
-      teamGoals, opponentGoals,
-      totalGoals: teamGoals + opponentGoals,
-      bothScored: teamGoals > 0 && opponentGoals > 0,
-      teamScored: teamGoals > 0,
-      teamOver15: teamGoals >= 2,
-      over15: teamGoals + opponentGoals >= 2,
-      over25: teamGoals + opponentGoals >= 3,
-      halfTimeKnown: htKnown,
-      halfTimeOver05: htKnown ? Number(htHome) + Number(htAway) >= 1 : null,
-      halfTimeOver15: htKnown ? Number(htHome) + Number(htAway) >= 2 : null,
-      halfTimeTeamScored: htKnown ? htTeam > 0 : null,
-      halfTimeBothScored: htKnown ? htTeam > 0 && htOpponent > 0 : null
-    };
-  });
-  const count = matches.length;
-  const htMatches = matches.filter(m => m.halfTimeKnown);
-  const wins = matches.filter(m => m.teamGoals > m.opponentGoals).length;
-  const draws = matches.filter(m => m.teamGoals === m.opponentGoals).length;
-  const losses = matches.filter(m => m.teamGoals < m.opponentGoals).length;
-  const sum = key => matches.reduce((acc, m) => acc + (Number(m[key]) || 0), 0);
-  const countTrue = (arr, key) => arr.filter(m => m[key] === true).length;
-  return {
-    available: count > 0,
-    sampleSize: count,
-    halfTimeSampleSize: htMatches.length,
-    goalsFor: sum("teamGoals"),
-    goalsAgainst: sum("opponentGoals"),
-    averageGoalsFor: count ? Number((sum("teamGoals") / count).toFixed(2)) : null,
-    averageGoalsAgainst: count ? Number((sum("opponentGoals") / count).toFixed(2)) : null,
-    winPercent: pct(wins, count), drawPercent: pct(draws, count), lossPercent: pct(losses, count),
-    scoredPercent: pct(countTrue(matches, "teamScored"), count),
-    teamOver15Percent: pct(countTrue(matches, "teamOver15"), count),
-    matchOver15Percent: pct(countTrue(matches, "over15"), count),
-    matchOver25Percent: pct(countTrue(matches, "over25"), count),
-    bttsPercent: pct(countTrue(matches, "bothScored"), count),
-    halfTimeOver05Percent: pct(countTrue(htMatches, "halfTimeOver05"), htMatches.length),
-    halfTimeOver15Percent: pct(countTrue(htMatches, "halfTimeOver15"), htMatches.length),
-    halfTimeTeamScoredPercent: pct(countTrue(htMatches, "halfTimeTeamScored"), htMatches.length),
-    halfTimeBttsPercent: pct(countTrue(htMatches, "halfTimeBothScored"), htMatches.length),
-    matches
-  };
-}
-
-async function fetchTeamRecentForm(teamId) {
-  if (!Number(teamId)) return { available: false, sampleSize: 0, error: "Takım ID'si bulunamadı." };
-  try {
-    // Cache for six hours to protect the paid API quota; only completed results are summarized.
-    const payload = await cachedProviderRequest(
-      `team-form:${Number(teamId)}:last5`,
-      `/fixtures?team=${encodeURIComponent(Number(teamId))}&last=5`,
-      6 * 60 * 60 * 1000
-    );
-    const rows = payload.response || payload.data || [];
-    return summarizeTeamRecentMatches(rows, Number(teamId));
-  } catch (error) {
-    console.warn(`[Team recent form unavailable] team=${teamId}: ${error.message}`);
-    return { available: false, sampleSize: 0, error: "API-Football geçmiş maç verisi alınamadı." };
-  }
-}
-
-async function buildMatchHistory(matchInfo) {
-  const [home, away] = await Promise.all([
-    fetchTeamRecentForm(matchInfo.homeId),
-    fetchTeamRecentForm(matchInfo.awayId)
-  ]);
-  const averageAvailable = (a, b, key) => {
-    const values = [a?.[key], b?.[key]].filter(v => v != null && Number.isFinite(Number(v)));
-    return values.length ? Math.round(values.reduce((sum, v) => sum + Number(v), 0) / values.length) : null;
-  };
-  return {
-    available: Boolean(home.available || away.available),
-    sampleBasis: "API-Football takım başına son 5 tamamlanmış maç; yüzdeler gözlenen maçlardan hesaplandı",
-    sampleSize: { home: home.sampleSize || 0, away: away.sampleSize || 0 },
-    homeTeam: home,
-    awayTeam: away,
-    matchTrends: {
-      over15Percent: averageAvailable(home, away, "matchOver15Percent"),
-      over25Percent: averageAvailable(home, away, "matchOver25Percent"),
-      bttsPercent: averageAvailable(home, away, "bttsPercent"),
-      halfTimeOver05Percent: averageAvailable(home, away, "halfTimeOver05Percent"),
-      halfTimeOver15Percent: averageAvailable(home, away, "halfTimeOver15Percent")
-    }
-  };
-}
-
-async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null, includeHistory = false) {
+async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   // Reuse the fixture already returned by /fixtures?live=all when possible.
   let fRaw = prefetchedFixture || null;
   if (!fRaw) {
@@ -700,9 +677,8 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null, includ
   const isLive = !isFinished && (matchInfo.status === "LIVE" || matchInfo.status === "HT" || (matchInfo.minute != null && matchInfo.minute > 0));
   const odds = await fetchRealOdds(fixtureId, isLive);
 
-  // Historical form is fetched only for explicit match analysis, not every background live scan.
-  // This keeps the paid API quota under control while exposing verified last-five percentages.
-  const history = includeHistory ? await buildMatchHistory(matchInfo) : { available: false, sampleSize: { home: 0, away: 0 }, sampleBasis: "Geçmiş form yalnızca ayrıntılı maç analizinde çağrılır" };
+  // Son 5 tamamlanmış maç: yüzdeler gerçek skorlarla hesaplanır ve analiz yanıtında doğrulanabilir.
+  const history = await fetchMatchRecentForm(fRaw, fixtureId);
 
   let liveStats = [];
   try {
@@ -724,13 +700,8 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null, includ
   let currentAwayScore = matchInfo.awayScore || 0;
   let currentTotalGoals = currentHomeScore + currentAwayScore;
 
-  const teamForm = history.available ? history : null;
-  const smartPick = decideSmartMarket(teamForm, odds, currentTotalGoals, liveStats, matchInfo);
-  if (history.available) {
-    const trends = history.matchTrends || {};
-    const historyNote = `Son 5 maç eğilimi: MS 1.5 Üst ${trends.over15Percent == null ? "veri yok" : `%${trends.over15Percent}`} · MS 2.5 Üst ${trends.over25Percent == null ? "veri yok" : `%${trends.over25Percent}`} · KG Var ${trends.bttsPercent == null ? "veri yok" : `%${trends.bttsPercent}`} · İY 0.5 Üst ${trends.halfTimeOver05Percent == null ? "veri yok" : `%${trends.halfTimeOver05Percent}`}. Bu yüzdeler iki takımın ayrı ayrı son maç yüzdelerinin ortalamasıdır; kesin olasılık değildir.`;
-    smartPick.rationale = `${smartPick.rationale} ${historyNote}`;
-  }
+  const teamForm = null;
+  const smartPick = decideSmartMarket(null, odds, currentTotalGoals, liveStats, matchInfo);
   const scorePrediction = scorePredictionFromPrematchOdds(odds, matchInfo, liveStats, smartPick.mainPick);
   let halfTimeDisplayScore = "";
   let surpriseDisplay = "Veri yetersiz";
@@ -748,7 +719,7 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null, includ
   const confidenceScore = smartPick.confidence != null ? Math.round(smartPick.confidence) : 0;
 
   return {
-    matchInfo, isLive, isFinished, odds, liveStats, history,
+    matchInfo, isLive, isFinished, odds, liveStats,
     halfTimeDisplayScore, surpriseDisplay, mainPickDisplay, isSecondHalf, smartPick,
     scorePrediction, confidenceScore
   };
@@ -757,8 +728,8 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null, includ
 app.get("/api/match/:id/analyze", async (req, res) => {
   const fixtureId = req.params.id;
   try {
-    const resEval = await evaluateMatchAdvanced(fixtureId, null, true);
-    const { matchInfo, isLive, isFinished, odds, liveStats, history, halfTimeDisplayScore, surpriseDisplay, mainPickDisplay, isSecondHalf, smartPick, scorePrediction, confidenceScore } = resEval;
+    const resEval = await evaluateMatchAdvanced(fixtureId);
+    const { matchInfo, isLive, isFinished, odds, liveStats, halfTimeDisplayScore, surpriseDisplay, mainPickDisplay, isSecondHalf, smartPick, scorePrediction, confidenceScore } = resEval;
 
     res.json({
       fixtureId: Number(fixtureId),
@@ -782,9 +753,15 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       confidence: confidenceScore > 0 ? `Maç önü oran modeli · %${confidenceScore}` : "Güven puanı hesaplanamadı",
       statsAvailable: liveStats.length > 0,
       stats: liveStats,
-      history: history || { available: false, sampleSize: { home: 0, away: 0 }, sampleBasis: "history unavailable" },
-      oddsMovement: isLive ? (odds.liveOdds?.movement || null) : null,
-      reasons: [smartPick.rationale, confidenceScore > 0 ? `Maç önü oran modeli: %${confidenceScore}` : "Yeterli doğrulanmış veri yok; kupon adayı olarak seçilmemeli"]
+      history,
+      reasons: [
+        smartPick.rationale,
+        history.available
+          ? `Son 5 maç verisi doğrulandı: ${matchInfo.home} gol attı %${history.home.goalsScoredPct}, MS 2.5 üst %${history.home.over25Pct}; ${matchInfo.away} gol attı %${history.away.goalsScoredPct}, MS 2.5 üst %${history.away.over25Pct}. İY yüzdeleri ${history.home.halftimeSampleSize}/${history.away.halftimeSampleSize} maçta mevcut.`
+          : `Geçmiş maç verisi doğrulanamadı: ev ${history.home.sampleSize}/5, dep ${history.away.sampleSize}/5. Yüzdeler tahmin edilmedi.`,
+        confidenceScore > 0 ? `Maç önü oran modeli: %${confidenceScore}` : "Yeterli doğrulanmış veri yok; kupon adayı olarak seçilmemeli"
+      ],
+      oddsMovement: isLive ? (odds.liveOdds?.movement || null) : null
     });
   } catch (error) {
     res.status(502).json({ error: "Analiz üretilemedi.", detail: error.message });
