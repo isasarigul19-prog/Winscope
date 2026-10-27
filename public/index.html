@@ -8,7 +8,25 @@ async function live(){try{let r=await fetch('/api/live'),j=await r.json();$('con
 async function bulletin(){let d=$('date').value;if(!d)return;const box=$('matches');box.innerHTML='<div class="empty">Bülten yükleniyor…</div>';try{let r=await fetch('/api/fixtures?date='+encodeURIComponent(d)),j=await r.json();if(!r.ok){bulletinMatches=[];box.innerHTML=`<div class="empty err">Bülten alınamadı: ${esc(j.detail||j.error||`HTTP ${r.status}`)}</div>`;return}bulletinMatches=j.matches||[];box.innerHTML=bulletinMatches.length?bulletinMatches.map(card).join(''):'<div class="empty">Bu tarih için API-Football maç döndürmedi. Tarihi ve API planını kontrol et.</div>'}catch(e){box.innerHTML=`<div class="empty err">Bülten bağlantı hatası: ${esc(e.message)}</div>`}}
 async function searchMatch(){const q=$('matchSearch').value.trim().toLocaleLowerCase('tr-TR');const out=$('matchSearchResult');if(!q){out.innerHTML='<span class="err">Takım adı yaz.</span>';return}const d=$('date').value;out.textContent='Aranıyor…';try{let source=bulletinMatches;if(!source.length){let r=await fetch('/api/fixtures?date='+encodeURIComponent(d));let j=await r.json();source=j.matches||[];bulletinMatches=source}let found=source.filter(m=>`${m.home||''} ${m.away||''}`.toLocaleLowerCase('tr-TR').includes(q));if(!found.length){out.textContent='Maç bulunamadı.';return}matches=source;$('filter').value='all';$('matches').innerHTML=found.map(card).join('');out.textContent=`${found.length} maç bulundu.`}catch(e){out.innerHTML=`<span class="err">Hata: ${esc(e.message)}</span>`}}
 function clearMatchSearch(){$('matchSearch').value='';$('matchSearchResult').textContent='Aramak için takım adını yaz.';}
-async function analyze(id){let box=$('a'+id);box.innerHTML='<div class="empty">Analiz ediliyor…</div>';try{let r=await fetch(`/api/match/${id}/analyze`),j=await r.json();if(!r.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);box.innerHTML=`<table class="table"><tr><td>ANA TERCİH</td><td><b>${esc(j.mainPick)}</b></td></tr><tr><td>ALTERNATİF</td><td>${esc(j.alternative)}</td></tr><tr><td>İY SKOR TAHMİNİ</td><td>${esc(j.halfTimeScore)}</td></tr><tr><td>MS ANA SKOR</td><td>${esc(j.fullTimeScore)}</td></tr><tr><td>MS ALTERNATİF SKOR</td><td>${esc(j.alternativeFullTimeScore||'—')}</td></tr><tr><td>SKOR MODELİ</td><td>${esc(j.scorePredictionBasis||'')}</td></tr></table>`}catch(e){box.innerHTML=`<div class="empty err">Analiz hatası: ${esc(e.message)}</div>`}}
+async function analyze(id){let box=$('a'+id);box.innerHTML='<div class="empty">Analiz ediliyor…</div>';try{let r=await fetch(`/api/match/${id}/analyze`),j=await r.json();if(!r.ok)throw new Error(j.detail||j.error||`HTTP ${r.status}`);box.innerHTML=`<table class="table"><tr><td>ANA TERCİH</td><td><b>${esc(j.mainPick)}</b></td></tr><tr><td>ALTERNATİF</td><td>${esc(j.alternative)}</td></tr><tr><td>İY SKOR TAHMİNİ</td><td>${esc(j.halfTimeScore)}</td></tr><tr><td>MS ANA SKOR</td><td>${esc(j.fullTimeScore)}</td></tr><tr><td>MS ALTERNATİF SKOR</td><td>${esc(j.alternativeFullTimeScore||'—')}</td></tr><tr><td>SKOR MODELİ</td><td>
+  <div>${esc(j.scorePredictionBasis||'Skor modeli açıklaması mevcut değil')}</div>
+  ${j.history?.available && j.history?.home && j.history?.away ? `
+    <div class="stats-title" style="margin-top:10px">📊 TAKIM GOL YÜZDELERİ · SON 5 MAÇ</div>
+    <div class="stats-grid">
+      ${[
+        ['Ev sahibi gol attı', j.history.home.goalsScoredPct, j.history.home.sampleSize],
+        ['Deplasman gol attı', j.history.away.goalsScoredPct, j.history.away.sampleSize],
+        ['Ev sahibi maçlarında 2.5 ÜST', j.history.home.over25Pct, j.history.home.sampleSize],
+        ['Deplasman maçlarında 2.5 ÜST', j.history.away.over25Pct, j.history.away.sampleSize],
+        ['Ev sahibi maçlarında KG VAR', j.history.home.bttsPct, j.history.home.sampleSize],
+        ['Deplasman maçlarında KG VAR', j.history.away.bttsPct, j.history.away.sampleSize],
+        ['Ev sahibi maçlarında İY 0.5 ÜST', j.history.home.htOver05Pct, j.history.home.halftimeSampleSize],
+        ['Deplasman maçlarında İY 0.5 ÜST', j.history.away.htOver05Pct, j.history.away.halftimeSampleSize]
+      ].map(([label,pct,n]) => `<div class="stat-item"><span class="stat-name">${esc(label)}</span><span class="stat-value">${pct==null || !n ? 'Veri yetersiz' : '%'+esc(pct)+' ('+esc(Math.round(Number(pct)*Number(n)/100))+'/'+esc(n)+')'}</span></div>`).join('')}
+    </div>
+    <div class="stats-note">Yüzdeler her takımın kendi son maçlarından hesaplanır; maçın kesin sonucu değildir.</div>
+  ` : `<div class="stats-note">Geçmiş maç yüzdeleri doğrulanamadı; veri mevcut değil.</div>`}
+</td></tr></table>`}catch(e){box.innerHTML=`<div class="empty err">Analiz hatası: ${esc(e.message)}</div>`}}
 function normalizeStatsPayload(j){
   // Supports common API response shapes without assuming a single backend schema.
   if(Array.isArray(j?.stats)) return j.stats;
