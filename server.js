@@ -220,7 +220,7 @@ async function fetchTeamRecentForm(teamId, currentFixtureId, season) {
       return { teamId: id, available: false, sampleSize: 0, error: "API yanıtında tamamlanmış maç bulunamadı" };
     }
     const pct = count => Math.round((count / finished.length) * 100);
-    const scored = [], conceded = [], over15 = [], over25 = [], btts = [], htOver05 = [], htOver15 = [];
+    const scored = [], teamOver15 = [], conceded = [], over15 = [], over25 = [], btts = [], htOver05 = [], htOver15 = [];
     for (const row of finished) {
       const homeId = Number(row.teams?.home?.id);
       const isHome = homeId === id;
@@ -229,7 +229,7 @@ async function fetchTeamRecentForm(teamId, currentFixtureId, season) {
       const total = Number(row.goals.home) + Number(row.goals.away);
       const htH = row.score?.halftime?.home;
       const htA = row.score?.halftime?.away;
-      scored.push(gf > 0); conceded.push(ga > 0);
+      scored.push(gf > 0); teamOver15.push(gf >= 2); conceded.push(ga > 0);
       over15.push(total >= 2); over25.push(total >= 3);
       btts.push(Number(row.goals.home) > 0 && Number(row.goals.away) > 0);
       if (htH != null && htA != null) {
@@ -240,6 +240,8 @@ async function fetchTeamRecentForm(teamId, currentFixtureId, season) {
     const result = {
       teamId: id, available: true, sampleSize: finished.length,
       goalsScoredPct: pct(scored.filter(Boolean).length),
+      teamGoalsOver15Pct: pct(teamOver15.filter(Boolean).length),
+      teamGoalsOver15Count: teamOver15.filter(Boolean).length,
       goalsConcededPct: pct(conceded.filter(Boolean).length),
       over15Pct: pct(over15.filter(Boolean).length),
       over25Pct: pct(over25.filter(Boolean).length),
