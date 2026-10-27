@@ -587,11 +587,6 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   const isFinished = matchInfo.status === "FT";
   const isLive = !isFinished && (matchInfo.status === "LIVE" || matchInfo.status === "HT" || (matchInfo.minute != null && matchInfo.minute > 0));
   const odds = await fetchRealOdds(fixtureId, isLive);
-  const oddsMarketKeys = odds
-    ? ["over05", "over15", "over25", "over35", "homeOver05", "awayOver05", "homeOver15", "awayOver15", "bttsYes", "htOver05", "htOver15", "homeWin", "draw", "awayWin"]
-        .filter(key => toNumber(odds[key]) != null)
-    : [];
-  console.log(`[LIVE_STATS_DEBUG] fixture=${fixtureId} match="${matchInfo.home} vs ${matchInfo.away}" status=${matchInfo.status} minute=${matchInfo.minute ?? "?"} score=${matchInfo.homeScore}-${matchInfo.awayScore} prematchOddsSource=${odds?.source || "NONE"} prematchMarkets=${oddsMarketKeys.length ? oddsMarketKeys.join(",") : "NONE"}`);
 
   // Historical match samples are disabled; predictions use real pre-match odds only.
 
@@ -599,14 +594,7 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   try {
     const statsRes = await apiGet(`/fixtures/statistics?fixture=${fixtureId}`);
     if (Array.isArray(statsRes) && statsRes.length > 0) liveStats = statsRes;
-    const statsTeams = liveStats.map(team => ({
-      name: String(team.team?.name || "unknown"),
-      statisticCount: Array.isArray(team.statistics) ? team.statistics.length : 0
-    }));
-    console.log(`[LIVE_STATS_DEBUG] fixture=${fixtureId} endpoint=fixtures/statistics resultCount=${Array.isArray(statsRes) ? statsRes.length : "NON_ARRAY"} teams=${JSON.stringify(statsTeams)} usableTwoTeamStats=${liveStats.length >= 2}`);
-  } catch (e) {
-    console.warn(`[LIVE_STATS_DEBUG] fixture=${fixtureId} endpoint=fixtures/statistics error=${String(e?.message || e).slice(0, 240)}`);
-  }
+  } catch (e) {}
 
   if (liveStats && liveStats.length >= 2) {
     const getShotVal = (teamObj) => {
@@ -1267,7 +1255,7 @@ setInterval(async () => {
         continue;
       }
       if (previous !== score) {
-        const goalMsg = `⚽ <b>WINSCOPE GOL ALARMI</b>
+        const goalMsg = `⚽ <b>WINSCOPE GOOOOOL!</b>
 🏆 ${f.league}
 ⚽ ${f.home} - ${f.away}
 📣 Skor değişti: <b>${previous} → ${score}</b>
