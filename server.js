@@ -565,7 +565,119 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
   };
 }
 
-async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
+function pct(numerator, denominator) {
+  return denominator > 0 ? Math.round((numerator / denominator) * 100) : null;
+}
+
+function summarizeTeamRecentMatches(rows, teamId) {
+  const finished = (Array.isArray(rows) ? rows : []).filter(row => {
+    const status = String(row?.fixture?.status?.short || "").toUpperCase();
+    return ["FT", "AET", "PEN"].includes(status) &&
+      Number.isFinite(Number(row?.goals?.home)) && Number.isFinite(Number(row?.goals?.away));
+  }).slice(0, 5);
+  const matches = finished.map(row => {
+    const homeId = Number(row?.teams?.home?.id);
+    const awayId = Number(row?.teams?.away?.id);
+    const isHome = homeId === Number(teamId);
+    const teamGoals = Number(isHome ? row.goals.home : row.goals.away);
+    const opponentGoals = Number(isHome ? row.goals.away : row.goals.home);
+    const htHome = row?.score?.halftime?.home;
+    const htAway = row?.score?.halftime?.away;
+    const htKnown = htHome != null && htAway != null && Number.isFinite(Number(htHome)) && Number.isFinite(Number(htAway));
+    const htTeam = htKnown ? Number(isHome ? htHome : htAway) : null;
+    const htOpponent = htKnown ? Number(isHome ? htAway : htHome) : null;
+    return {
+      date: row?.fixture?.date || null,
+      opponent: isHome ? (row?.teams?.away?.name || "Rakip") : (row?.teams?.home?.name || "Rakip"),
+      venue: isHome ? "Ev" : "Dep",
+      score: `${row.goals.home}-${row.goals.away}`,
+      halfTimeScore: htKnown ? `${htHome}-${htAway}` : null,
+      teamGoals, opponentGoals,
+      totalGoals: teamGoals + opponentGoals,
+      bothScored: teamGoals > 0 && opponentGoals > 0,
+      teamScored: teamGoals > 0,
+      teamOver15: teamGoals >= 2,
+      over15: teamGoals + opponentGoals >= 2,
+      over25: teamGoals + opponentGoals >= 3,
+      halfTimeKnown: htKnown,
+      halfTimeOver05: htKnown ? Number(htHome) + Number(htAway) >= 1 : null,
+      halfTimeOver15: htKnown ? Number(htHome) + Number(htAway) >= 2 : null,
+      halfTimeTeamScored: htKnown ? htTeam > 0 : null,
+      halfTimeBothScored: htKnown ? htTeam > 0 && htOpponent > 0 : null
+    };
+  });
+  const count = matches.length;
+  const htMatches = matches.filter(m => m.halfTimeKnown);
+  const wins = matches.filter(m => m.teamGoals > m.opponentGoals).length;
+  const draws = matches.filter(m => m.teamGoals === m.opponentGoals).length;
+  const losses = matches.filter(m => m.teamGoals < m.opponentGoals).length;
+  const sum = key => matches.reduce((acc, m) => acc + (Number(m[key]) || 0), 0);
+  const countTrue = (arr, key) => arr.filter(m => m[key] === true).length;
+  return {
+    available: count > 0,
+    sampleSize: count,
+    halfTimeSampleSize: htMatches.length,
+    goalsFor: sum("teamGoals"),
+    goalsAgainst: sum("opponentGoals"),
+    averageGoalsFor: count ? Number((sum("teamGoals") / count).toFixed(2)) : null,
+    averageGoalsAgainst: count ? Number((sum("opponentGoals") / count).toFixed(2)) : null,
+    winPercent: pct(wins, count), drawPercent: pct(draws, count), lossPercent: pct(losses, count),
+    scoredPercent: pct(countTrue(matches, "teamScored"), count),
+    teamOver15Percent: pct(countTrue(matches, "teamOver15"), count),
+    matchOver15Percent: pct(countTrue(matches, "over15"), count),
+    matchOver25Percent: pct(countTrue(matches, "over25"), count),
+    bttsPercent: pct(countTrue(matches, "bothScored"), count),
+    halfTimeOver05Percent: pct(countTrue(htMatches, "halfTimeOver05"), htMatches.length),
+    halfTimeOver15Percent: pct(countTrue(htMatches, "halfTimeOver15"), htMatches.length),
+    halfTimeTeamScoredPercent: pct(countTrue(htMatches, "halfTimeTeamScored"), htMatches.length),
+    halfTimeBttsPercent: pct(countTrue(htMatches, "halfTimeBothScored"), htMatches.length),
+    matches
+  };
+}
+
+async function fetchTeamRecentForm(teamId) {
+  if (!Number(teamId)) return { available: false, sampleSize: 0, error: "Takım ID'si bulunamadı." };
+  try {
+    // Cache for six hours to protect the paid API quota; only completed results are summarized.
+    const payload = await cachedProviderRequest(
+      `team-form:${Number(teamId)}:last5`,
+      `/fixtures?team=${encodeURIComponent(Number(teamId))}&last=5`,
+      6 * 60 * 60 * 1000
+    );
+    const rows = payload.response || payload.data || [];
+    return summarizeTeamRecentMatches(rows, Number(teamId));
+  } catch (error) {
+    console.warn(`[Team recent form unavailable] team=${teamId}: ${error.message}`);
+    return { available: false, sampleSize: 0, error: "API-Football geçmiş maç verisi alınamadı." };
+  }
+}
+
+async function buildMatchHistory(matchInfo) {
+  const [home, away] = await Promise.all([
+    fetchTeamRecentForm(matchInfo.homeId),
+    fetchTeamRecentForm(matchInfo.awayId)
+  ]);
+  const averageAvailable = (a, b, key) => {
+    const values = [a?.[key], b?.[key]].filter(v => v != null && Number.isFinite(Number(v)));
+    return values.length ? Math.round(values.reduce((sum, v) => sum + Number(v), 0) / values.length) : null;
+  };
+  return {
+    available: Boolean(home.available || away.available),
+    sampleBasis: "API-Football takım başına son 5 tamamlanmış maç; yüzdeler gözlenen maçlardan hesaplandı",
+    sampleSize: { home: home.sampleSize || 0, away: away.sampleSize || 0 },
+    homeTeam: home,
+    awayTeam: away,
+    matchTrends: {
+      over15Percent: averageAvailable(home, away, "matchOver15Percent"),
+      over25Percent: averageAvailable(home, away, "matchOver25Percent"),
+      bttsPercent: averageAvailable(home, away, "bttsPercent"),
+      halfTimeOver05Percent: averageAvailable(home, away, "halfTimeOver05Percent"),
+      halfTimeOver15Percent: averageAvailable(home, away, "halfTimeOver15Percent")
+    }
+  };
+}
+
+async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null, includeHistory = false) {
   // Reuse the fixture already returned by /fixtures?live=all when possible.
   let fRaw = prefetchedFixture || null;
   if (!fRaw) {
@@ -588,7 +700,9 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   const isLive = !isFinished && (matchInfo.status === "LIVE" || matchInfo.status === "HT" || (matchInfo.minute != null && matchInfo.minute > 0));
   const odds = await fetchRealOdds(fixtureId, isLive);
 
-  // Historical match samples are disabled; predictions use real pre-match odds only.
+  // Historical form is fetched only for explicit match analysis, not every background live scan.
+  // This keeps the paid API quota under control while exposing verified last-five percentages.
+  const history = includeHistory ? await buildMatchHistory(matchInfo) : { available: false, sampleSize: { home: 0, away: 0 }, sampleBasis: "Geçmiş form yalnızca ayrıntılı maç analizinde çağrılır" };
 
   let liveStats = [];
   try {
@@ -610,8 +724,13 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   let currentAwayScore = matchInfo.awayScore || 0;
   let currentTotalGoals = currentHomeScore + currentAwayScore;
 
-  const teamForm = null;
-  const smartPick = decideSmartMarket(null, odds, currentTotalGoals, liveStats, matchInfo);
+  const teamForm = history.available ? history : null;
+  const smartPick = decideSmartMarket(teamForm, odds, currentTotalGoals, liveStats, matchInfo);
+  if (history.available) {
+    const trends = history.matchTrends || {};
+    const historyNote = `Son 5 maç eğilimi: MS 1.5 Üst ${trends.over15Percent == null ? "veri yok" : `%${trends.over15Percent}`} · MS 2.5 Üst ${trends.over25Percent == null ? "veri yok" : `%${trends.over25Percent}`} · KG Var ${trends.bttsPercent == null ? "veri yok" : `%${trends.bttsPercent}`} · İY 0.5 Üst ${trends.halfTimeOver05Percent == null ? "veri yok" : `%${trends.halfTimeOver05Percent}`}. Bu yüzdeler iki takımın ayrı ayrı son maç yüzdelerinin ortalamasıdır; kesin olasılık değildir.`;
+    smartPick.rationale = `${smartPick.rationale} ${historyNote}`;
+  }
   const scorePrediction = scorePredictionFromPrematchOdds(odds, matchInfo, liveStats, smartPick.mainPick);
   let halfTimeDisplayScore = "";
   let surpriseDisplay = "Veri yetersiz";
@@ -629,7 +748,7 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   const confidenceScore = smartPick.confidence != null ? Math.round(smartPick.confidence) : 0;
 
   return {
-    matchInfo, isLive, isFinished, odds, liveStats,
+    matchInfo, isLive, isFinished, odds, liveStats, history,
     halfTimeDisplayScore, surpriseDisplay, mainPickDisplay, isSecondHalf, smartPick,
     scorePrediction, confidenceScore
   };
@@ -638,8 +757,8 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
 app.get("/api/match/:id/analyze", async (req, res) => {
   const fixtureId = req.params.id;
   try {
-    const resEval = await evaluateMatchAdvanced(fixtureId);
-    const { matchInfo, isLive, isFinished, odds, liveStats, halfTimeDisplayScore, surpriseDisplay, mainPickDisplay, isSecondHalf, smartPick, scorePrediction, confidenceScore } = resEval;
+    const resEval = await evaluateMatchAdvanced(fixtureId, null, true);
+    const { matchInfo, isLive, isFinished, odds, liveStats, history, halfTimeDisplayScore, surpriseDisplay, mainPickDisplay, isSecondHalf, smartPick, scorePrediction, confidenceScore } = resEval;
 
     res.json({
       fixtureId: Number(fixtureId),
@@ -663,7 +782,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       confidence: confidenceScore > 0 ? `Maç önü oran modeli · %${confidenceScore}` : "Güven puanı hesaplanamadı",
       statsAvailable: liveStats.length > 0,
       stats: liveStats,
-      history: { available: false, sampleSize: 0, sampleBasis: "historical-analysis-disabled" },
+      history: history || { available: false, sampleSize: { home: 0, away: 0 }, sampleBasis: "history unavailable" },
       oddsMovement: isLive ? (odds.liveOdds?.movement || null) : null,
       reasons: [smartPick.rationale, confidenceScore > 0 ? `Maç önü oran modeli: %${confidenceScore}` : "Yeterli doğrulanmış veri yok; kupon adayı olarak seçilmemeli"]
     });
