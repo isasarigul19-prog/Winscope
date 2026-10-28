@@ -524,13 +524,18 @@ function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, mat
   const minute = Number(matchInfo?.minute || 0);
   const isLive = !!matchInfo && (matchInfo.status === "LIVE" || matchInfo.status === "HT" || (minute > 0 && matchInfo.status !== "FT"));
   const goals = Number(currentTotalGoals || 0);
-  let shotsOnTarget = 0, totalShots = 0, corners = 0;
+  let shotsOnTarget = 0, totalShots = 0, corners = 0, usableStatFields = 0;
   for (const team of live) for (const st of (Array.isArray(team.statistics) ? team.statistics : [])) {
-    const n = toNumber(st.value) || 0, type = String(st.type || "").toLowerCase();
-    if (type === "shots on goal" || type === "shots on target") shotsOnTarget += n;
-    if (type === "total shots") totalShots += n;
-    if (type.includes("corner")) corners += n;
+    const type = String(st.type || "").toLowerCase();
+    const raw = st.value;
+    // API-Football can return percentages as strings; only count numeric match events here.
+    const n = raw == null || raw === "" || String(raw).includes("%") ? null : toNumber(raw);
+    if (n == null) continue;
+    if (type === "shots on goal" || type === "shots on target") { shotsOnTarget += n; usableStatFields++; }
+    if (type === "total shots") { totalShots += n; usableStatFields++; }
+    if (type.includes("corner")) { corners += n; usableStatFields++; }
   }
+  const hasUsableLiveStats = live.length >= 2 && usableStatFields >= 2;
   const paired = (over, under) => {
     const a=toNumber(o[over]), b=toNumber(o[under]);
     return a>1 && b>1 ? 100*(1/a)/((1/a)+(1/b)) : null;
@@ -558,7 +563,16 @@ function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, mat
       if (goals > htLine) return false;
     }
     if (x.label === "MS 0.5 ÜST" && goals >= 1) return false;
+    // A 0-0 live match from minute 25 onward must not receive the low-value MS 0.5 pick.
+    // If the match has enough real attacking data, assess MS 1.5 instead; otherwise withhold it.
+    if (x.label === "MS 0.5 ÜST" && goals === 0 && minute >= 25) return false;
     if (x.label === "MS 1.5 ÜST" && goals >= 2) return false;
+    if (x.label === "MS 1.5 ÜST" && goals === 0 && minute >= 25 && minute <= 40) {
+      const strongAttackingStats = hasUsableLiveStats && totalShots >= 8 && shotsOnTarget >= 3 && corners >= 2;
+      if (!strongAttackingStats || x.pct < 55) return false;
+    }
+    // Do not treat two empty team objects as valid live statistics.
+    if (!hasUsableLiveStats) return false;
     if (x.label === "MS 2.5 ÜST" && goals >= 3) return false;
     if (x.label === "MS 3.5 ÜST" && goals >= 4) return false;
     if (x.label === "EV 0.5 ÜST" && currentHome > 0) return false;
@@ -570,7 +584,7 @@ function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, mat
     if (minute >= 65 && goals === 1 && x.label === "MS 2.5 ÜST") return false;
     // At 75'+, only keep 2.5 if two goals have already been scored (one more needed).
     if (minute >= 75 && x.label === "MS 2.5 ÜST" && goals < 2) return false;
-    return live.length >= 2;
+    return hasUsableLiveStats;
   });
   candidates.forEach(x => {
     const line = Number((x.label.match(/MS\s*(0[.,]5|1[.,]5|2[.,]5|3[.,]5)\s*ÜST/i) || [])[1]?.replace(',', '.') || 0);
@@ -581,7 +595,7 @@ function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, mat
   });
   candidates.sort((a,b)=>b.rank-a.rank);
   const top=candidates[0], next=candidates.find(x=>x.label!==top?.label);
-  const scoreText = top ? `${top.label} maç önü oranlarından hesaplanan piyasa göstergesi %${top.pct.toFixed(1)}${isLive ? `; canlı skor ${currentHome}-${currentAway}, dakika ${minute}; canlı istatistik: ${shotsOnTarget} isabetli şut, ${totalShots} şut, ${corners} korner; kalan süre ve gereken gol sayısı için geç maç filtresi uygulandı` : ""}.` : "İzin verilen pazarlarda kullanılabilir maç önü oranı bulunamadı.";
+  const scoreText = top ? `${top.label} maç önü oranlarından hesaplanan piyasa göstergesi %${top.pct.toFixed(1)}${isLive ? `; canlı skor ${currentHome}-${currentAway}, dakika ${minute}; canlı istatistik: ${shotsOnTarget} isabetli şut, ${totalShots} şut, ${corners} korner; istatistik alanı ${hasUsableLiveStats ? "kullanılabilir" : "yetersiz"}; kalan süre ve gereken gol sayısı filtresi uygulandı` : ""}.` : (isLive && !hasUsableLiveStats ? "Canlı istatistikler okunabilir değil veya eksik; güvenilir canlı tercih üretilmedi." : "İzin verilen pazarlarda kullanılabilir maç önü oranı bulunamadı." );
   return { mainPick:top?.label || "PİYASA ORANI YETERSİZ", alternative:next?.label || "—",
     confidence:top ? Math.round(top.pct) : null, rationale:scoreText,
     marketProbabilities:{}, marketImpliedProbabilities:probs, surprise:"Ayrı skor olasılık modelinden hesaplanır",
