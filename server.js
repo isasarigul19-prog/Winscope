@@ -1413,6 +1413,22 @@ async function hasAutoDailyAnalysis(fixtureId) {
   }
 }
 
+async function notifyAutoAnalysisRecord(record) {
+  if (!record || !record.auto_generated || record.analysis?.telegramNotified === true) return false;
+  const a = record.analysis || {};
+  const message = `🗓️ <b>WINSCOPE · GÜNÜN ANALİZİ HAZIR</b>\n\n⚽ <b>${record.home_team || "Ev sahibi"} - ${record.away_team || "Deplasman"}</b>\n🏆 ${record.league || "Lig bilgisi yok"}\n🕒 Başlama: ${record.match_date || "—"}\n🎯 Ana tercih: <b>${a.mainPick || "Veri yetersiz"}</b>\n🔁 Alternatif: ${a.alternative || "—"}\n⏱️ İY skor: ${a.halfTimeScore || "—"}\n🏁 MS ana skor: ${a.fullTimeScore || "—"}\n🎲 MS alternatif: ${a.alternativeFullTimeScore || "—"}\n📉 Piyasa kaynağı: ${a.marketDirection || "Bulunamadı"}\n\n<i>Maç önü verilerine dayalı tahmindir; garanti değildir.</i>`;
+  const sent = await sendTelegramMessage(message);
+  if (!sent) { console.warn(`[Daily analysis auto] telegram-not-sent fixture=${record.fixture_id}`); return false; }
+  record.analysis = { ...a, telegramNotified: true };
+  savedAnalyses.set(`auto-analysis-${Number(record.fixture_id)}`, record);
+  if (pool) {
+    try { await initDatabase(); await pool.query("UPDATE user_saved_analyses SET payload=$2 WHERE id=$1", [`auto-analysis-${Number(record.fixture_id)}`, JSON.stringify(record)]); }
+    catch (error) { console.warn(`[Daily analysis auto] telegram-flag-save-failed fixture=${record.fixture_id}: ${error.message}`); }
+  }
+  console.info(`[Daily analysis auto] telegram-sent fixture=${record.fixture_id}`);
+  return true;
+}
+
 async function runAutoDailyAnalyses() {
   if (autoDailyAnalysisBusy) return;
   autoDailyAnalysisBusy = true;
@@ -1444,7 +1460,15 @@ async function runAutoDailyAnalyses() {
     for (const item of upcoming) {
       if (processed >= 2) break;
       const f = item.f;
-      if (await hasAutoDailyAnalysis(f.id)) continue;
+      if (await hasAutoDailyAnalysis(f.id)) {
+        let existing = savedAnalyses.get(`auto-analysis-${Number(f.id)}`) || null;
+        if (!existing && pool) {
+          try { await initDatabase(); const prior = await pool.query("SELECT payload FROM user_saved_analyses WHERE id=$1 LIMIT 1", [`auto-analysis-${Number(f.id)}`]); if (prior.rows.length) existing = prior.rows[0].payload; }
+          catch (error) { console.warn(`[Daily analysis auto] existing-load-failed fixture=${f.id}: ${error.message}`); }
+        }
+        if (existing) await notifyAutoAnalysisRecord(existing);
+        continue;
+      }
       try {
         const evaluated = await evaluateMatchAdvanced(f.id);
         const { matchInfo, isFinished, isLive, odds, halfTimeDisplayScore, mainPickDisplay, smartPick, scorePrediction, confidenceScore } = evaluated;
@@ -1487,6 +1511,7 @@ async function runAutoDailyAnalyses() {
           );
         }
         console.info(`[Daily analysis auto] saved fixture=${f.id} ${f.home}-${f.away} kickoff=${f.fixtureDate} hours_before=${record.generated_hours_before_kickoff} source=${odds?.source || "none"}`);
+        await notifyAutoAnalysisRecord(record);
         processed++;
       } catch (error) {
         console.warn(`[Daily analysis auto] failed fixture=${f.id} ${f.home}-${f.away}: ${error.message}`);
@@ -1598,7 +1623,7 @@ setInterval(async () => {
     const turkeyDate = `${part("year")}-${part("month")}-${part("day")}`;
     const turkeyHour = Number(part("hour"));
     const turkeyMinute = Number(part("minute"));
-    if (turkeyHour === 1 && turkeyMinute < 5 && lastDailyEvaluationDate !== turkeyDate) {
+    if (turkeyHour >= 1 && turkeyHour < 12 && lastDailyEvaluationDate !== turkeyDate) {
       const pendingResults = [];
       for (const [draftId, couponInfo] of activeSentCoupons.entries()) {
         for (const pick of couponInfo.picks || []) {
@@ -1607,11 +1632,17 @@ setInterval(async () => {
           }
         }
       }
+      // Wait for at least one result. This lets sleeping/restarted Render instances
+      // catch up after 01:00 instead of sending an empty report and marking the day complete.
       const wonCount = pendingResults.filter(x => x.pick.won === true).length;
       const lostCount = pendingResults.filter(x => x.pick.won === false).length;
       const total = wonCount + lostCount;
       const pct = total ? Math.round(wonCount / total * 100) : 0;
-      const dailyMessage = `📊 <b>WINSCOPE GÜNÜN DEĞERLENDİRMESİ</b>
+      if (total === 0) {
+        console.info(`[Daily evaluation] ${turkeyDate} no unreported finished picks yet; will retry.`);
+      } else {
+      const detailLines = pendingResults.map(({couponInfo, pick}) => `${pick.won ? "✅" : "❌"} ${pick.home} - ${pick.away}: ${pick.finalScore || "skor yok"} · ${pick.market} · ${pick.won ? "Kazandı" : "Kaybetti"}`).join("\n");
+      const dailyMessage = `📊 <b>WINSCOPE DÜNÜN SONUÇLARI / GÜNÜN DEĞERLENDİRMESİ</b>
 
 📅 Tarih: ${turkeyDate}
 
@@ -1620,7 +1651,9 @@ setInterval(async () => {
 ❌ Kaybetti: <b>${lostCount}</b>
 📈 Başarı oranı: <b>%${pct}</b>
 
-${total ? "Değerlendirme, sonucu doğrulanmış WinScope Telegram tahminlerinden oluşturuldu." : "Bugün için sonucu doğrulanmış ve raporlanmamış tahmin bulunamadı. Veri yokken başarı oranı uydurulmadı."}`;
+${detailLines}
+
+<i>Yalnızca sonucu doğrulanmış ve takip edilen Telegram tahminleri dahildir.</i>`;
       const summarySent = await sendTelegramMessage(dailyMessage);
       if (summarySent) {
         lastDailyEvaluationDate = turkeyDate;
@@ -1631,6 +1664,7 @@ ${total ? "Değerlendirme, sonucu doğrulanmış WinScope Telegram tahminlerinde
         console.log(`[Daily evaluation] ${turkeyDate} günlük değerlendirmesi Telegram'a gönderildi.`);
       } else {
         console.warn("[Daily evaluation] Telegram gönderilemedi; aynı gün sonraki taramada yeniden denenecek.");
+      }
       }
     }
 
