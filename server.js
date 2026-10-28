@@ -343,18 +343,18 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
         const label = String(v.value ?? v.name ?? "").toLowerCase().trim();
         const n = toNumber(v.odd);
         if (n == null || n <= 1) continue;
-        if (/match winner|1x2|fulltime result|winner|match result/.test(name)) {
-          if (["home", "1", "team 1"].includes(label)) one.homeWin = n;
-          else if (["draw", "x"].includes(label)) one.draw = n;
-          else if (["away", "2", "team 2"].includes(label)) one.awayWin = n;
-        } else if (/home team|home goals|team 1 total|team 1 goals/.test(name) ||
-                   /away team|away goals|team 2 total|team 2 goals/.test(name)) {
+        if (/match winner|1x2|full.?time result|winner|match result|regular time result/.test(name)) {
+          if (["home", "1", "team 1", "1 (home)"].includes(label)) one.homeWin = n;
+          else if (["draw", "x", "tie"].includes(label)) one.draw = n;
+          else if (["away", "2", "team 2", "2 (away)"].includes(label)) one.awayWin = n;
+        } else if (/home team|home goals|team 1 total|team 1 goals|home team total/.test(name) ||
+                   /away team|away goals|team 2 total|team 2 goals|away team total/.test(name)) {
           const side = /home team|home goals|team 1/.test(name) ? "home" : "away";
           for (const line of ["0.5", "1.5"]) if (label.includes(line)) {
             if (label.includes("over")) one[`${side}Over${line.replace(".", "")}`] = n;
             if (label.includes("under")) one[`${side}Under${line.replace(".", "")}`] = n;
           }
-        } else if (/over\/under|goals over\/under|total goals|total/.test(name) &&
+        } else if (/over\s*\/?\s*under|goals over\/under|total goals|match goals|goal line|total/.test(name) &&
                    !/home team|away team|team total|team goals|home goals|away goals/.test(name)) {
           const isHalfTimeMarket = /first half|1st half|half time|half-time|1st period|first period/.test(name);
           for (const line of ["0.5", "1.5", "2.5", "3.5"]) if (label.includes(line)) {
@@ -363,9 +363,9 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
             if (label.includes("over")) one[`${prefix}${line.replace(".", "")}`] = n;
             if (label.includes("under")) one[`${underPrefix}${line.replace(".", "")}`] = n;
           }
-        } else if (/both teams to score|both teams score|both teams/.test(name)) {
-          if (["yes", "y"].includes(label)) one.bttsYes = n;
-          else if (["no", "n"].includes(label)) one.bttsNo = n;
+        } else if (/both teams to score|both teams score|both teams|btts/.test(name)) {
+          if (["yes", "y", "both teams to score - yes"].includes(label)) one.bttsYes = n;
+          else if (["no", "n", "both teams to score - no"].includes(label)) one.bttsNo = n;
         } else if (/asian handicap|handicap/.test(name)) {
           // Providers format AH selections inconsistently: "Home -0.5", "Home (-0.5)", "1 (-0.5)".
           const match = label.match(/^(home|away|team\s*1|team\s*2|1|2)\s*(?:\(\s*)?([+-]?\d+(?:\.\d+)?)(?:\s*\))?/i);
@@ -387,16 +387,20 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
       if (combined[key] == null && one[key] != null) {
         combined[key] = one[key];
         combined.sources[key] = book.source;
-        combined.source ??= book.source;
         if ((key === "handicapHome" || key === "handicapAway") && !combined.handicapSource) combined.handicapSource = book.source;
       }
     }
   }
   const hasOdds = keys.some(k => combined[k] != null);
   if (hasOdds) {
-    console.info(`[Odds diagnostic] parsed source=${combined.source || "unknown"} books=${books.length} AH_source=${combined.handicapSource || "none"} AH_home=${combined.handicapHome ?? "none"} AH_away=${combined.handicapAway ?? "none"} AH_home_line=${combined.handicapLine ?? "none"}`);
+    const usedSources = [...new Set(Object.values(combined.sources).filter(Boolean))];
+    combined.source = usedSources.join(" + ") || null;
+    const fallbackFields = Object.entries(combined.sources)
+      .filter(([key, source]) => source && !/bet365/i.test(source))
+      .map(([key, source]) => `${key}:${source}`);
+    console.info(`[Odds diagnostic] parsed preferred=Bet365 books=${books.length} sources=${usedSources.join(" + ") || "unknown"} fallbackFields=${fallbackFields.join(",") || "none"} AH_source=${combined.handicapSource || "none"} AH_home=${combined.handicapHome ?? "none"} AH_away=${combined.handicapAway ?? "none"} AH_home_line=${combined.handicapLine ?? "none"}`);
   } else {
-    console.warn(`[Odds diagnostic] no supported odds parsed from ${books.length} bookmaker rows`);
+    console.warn(`[Odds diagnostic] no supported odds parsed from ${books.length} bookmaker rows; fallback unavailable because API returned no parseable markets`);
   }
   return hasOdds ? combined : null;
 }
