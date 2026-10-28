@@ -673,9 +673,11 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
     if (line) return total > Number(line[1].replace(",", "."));
     return true;
   };
-  // Exact score is calculated independently of the recommended goal market.
-  // Filtering score candidates to fit the pick creates artificial high scores and harms calibration.
-  const selected = scores;
+  // Keep the exact-score forecast coherent with the primary market when that market is explicit.
+  // Rank only among scores that satisfy the main pick; retain the unrestricted distribution
+  // for probabilities and surprise scenarios so the model does not fabricate their likelihood.
+  const selected = scores.filter(x => marketSatisfiedByScore(preferredMarket, x.home, x.away));
+  const rankedScores = selected.length ? selected : scores;
 
   // Keep the half-time prediction internally consistent with the current score
   // during the first half; after half-time, use the actual half-time score.
@@ -717,8 +719,9 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
     ht = htScores[0]?.score || "0-0";
   }
 
-  const best = selected[0] || scores[0];
-  const alternative = selected.find(x => x.score !== best?.score) || scores.find(x => x.score !== best?.score);
+  rankedScores.sort((a, b) => b.p - a.p);
+  const best = rankedScores[0] || scores[0];
+  const alternative = rankedScores.find(x => x.score !== best?.score) || scores.find(x => x.score !== best?.score);
   const sixPlusProbability = scores.filter(x => x.home + x.away >= 6).reduce((sum, x) => sum + x.p, 0);
   const htBaseH = isLive ? hs : 0;
   const htBaseA = isLive ? as : 0;
@@ -1454,10 +1457,33 @@ async function hasAutoDailyAnalysis(fixtureId) {
   }
 }
 
+function escapeTelegramHtml(value) {
+  return String(value ?? "—").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function formatKickoffForTelegram(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "Saat bilgisi yok";
+  return new Intl.DateTimeFormat("tr-TR", {
+    timeZone: "Europe/Istanbul", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: false
+  }).format(date).replace(/\./g, "");
+}
+
 async function notifyAutoAnalysisRecord(record) {
   if (!record || !record.auto_generated || record.analysis?.telegramNotified === true) return false;
   const a = record.analysis || {};
-  const message = `🗓️ <b>WINSCOPE · GÜNÜN ANALİZİ HAZIR</b>\n\n⚽ <b>${record.home_team || "Ev sahibi"} - ${record.away_team || "Deplasman"}</b>\n🏆 ${record.league || "Lig bilgisi yok"}\n🕒 Başlama: ${record.match_date || "—"}\n🎯 Ana tercih: <b>${a.mainPick || "Veri yetersiz"}</b>\n🔁 Alternatif: ${a.alternative || "—"}\n⏱️ İY skor: ${a.halfTimeScore || "—"}\n🏁 MS ana skor: ${a.fullTimeScore || "—"}\n🎲 MS alternatif: ${a.alternativeFullTimeScore || "—"}\n📉 Piyasa kaynağı: ${a.marketDirection || "Bulunamadı"}\n\n<i>Maç önü verilerine dayalı tahmindir; garanti değildir.</i>`;
+  const home = escapeTelegramHtml(record.home_team || "Ev sahibi");
+  const away = escapeTelegramHtml(record.away_team || "Deplasman");
+  const league = escapeTelegramHtml(record.league || "Lig bilgisi yok");
+  const kickoff = escapeTelegramHtml(formatKickoffForTelegram(record.match_date));
+  const mainPick = escapeTelegramHtml(a.mainPick || "Veri yetersiz");
+  const alternative = escapeTelegramHtml(a.alternative || "—");
+  const htScore = escapeTelegramHtml(a.halfTimeScore || "—").replace(/^Tahmin:\s*/i, "");
+  const ftScore = escapeTelegramHtml(a.fullTimeScore || "—").replace(/^Tahmin:\s*/i, "");
+  const altScore = escapeTelegramHtml(a.alternativeFullTimeScore || "—").replace(/^Tahmin:\s*/i, "");
+  const market = escapeTelegramHtml(a.marketDirection || "Piyasa verisi bulunamadı");
+  const surprise = escapeTelegramHtml(a.surprise || "Hesaplanamadı");
+  const message = `📊 <b>WINSCOPE | GÜNÜN ANALİZİ</b>\n━━━━━━━━━━━━━━\n⚽ <b>${home} – ${away}</b>\n🏆 ${league}  ·  🕒 ${kickoff} (TSİ)\n\n<b>TERCİHLER</b>\n🎯 Ana: <b>${mainPick}</b>\n🔁 Alternatif: ${alternative}\n\n<b>SKOR TAHMİNLERİ</b>\n⏱️ İlk yarı: <b>${htScore}</b>\n🏁 Maç sonu: <b>${ftScore}</b>\n🎲 Alternatif skor: <b>${altScore}</b>\n\n<b>PİYASA</b>\n📉 ${market}\n✨ Sürpriz: ${surprise}\n━━━━━━━━━━━━━━\n<i>Maç önü verilerine dayalı olasılık tahmini; garanti değildir.</i>`;
   const sent = await sendTelegramMessage(message);
   if (!sent) { console.warn(`[Daily analysis auto] telegram-not-sent fixture=${record.fixture_id}`); return false; }
   record.analysis = { ...a, telegramNotified: true };
