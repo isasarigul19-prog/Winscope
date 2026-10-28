@@ -1388,7 +1388,6 @@ async function generateCouponLogic(dateStr) {
     coupon.picks.forEach(p => {
       tgMsg += `🏆 <b>${p.league}</b>
 ⚽ ${p.home} vs ${p.away}
-🔑 İddaa Kod: ${p.iddaaCode}
 🎯 Tercih: <b>${p.market}</b>
 -------------------
 `;
