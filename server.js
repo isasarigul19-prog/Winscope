@@ -333,7 +333,7 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
     "homeOver05","homeUnder05","homeOver15","homeUnder15","awayOver05","awayUnder05","awayOver15","awayUnder15",
     "bttsYes","bttsNo","handicapHome","handicapAway"];
   const combined = Object.fromEntries(keys.map(k => [k, null]));
-  combined.source = null; combined.sources = {}; combined.handicapLine = null;
+  combined.source = null; combined.sources = {}; combined.handicapLine = null; combined.handicapSource = null;
   for (const book of ordered) {
     const one = Object.fromEntries(keys.map(k => [k, null]));
     let handicapHomeLine = null, handicapAwayLine = null;
@@ -367,7 +367,8 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
           if (["yes", "y"].includes(label)) one.bttsYes = n;
           else if (["no", "n"].includes(label)) one.bttsNo = n;
         } else if (/asian handicap|handicap/.test(name)) {
-          const match = label.match(/(home|away|team\s*1|team\s*2|^1\b|^2\b)\s*([+-]?\d+(?:\.\d+)?)/i);
+          // Providers format AH selections inconsistently: "Home -0.5", "Home (-0.5)", "1 (-0.5)".
+          const match = label.match(/^(home|away|team\s*1|team\s*2|1|2)\s*(?:\(\s*)?([+-]?\d+(?:\.\d+)?)(?:\s*\))?/i);
           if (match) {
             const side = /home|team\s*1|^1\b/i.test(match[1]) ? "home" : "away";
             const lineValue = Number(match[2]);
@@ -387,10 +388,17 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
         combined[key] = one[key];
         combined.sources[key] = book.source;
         combined.source ??= book.source;
+        if ((key === "handicapHome" || key === "handicapAway") && !combined.handicapSource) combined.handicapSource = book.source;
       }
     }
   }
-  return keys.some(k => combined[k] != null) ? combined : null;
+  const hasOdds = keys.some(k => combined[k] != null);
+  if (hasOdds) {
+    console.info(`[Odds diagnostic] parsed source=${combined.source || "unknown"} books=${books.length} AH_source=${combined.handicapSource || "none"} AH_home=${combined.handicapHome ?? "none"} AH_away=${combined.handicapAway ?? "none"} AH_home_line=${combined.handicapLine ?? "none"}`);
+  } else {
+    console.warn(`[Odds diagnostic] no supported odds parsed from ${books.length} bookmaker rows`);
+  }
+  return hasOdds ? combined : null;
 }
 
 async function recordLiveOddsSnapshot(fixtureId, liveOdds, marketType = "live") {
@@ -403,7 +411,11 @@ async function recordLiveOddsSnapshot(fixtureId, liveOdds, marketType = "live") 
     handicapHome: toNumber(liveOdds?.handicapHome), handicapAway: toNumber(liveOdds?.handicapAway), handicapLine: toNumber(liveOdds?.handicapLine),
     bttsYes: toNumber(liveOdds?.bttsYes), bttsNo: toNumber(liveOdds?.bttsNo)
   };
-  if (!Object.values(current).some(v => v != null)) return { state: "MAÇ ÖNÜ ORAN YOK", trend: "ölçülemedi", changed: false };
+  if (!Object.values(current).some(v => v != null)) {
+    console.warn(`[Odds snapshot] fixture=${fixtureId} market=${marketType} no usable odds fields`);
+    return { state: "MAÇ ÖNÜ ORAN YOK", trend: "ölçülemedi", changed: false };
+  }
+  console.info(`[Odds snapshot] fixture=${fixtureId} market=${marketType} source=${liveOdds?.source || "unknown"} AH_source=${liveOdds?.handicapSource || "none"} AH_line=${current.handicapLine ?? "none"} AH_home=${current.handicapHome ?? "none"} AH_away=${current.handicapAway ?? "none"}`);
   if (!pool) return { state: "DB bağlantısı yok; ölçüm saklanamadı", trend: "ölçülemedi", changed: false };
   try {
     await initDatabase();
@@ -463,6 +475,13 @@ async function fetchRealOdds(fixtureId, liveMatch = false) {
   try {
     const payload = await apiGet(`/odds?fixture=${encodeURIComponent(fixtureId)}`);
     const preMatchOdds = parseOddsBookmakers(payload);
+    const rows = Array.isArray(payload) ? payload.length : 0;
+    if (!preMatchOdds) {
+      const bookmakerNames = (Array.isArray(payload) ? payload : []).flatMap(row => (row.bookmakers || []).map(book => book.name)).filter(Boolean);
+      console.warn(`[Pre-match odds diagnostic] fixture=${fixtureId} rows=${rows} bookmakers=${bookmakerNames.join(",") || "none"} parsed=none`);
+    } else {
+      console.info(`[Pre-match odds diagnostic] fixture=${fixtureId} rows=${rows} source=${preMatchOdds.source || "unknown"} AH_source=${preMatchOdds.handicapSource || "none"} AH_line=${preMatchOdds.handicapLine ?? "none"}`);
+    }
     return preMatchOdds ? { ...preMatchOdds, liveOdds: null, isLive: false } : {
       source: null, sources: {}, homeWin: null, draw: null, awayWin: null,
       over05: null, under05: null, over15: null, under15: null, over25: null, under25: null,
@@ -1365,6 +1384,125 @@ app.get("/api/live", async (_req, res) => {
     res.status(502).json({ error: "Canlı maçlar alınamadı.", detail: error.message, matches: [], results: 0 });
   }
 });
+
+// OTOMATİK GÜNÜN ANALİZLERİ: maç başlangıcına 6 saat veya daha az kaldığında
+// analizi bir kez üretir, arşive kaydeder. Bu işlem kuponu otomatik onaylamaz.
+const AUTO_DAILY_ANALYSIS_INTERVAL_MS = 5 * 60 * 1000;
+let autoDailyAnalysisBusy = false;
+let autoDailyAnalysisLastRun = null;
+
+function getIstanbulDateString(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Istanbul", year: "numeric", month: "2-digit", day: "2-digit"
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map(p => [p.type, p.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+async function hasAutoDailyAnalysis(fixtureId) {
+  const id = `auto-analysis-${Number(fixtureId)}`;
+  if (savedAnalyses.has(id)) return true;
+  if (!pool) return false;
+  try {
+    await initDatabase();
+    const result = await pool.query("SELECT 1 FROM user_saved_analyses WHERE id=$1 LIMIT 1", [id]);
+    return result.rowCount > 0;
+  } catch (error) {
+    console.warn(`[Daily analysis] existing-check failed fixture=${fixtureId}: ${error.message}`);
+    return false;
+  }
+}
+
+async function runAutoDailyAnalyses() {
+  if (autoDailyAnalysisBusy) return;
+  autoDailyAnalysisBusy = true;
+  autoDailyAnalysisLastRun = new Date().toISOString();
+  try {
+    const now = Date.now();
+    const dates = [...new Set([getIstanbulDateString(new Date(now)), getIstanbulDateString(new Date(now + 24 * 60 * 60 * 1000))])];
+    const upcoming = [];
+    for (const date of dates) {
+      try {
+        const payload = await cachedProviderRequest(`fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 5 * 60_000);
+        for (const raw of (payload.response || [])) {
+          const f = normalizeProviderMatch(raw);
+          if (f.status !== "NS" || !f.fixtureDate) continue;
+          const kickoff = new Date(f.fixtureDate).getTime();
+          const hoursToKickoff = (kickoff - now) / 3_600_000;
+          // Catch matches inside the 6-hour window. Late wake-ups are processed too.
+          if (Number.isFinite(kickoff) && hoursToKickoff > 0 && hoursToKickoff <= 6 && isStrictIddaaMatch(f)) {
+            upcoming.push({ f, hoursToKickoff });
+          }
+        }
+      } catch (error) {
+        console.warn(`[Daily analysis] fixture-list failed date=${date}: ${error.message}`);
+      }
+    }
+    upcoming.sort((a, b) => a.hoursToKickoff - b.hoursToKickoff);
+    let processed = 0;
+    // Limit each cycle to avoid exhausting the paid API quota; remaining matches are picked up next cycle.
+    for (const item of upcoming) {
+      if (processed >= 2) break;
+      const f = item.f;
+      if (await hasAutoDailyAnalysis(f.id)) continue;
+      try {
+        const evaluated = await evaluateMatchAdvanced(f.id);
+        const { matchInfo, isFinished, isLive, odds, halfTimeDisplayScore, mainPickDisplay, smartPick, scorePrediction, confidenceScore } = evaluated;
+        if (isFinished || isLive || !matchInfo?.fixtureDate) continue;
+        const id = `auto-analysis-${Number(f.id)}`;
+        const record = {
+          id,
+          fixture_id: Number(f.id),
+          home_team: f.home,
+          away_team: f.away,
+          league: f.league,
+          match_date: f.fixtureDate,
+          auto_generated: true,
+          generated_at: new Date().toISOString(),
+          generated_hours_before_kickoff: Math.round(item.hoursToKickoff * 100) / 100,
+          analysis: {
+            mainPick: mainPickDisplay,
+            alternative: smartPick?.alternative || "—",
+            halfTimeScore: `Tahmin: ${scorePrediction?.ht || "—"}`,
+            fullTimeScore: `Tahmin: ${scorePrediction?.main || "—"}`,
+            alternativeFullTimeScore: `Tahmin: ${scorePrediction?.alternative || "—"}`,
+            scorePredictionBasis: scorePrediction?.basis || "Maç önü oranlarından kalibre edilen olasılık modeli",
+            scoreConfidence: scorePrediction?.confidence ?? null,
+            surprise: smartPick?.surprise || "Yeterli veri yok",
+            surpriseScenarios: scorePrediction?.surpriseScenarios || [],
+            marketDirection: odds?.source
+              ? `Maç önü piyasa kaynağı: ${odds.source} · ${odds.movement?.trend || "hareket ölçülmedi"} · ${odds.movement?.state || "ilk ölçüm bekleniyor"}`
+              : "Maç önü piyasa oranı bulunamadı",
+            confidence: confidenceScore > 0 ? `Maç önü oran modeli · %${confidenceScore}` : "Güven puanı hesaplanamadı",
+            autoGenerated: true
+          },
+          created_at: new Date().toISOString()
+        };
+        savedAnalyses.set(id, record);
+        if (pool) {
+          await initDatabase();
+          await pool.query(
+            "INSERT INTO user_saved_analyses (id, fixture_id, payload) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING",
+            [id, record.fixture_id, JSON.stringify(record)]
+          );
+        }
+        console.info(`[Daily analysis auto] saved fixture=${f.id} ${f.home}-${f.away} kickoff=${f.fixtureDate} hours_before=${record.generated_hours_before_kickoff} source=${odds?.source || "none"}`);
+        processed++;
+      } catch (error) {
+        console.warn(`[Daily analysis auto] failed fixture=${f.id} ${f.home}-${f.away}: ${error.message}`);
+      }
+    }
+    if (upcoming.length || processed) console.info(`[Daily analysis auto] checked=${upcoming.length} generated=${processed} lastRun=${autoDailyAnalysisLastRun}`);
+  } catch (error) {
+    console.error(`[Daily analysis auto] scan failed: ${error.message}`);
+  } finally {
+    autoDailyAnalysisBusy = false;
+  }
+}
+
+// Run shortly after boot, then every five minutes. Idempotent fixture IDs prevent duplicates.
+setTimeout(() => runAutoDailyAnalyses().catch(() => {}), 15_000);
+setInterval(() => runAutoDailyAnalyses().catch(() => {}), AUTO_DAILY_ANALYSIS_INTERVAL_MS);
 
 // OTOMATİK TARAMA (Gerçek Zamanlı Telegram Alarm Tetikleyicisi + Sonuç Takipçisi)
 const AUTO_SCAN_INTERVAL_MS = 2 * 60 * 1000;
