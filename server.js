@@ -136,6 +136,7 @@ async function initDatabase() {
           over25 NUMERIC, under25 NUMERIC, over35 NUMERIC, under35 NUMERIC,
           home_win NUMERIC, draw_odd NUMERIC, away_win NUMERIC, btts_yes NUMERIC, btts_no NUMERIC,
           handicap_home NUMERIC, handicap_away NUMERIC, handicap_line NUMERIC,
+          handicap_source TEXT,
           observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         ALTER TABLE live_odds_snapshots ADD COLUMN IF NOT EXISTS market_type TEXT NOT NULL DEFAULT 'live';
@@ -150,6 +151,7 @@ async function initDatabase() {
         ALTER TABLE live_odds_snapshots ADD COLUMN IF NOT EXISTS handicap_home NUMERIC;
         ALTER TABLE live_odds_snapshots ADD COLUMN IF NOT EXISTS handicap_away NUMERIC;
         ALTER TABLE live_odds_snapshots ADD COLUMN IF NOT EXISTS handicap_line NUMERIC;
+        ALTER TABLE live_odds_snapshots ADD COLUMN IF NOT EXISTS handicap_source TEXT;
         CREATE INDEX IF NOT EXISTS live_odds_snapshots_fixture_time_idx
           ON live_odds_snapshots (fixture_id, observed_at DESC);
       `);
@@ -326,23 +328,33 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
         bets: row.odds.map(item => ({ name: item.name || item.bet || "", values: Array.isArray(item.values) ? item.values : [] })) });
     }
   }
-  const preferred = books.find(b => /bet365/i.test(b.source));
-  const ordered = preferred ? [preferred, ...books.filter(b => b !== preferred)] : books;
+  const ordered = [...books.filter(b => /bet365/i.test(b.source)), ...books.filter(b => !/bet365/i.test(b.source))];
   const keys = ["homeWin","draw","awayWin","over05","under05","over15","under15","over25","under25","over35","under35",
     "htOver05","htUnder05","htOver15","htUnder15","htOver25","htUnder25",
     "homeOver05","homeUnder05","homeOver15","homeUnder15","awayOver05","awayUnder05","awayOver15","awayUnder15",
     "bttsYes","bttsNo","handicapHome","handicapAway"];
   const combined = Object.fromEntries(keys.map(k => [k, null]));
   combined.source = null; combined.sources = {}; combined.handicapLine = null; combined.handicapSource = null;
+  const handicapPairs = [];
+
   for (const book of ordered) {
     const one = Object.fromEntries(keys.map(k => [k, null]));
-    let handicapHomeLine = null, handicapAwayLine = null;
+    const ahSelections = [];
     for (const bet of book.bets) {
       const name = String(bet.name || "").toLowerCase();
       for (const v of (bet.values || [])) {
         const label = String(v.value ?? v.name ?? "").toLowerCase().trim();
         const n = toNumber(v.odd);
         if (n == null || n <= 1) continue;
+        if (/asian handicap|handicap/.test(name)) {
+          const match = label.match(/^(home|away|team\s*1|team\s*2|1|2)\s*(?:\(\s*)?([+-]?\d+(?:\.\d+)?)(?:\s*\))?/i);
+          if (match) {
+            const side = /home|team\s*1|^1\b/i.test(match[1]) ? "home" : "away";
+            const line = Number(match[2]);
+            if (Number.isFinite(line)) ahSelections.push({ side, line, odd: n });
+          }
+          continue;
+        }
         if (/match winner|1x2|full.?time result|winner|match result|regular time result/.test(name)) {
           if (["home", "1", "team 1", "1 (home)"].includes(label)) one.homeWin = n;
           else if (["draw", "x", "tie"].includes(label)) one.draw = n;
@@ -366,31 +378,45 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
         } else if (/both teams to score|both teams score|both teams|btts/.test(name)) {
           if (["yes", "y", "both teams to score - yes"].includes(label)) one.bttsYes = n;
           else if (["no", "n", "both teams to score - no"].includes(label)) one.bttsNo = n;
-        } else if (/asian handicap|handicap/.test(name)) {
-          // Providers format AH selections inconsistently: "Home -0.5", "Home (-0.5)", "1 (-0.5)".
-          const match = label.match(/^(home|away|team\s*1|team\s*2|1|2)\s*(?:\(\s*)?([+-]?\d+(?:\.\d+)?)(?:\s*\))?/i);
-          if (match) {
-            const side = /home|team\s*1|^1\b/i.test(match[1]) ? "home" : "away";
-            const lineValue = Number(match[2]);
-            if (side === "home") { one.handicapHome = n; handicapHomeLine = lineValue; }
-            else { one.handicapAway = n; handicapAwayLine = lineValue; }
-          }
         }
       }
     }
-    if (one.handicapHome != null && one.handicapAway != null && handicapHomeLine != null && handicapAwayLine != null && Math.abs(handicapHomeLine + handicapAwayLine) < 0.26) {
-      combined.handicapLine ??= handicapHomeLine;
-    } else if (one.handicapHome == null || one.handicapAway == null) {
-      one.handicapHome = null; one.handicapAway = null;
+
+    const pairCandidates = [];
+    for (const h of ahSelections.filter(x => x.side === "home")) {
+      for (const a of ahSelections.filter(x => x.side === "away")) {
+        if (Math.abs(h.line + a.line) > 0.001) continue;
+        pairCandidates.push({ source: book.source, homeOdd: h.odd, awayOdd: a.odd,
+          homeLine: h.line, awayLine: a.line, preferredLine: Math.abs(h.line + 0.5) < 0.001 ? 0 : 1 });
+      }
     }
+    pairCandidates.sort((a, b) => a.preferredLine - b.preferredLine);
+    if (pairCandidates.length) handicapPairs.push(pairCandidates[0]);
+
     for (const key of keys) {
+      if (key.startsWith("handicap")) continue;
       if (combined[key] == null && one[key] != null) {
         combined[key] = one[key];
         combined.sources[key] = book.source;
-        if ((key === "handicapHome" || key === "handicapAway") && !combined.handicapSource) combined.handicapSource = book.source;
       }
     }
   }
+
+  handicapPairs.sort((a, b) => {
+    const pa = /bet365/i.test(a.source) ? 0 : 1;
+    const pb = /bet365/i.test(b.source) ? 0 : 1;
+    return a.preferredLine - b.preferredLine || pa - pb;
+  });
+  const ah = handicapPairs[0];
+  if (ah) {
+    combined.handicapHome = ah.homeOdd;
+    combined.handicapAway = ah.awayOdd;
+    combined.handicapLine = ah.homeLine;
+    combined.handicapSource = ah.source;
+    combined.sources.handicapHome = ah.source;
+    combined.sources.handicapAway = ah.source;
+  }
+
   const hasOdds = keys.some(k => combined[k] != null);
   if (hasOdds) {
     const usedSources = [...new Set(Object.values(combined.sources).filter(Boolean))];
@@ -404,7 +430,6 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
   }
   return hasOdds ? combined : null;
 }
-
 async function recordLiveOddsSnapshot(fixtureId, liveOdds, marketType = "live") {
   const current = {
     over05: toNumber(liveOdds?.over05), under05: toNumber(liveOdds?.under05),
@@ -436,16 +461,19 @@ async function recordLiveOddsSnapshot(fixtureId, liveOdds, marketType = "live") 
       const handicapLineChanged = key.startsWith("handicap") && prev &&
         toNumber(prev.handicap_line) != null && current.handicapLine != null &&
         Math.abs(Number(prev.handicap_line) - Number(current.handicapLine)) > 0.001;
-      deltas[key] = !handicapLineChanged && current[key] != null && old != null
+      const handicapSourceChanged = key.startsWith("handicap") && prev &&
+        (!prev.handicap_source || !liveOdds?.handicapSource ||
+         String(prev.handicap_source) !== String(liveOdds.handicapSource));
+      deltas[key] = !handicapLineChanged && !handicapSourceChanged && current[key] != null && old != null
         ? Number((current[key] - old).toFixed(3)) : null;
     }
     // Persist no more than once per 90 seconds to avoid comparing identical cached responses.
     if (!prev || ageMs >= 90_000) {
       await pool.query(
         `INSERT INTO live_odds_snapshots
-         (fixture_id,source,market_type,over05,under05,over15,under15,over25,under25,over35,under35,home_win,draw_odd,away_win,btts_yes,btts_no,handicap_home,handicap_away,handicap_line)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
-        [Number(fixtureId), String(liveOdds.source || "API-Football oran"), marketType, current.over05,current.under05,current.over15,current.under15,current.over25,current.under25,current.over35,current.under35,current.homeWin,current.draw,current.awayWin,current.bttsYes,current.bttsNo,current.handicapHome,current.handicapAway,current.handicapLine]
+         (fixture_id,source,market_type,over05,under05,over15,under15,over25,under25,over35,under35,home_win,draw_odd,away_win,btts_yes,btts_no,handicap_home,handicap_away,handicap_line,handicap_source)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+        [Number(fixtureId), String(liveOdds.source || "API-Football oran"), marketType, current.over05,current.under05,current.over15,current.under15,current.over25,current.under25,current.over35,current.under35,current.homeWin,current.draw,current.awayWin,current.bttsYes,current.bttsNo,current.handicapHome,current.handicapAway,current.handicapLine,liveOdds.handicapSource || null]
       );
     }
     // For the pre-match strategy, prioritize the actual AH -0.5 side if that line was parsed.
@@ -601,6 +629,15 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
       { key: 'draw', target: inv[1] / sum, weight: 1.4 },
       { key: 'away', target: inv[2] / sum, weight: 1.7 });
   }
+  // AH -0.5 is equivalent to a home win. Add it as a corroborating signal only
+  // when both sides of the exact same bookmaker line were parsed.
+  const ahHome = toNumber(o.handicapHome), ahAway = toNumber(o.handicapAway);
+  const ahLine = toNumber(o.handicapLine);
+  if (ahHome > 1 && ahAway > 1 && ahLine != null && Math.abs(Math.abs(ahLine) - 0.5) < 0.001) {
+    const ahHomeProbability = (1 / ahHome) / ((1 / ahHome) + (1 / ahAway));
+    if (ahLine < 0) targets.push({ key: 'home', target: ahHomeProbability, weight: 0.8 });
+    else targets.push({ key: 'away', target: 1 - ahHomeProbability, weight: 0.8 });
+  }
   const o25p = implied('over25', 'under25');
   const o15p = implied('over15', 'under15');
   const o35p = implied('over35', 'under35');
@@ -636,6 +673,21 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
       for (const t of targets) loss += t.weight * Math.pow(v[t.key] - t.target, 2);
       if (loss < bestLoss) { bestLoss = loss; lh = h; la = a; }
     }
+  }
+  // A verified pre-match AH -0.5 odds drop can gently tilt the score model
+  // toward that side. Movement is ignored unless source and handicap line matched.
+  const movement = o.movement || {};
+  if (Math.abs(Math.abs(ahLine ?? 99) - 0.5) < 0.001 &&
+      ["handicapHome", "handicapAway"].includes(movement.comparedMarket) &&
+      ["oran düşüyor", "oran yükseliyor"].includes(String(movement.trend || "").toLocaleLowerCase("tr-TR"))) {
+    const drop = Math.min(12, Math.abs(Number(movement.dropPercent) || 0)) / 100;
+    const step = Math.min(0.14, drop * 1.1);
+    const selectedHome = ahLine < 0 && movement.comparedMarket === "handicapHome";
+    const selectedAway = ahLine > 0 && movement.comparedMarket === "handicapAway";
+    const favorable = String(movement.trend).toLocaleLowerCase("tr-TR") === "oran düşüyor" ? 1 : -1;
+    if (selectedHome) { lh += favorable * step; la -= favorable * step * 0.25; }
+    if (selectedAway) { la += favorable * step; lh -= favorable * step * 0.25; }
+    console.info(`[Score model AH] source=${o.handicapSource || "unknown"} line=${ahLine} market=${movement.comparedMarket} trend=${movement.trend} adjustment=${step.toFixed(3)}`);
   }
   lh = Math.max(0.20, Math.min(3.8, lh));
   la = Math.max(0.20, Math.min(3.8, la));
@@ -686,6 +738,7 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
   // Keep the half-time prediction internally consistent with the current score
   // during the first half; after half-time, use the actual half-time score.
   let ht;
+  let htScoresForPrediction = [];
   if (isLive && minute >= 45) {
     ht = `${matchInfo?.htHomeScore ?? hs}-${matchInfo?.htAwayScore ?? as}`;
   } else {
@@ -710,22 +763,27 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
       htLH *= scale;
       htLA *= scale;
     }
-    const htScores = [];
     for (let addH = 0; addH <= 4; addH++) {
       for (let addA = 0; addA <= 4; addA++) {
-        htScores.push({
+        htScoresForPrediction.push({
+          home: htBaseH + addH, away: htBaseA + addA,
           score: `${htBaseH + addH}-${htBaseA + addA}`,
           p: pmf(addH, htLH) * pmf(addA, htLA)
         });
       }
     }
-    htScores.sort((a, b) => b.p - a.p);
-    ht = htScores[0]?.score || "0-0";
+    htScoresForPrediction.sort((a, b) => b.p - a.p);
+    ht = htScoresForPrediction[0]?.score || "0-0";
   }
 
   rankedScores.sort((a, b) => b.p - a.p);
   const best = rankedScores[0] || scores[0];
   const alternative = rankedScores.find(x => x.score !== best?.score) || scores.find(x => x.score !== best?.score);
+  // The predicted half-time score must be possible given the predicted full-time score.
+  if (!(isLive && minute >= 45) && best && htScoresForPrediction.length) {
+    const compatibleHt = htScoresForPrediction.find(x => x.home <= best.home && x.away <= best.away);
+    if (compatibleHt) ht = compatibleHt.score;
+  }
   const sixPlusProbability = scores.filter(x => x.home + x.away >= 6).reduce((sum, x) => sum + x.p, 0);
   const htBaseH = isLive ? hs : 0;
   const htBaseA = isLive ? as : 0;
@@ -756,7 +814,7 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
     {label:'6+ GOL', probability: sixPlusProbability},
     {label:'2/1 İY/MS', probability: htft['2/1']},
     {label:'1/2 İY/MS', probability: htft['1/2']}
-  ].sort((a,b)=>b.probability-a.probability).map(x=>({...x, percent:Math.round(x.probability*1000)/10}));
+  ].map(x=>({...x, percent:Math.round(x.probability*1000)/10}));
   return {
     main: best?.score || `${baseH}-${baseA}`,
     alternative: alternative?.score || best?.score || `${baseH}-${baseA}`,
