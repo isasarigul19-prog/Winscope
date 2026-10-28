@@ -32,6 +32,8 @@ const providerInFlight = new Map();
 let providerRateLimitedUntil = 0;
 
 const savedAnalyses = new Map();
+// Keep pre-match score predictions stable across repeated requests for the same fixture.
+const stableScorePredictionCache = new Map();
 const savedCoupons = new Map();
 let liveCouponScanCursor = 0;
 let autoAlarmScanCursor = 0;
@@ -628,6 +630,7 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], histor
   if (!targets.length && !hasFormFallback) {
     console.warn(`[Score model] no prematch odds and no complete recent form; fixture=${matchInfo?.fixtureId ?? matchInfo?.id ?? "unknown"}; score prediction withheld`);
     return { main: "Veri yetersiz", alternative: "Veri yetersiz", ht: "Veri yetersiz", surpriseScenarios: [], confidence: null,
+      modelMode: "insufficient-data",
       basis: "Maç önü oranı ve iki takım için yeterli gerçek geçmiş maç verisi bulunamadı" };
   }
   const dist = (lambda) => Array.from({ length: 10 }, (_, k) => poissonPmf(k, lambda));
@@ -784,10 +787,44 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], histor
     ht,
     surpriseScenarios,
     confidence: best ? Math.round(best.p * 1000) / 10 : null,
+    modelMode,
     basis: targets.length
       ? `Maç önü piyasa olasılıklarına uyarlanmış skor modeli (${targets.length} piyasa sinyali); garanti değildir`
       : `Son tamamlanmış maçların gerçek gol ortalamalarına dayalı, küçük örneklem için ortalamaya çekilmiş yedek model (${formH.sampleSize}/${formA.sampleSize} maç); oran analizi değildir ve düşük güvenlidir`
   };
+}
+
+
+function getStableScorePrediction(fixtureId, odds, matchInfo, liveStats, history) {
+  const id = String(fixtureId ?? matchInfo?.id ?? "");
+  const status = String(matchInfo?.status || "NS").toUpperCase();
+  const minute = Number(matchInfo?.minute) || 0;
+  const isPrematch = !minute && !["LIVE", "HT", "1H", "2H", "FT", "AET", "PEN"].includes(status);
+  if (!id || !isPrematch) {
+    return scorePredictionFromPrematchOdds(odds, matchInfo, liveStats, history);
+  }
+
+  const cached = stableScorePredictionCache.get(id);
+  const fresh = scorePredictionFromPrematchOdds(odds, matchInfo, liveStats, history);
+  const now = Date.now();
+  const stale = cached && now - cached.at > 12 * 60 * 60 * 1000;
+  const freshHasOdds = fresh.modelMode === "prematch-odds";
+  const cachedHasOdds = cached?.prediction?.modelMode === "prematch-odds";
+
+  // Keep a fixture's pre-match score stable. Upgrade form-only forecasts if real
+  // pre-match markets become available; never downgrade an odds-based forecast.
+  if (cached && !stale && !(freshHasOdds && !cachedHasOdds)) {
+    console.info(`[Score stability] fixture=${id} reused=${cached.prediction.modelMode || "cached"} ageMin=${Math.round((now-cached.at)/60000)}`);
+    return cached.prediction;
+  }
+
+  stableScorePredictionCache.set(id, { at: now, prediction: fresh });
+  console.info(`[Score stability] fixture=${id} stored=${fresh.modelMode || "unknown"}`);
+  if (stableScorePredictionCache.size > 1500) {
+    const oldestKey = stableScorePredictionCache.keys().next().value;
+    stableScorePredictionCache.delete(oldestKey);
+  }
+  return fresh;
 }
 
 async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
@@ -845,7 +882,7 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
 
   const teamForm = null;
   const smartPick = decideSmartMarket(null, odds, currentTotalGoals, liveStats, matchInfo);
-  const scorePrediction = scorePredictionFromPrematchOdds(odds, matchInfo, liveStats, history);
+  const scorePrediction = getStableScorePrediction(fixtureId, odds, matchInfo, liveStats, history);
   const surpriseScenariosText = (scorePrediction.surpriseScenarios || [])
     .map(x => `${x.label} %${x.percent}`).join(" · ");
   smartPick.surprise = surpriseScenariosText || "Sürpriz olasılığı hesaplanamadı";
