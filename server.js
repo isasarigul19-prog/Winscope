@@ -1408,6 +1408,95 @@ async function generateCouponLogic(dateStr) {
   }
 }
 
+async function generateSurpriseCouponLogic(dateStr) {
+  try {
+    // Scan the complete selected-date bulletin. Kickoff order/time is not a filter.
+    const payload = await cachedProviderRequest(`fixtures:${dateStr}`, `/fixtures?date=${dateStr}&timezone=Europe/Istanbul`, 5 * 60_000);
+    const rawMatches = Array.isArray(payload?.response) ? payload.response : [];
+    const fixtures = rawMatches
+      .map(m => normalizeProviderMatch(m))
+      .filter(m => m.status === "NS" && isStrictIddaaMatch(m));
+
+    const picks = [];
+    const diagnostics = { bulletinMatches: fixtures.length, evaluated: 0, usable: 0, errors: 0 };
+    for (const f of fixtures) {
+      try {
+        diagnostics.evaluated++;
+        const evalData = await evaluateMatchAdvanced(f.id);
+        const market = String(evalData?.smartPick?.mainPick || "");
+        const confidence = Number(evalData?.confidenceScore);
+        const oddsAvailable = Boolean(evalData?.odds?.source);
+        if (Number.isFinite(confidence) && confidence >= 55 &&
+            isPreMatchCouponMarketAllowed(market) && oddsAvailable) {
+          diagnostics.usable++;
+          picks.push({
+            fixtureId: f.id,
+            iddaaCode: f.iddaaCode,
+            home: f.home,
+            away: f.away,
+            league: f.league,
+            kickoff: f.fixtureDate,
+            market,
+            marketConfidence: confidence,
+            source: "Maç önü verisi; sürpriz 10'lu kombin",
+            scorePrediction: evalData?.fullTimeScore || evalData?.scorePrediction?.main || null
+          });
+        }
+      } catch (e) {
+        diagnostics.errors++;
+        console.warn(`[Surprise coupon] fixture=${f.id} evaluation failed: ${e.message}`);
+      }
+    }
+
+    // Highest model confidence first; unique fixture IDs only. No fabricated fillers.
+    picks.sort((a, b) => (Number(b.marketConfidence) || 0) - (Number(a.marketConfidence) || 0));
+    const unique = [];
+    const seen = new Set();
+    for (const pick of picks) {
+      if (seen.has(String(pick.fixtureId))) continue;
+      seen.add(String(pick.fixtureId));
+      unique.push(pick);
+      if (unique.length === 10) break;
+    }
+
+    const coupon = {
+      draftId: `winscope-surprise-${dateStr}-${Date.now()}`,
+      date: dateStr,
+      status: unique.length ? "PENDING_APPROVAL" : "NO_MATCHES",
+      picks: unique,
+      note: unique.length
+        ? `Bültendeki ${diagnostics.bulletinMatches} uygun maç tarandı. Güven eşiğini geçen ${unique.length} maç bulundu; 10 maç tamamlanamadıysa eksik sayıda bırakıldı.`
+        : `Bültendeki ${diagnostics.bulletinMatches} maça bakıldı ancak gerçek maç önü oranı ve güven eşiğini geçen uygun tercih bulunamadı.`,
+      diagnostics
+    };
+    if (unique.length) {
+      savedCoupons.set(coupon.draftId, coupon);
+      const tgMsg = `🎲 <b>WINSCOPE SÜRPRİZ KUPONU</b>\n📅 Tarih: ${dateStr}\n⚽ Seçilen maç: ${unique.length}/10\n\n` +
+        unique.map((p, i) => `${i + 1}. <b>${p.home} - ${p.away}</b>\n🎯 ${p.market}`).join("\n\n") +
+        `\n\n10 maçlık zor kombin taslağıdır; garanti değildir.`;
+      await sendTelegramMessage(tgMsg);
+    }
+    console.info(`[Surprise coupon] date=${dateStr} bulletin=${diagnostics.bulletinMatches} evaluated=${diagnostics.evaluated} usable=${diagnostics.usable} selected=${unique.length} errors=${diagnostics.errors}`);
+    return coupon;
+  } catch (error) {
+    console.error(`[Surprise coupon] date=${dateStr} failed: ${error.message}`);
+    return {
+      draftId: `winscope-surprise-error-${Date.now()}`,
+      date: dateStr,
+      status: "ERROR",
+      picks: [],
+      note: "Bülten taraması sırasında hata oluştu; logları kontrol edin."
+    };
+  }
+}
+
+app.get("/api/coupon/surprise", async (req, res) => {
+  const date = String(req.query.date || new Date().toISOString().split("T")[0]);
+  const couponData = await generateSurpriseCouponLogic(date);
+  if (couponData?.draftId) savedCoupons.set(couponData.draftId, couponData);
+  res.json(couponData);
+});
+
 app.get("/api/coupon/daily", async (req, res) => {
   const date = String(req.query.date || new Date().toISOString().split("T")[0]);
   const couponData = await generateCouponLogic(date);
