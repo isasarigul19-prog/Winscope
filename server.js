@@ -660,7 +660,9 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], histor
   }
   lh = Math.max(0.20, Math.min(3.8, lh));
   la = Math.max(0.20, Math.min(3.8, la));
-  console.info(`[Score model] fitted markets=${targets.map(t => t.key).join(",")} lambdaHome=${lh.toFixed(2)} lambdaAway=${la.toFixed(2)} loss=${bestLoss.toFixed(4)}`);
+  const lossText = Number.isFinite(bestLoss) ? bestLoss.toFixed(4) : "n/a (form fallback)";
+  const modelMode = targets.length ? "prematch-odds" : (hasFormFallback ? "team-form-fallback" : "insufficient-data");
+  console.info(`[Score model] mode=${modelMode} markets=${targets.map(t => t.key).join(",") || "none"} lambdaHome=${lh.toFixed(2)} lambdaAway=${la.toFixed(2)} loss=${lossText}`);
 
   const status = String(matchInfo?.status || "NS").toUpperCase();
   const minute = Math.max(0, Math.min(90, Number(matchInfo?.minute) || 0));
