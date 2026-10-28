@@ -317,7 +317,7 @@ async function footballDataRequest(pathname) {
 async function apiGet(pathname) {
   // Endpoint-specific cache reduces repeated requests to the paid football API.
   let ttl = PROVIDER_CACHE_MS.fixture;
-  if (pathname.startsWith("/odds/live")) ttl = 15_000;
+  if (pathname.startsWith("/odds/live")) ttl = 2 * 60_000;
   else if (pathname.startsWith("/odds?")) ttl = 10 * 60_000;
   else if (pathname.startsWith("/fixtures/statistics?")) ttl = 90_000;
   else if (pathname.startsWith("/fixtures?id=")) ttl = 2 * 60_000;
@@ -485,100 +485,30 @@ async function recordLiveOddsSnapshot(fixtureId, liveOdds, marketType = "live") 
 }
 
 async function fetchRealOdds(fixtureId, liveMatch = false) {
-  // Pre-match odds anchor the forecast. For live matches, fetch in-play odds separately
-  // and use them only for live-market selection; never overwrite the pre-match baseline.
-  const emptyOdds = () => ({
-    source: null, sources: {}, homeWin: null, draw: null, awayWin: null,
-    over05: null, under05: null, over15: null, under15: null, over25: null, under25: null,
-    over35: null, under35: null, htOver05: null, htUnder05: null, htOver15: null, htUnder15: null,
-    htOver25: null, htUnder25: null, homeOver05: null, homeUnder05: null, awayOver05: null,
-    awayUnder05: null, homeOver15: null, homeUnder15: null, awayOver15: null, awayUnder15: null,
-    bttsYes: null, bttsNo: null, handicapHome: null, handicapAway: null, handicapLine: null
-  });
-  let preMatchOdds = null;
-  let liveOdds = null;
+  // WinScope rule: use only pre-match odds. Never request live odds.
   try {
     const payload = await apiGet(`/odds?fixture=${encodeURIComponent(fixtureId)}`);
-    preMatchOdds = parseOddsBookmakers(payload);
+    const preMatchOdds = parseOddsBookmakers(payload);
     const rows = Array.isArray(payload) ? payload.length : 0;
     if (!preMatchOdds) {
       const bookmakerNames = (Array.isArray(payload) ? payload : []).flatMap(row => (row.bookmakers || []).map(book => book.name)).filter(Boolean);
       console.warn(`[Pre-match odds diagnostic] fixture=${fixtureId} rows=${rows} bookmakers=${bookmakerNames.join(",") || "none"} parsed=none`);
     } else {
-      console.info(`[Pre-match odds diagnostic] fixture=${fixtureId} rows=${rows} source=${preMatchOdds.source || "unknown"}`);
+      console.info(`[Pre-match odds diagnostic] fixture=${fixtureId} rows=${rows} source=${preMatchOdds.source || "unknown"} AH_source=${preMatchOdds.handicapSource || "none"} AH_line=${preMatchOdds.handicapLine ?? "none"}`);
     }
+    return preMatchOdds ? { ...preMatchOdds, liveOdds: null, isLive: false } : {
+      source: null, sources: {}, homeWin: null, draw: null, awayWin: null,
+      over05: null, under05: null, over15: null, under15: null, over25: null, under25: null,
+      over35: null, under35: null, htOver05: null, htUnder05: null, htOver15: null, htUnder15: null,
+      htOver25: null, htUnder25: null, homeOver05: null, homeUnder05: null, awayOver05: null,
+      awayUnder05: null, homeOver15: null, homeUnder15: null, awayOver15: null, awayUnder15: null,
+      bttsYes: null, bttsNo: null, handicapHome: null, handicapAway: null, handicapLine: null,
+      liveOdds: null, isLive: false
+    };
   } catch (error) {
     console.warn(`[Pre-match odds unavailable] fixture=${fixtureId}: ${error.message}`);
+    return { source: null, sources: {}, liveOdds: null, isLive: false };
   }
-
-  if (liveMatch) {
-    try {
-      const livePayload = await apiGet(`/odds/live?fixture=${encodeURIComponent(fixtureId)}`);
-      const parsedLive = parseOddsBookmakers(livePayload, "API-Football Live");
-      if (parsedLive) {
-        liveOdds = { ...parsedLive, isLive: true, observedAt: new Date().toISOString() };
-        console.info(`[Live odds diagnostic] fixture=${fixtureId} source=${liveOdds.source || "unknown"} parsed=yes`);
-      } else {
-        liveOdds = { ...emptyOdds(), source: null, sources: {}, isLive: false };
-        console.warn(`[Live odds diagnostic] fixture=${fixtureId} parsed=none; live decision may fall back to pre-match odds`);
-      }
-    } catch (error) {
-      liveOdds = { ...emptyOdds(), source: null, sources: {}, isLive: false };
-      console.warn(`[Live odds unavailable] fixture=${fixtureId}: ${error.message}`);
-    }
-  }
-
-  return {
-    ...emptyOdds(), ...(preMatchOdds || {}),
-    source: preMatchOdds?.source || null,
-    sources: preMatchOdds?.sources || {},
-    liveOdds,
-    isLive: Boolean(liveOdds?.isLive)
-  };
-}
-
-function selectOddsForLiveMarket(preMatchOdds, liveOdds) {
-  const pre = preMatchOdds || {};
-  const live = liveOdds?.isLive ? liveOdds : null;
-  if (!live) return { ...pre, liveOddsUsed: false, decisionOddsSource: pre.source || null };
-
-  const result = { ...pre, liveOddsUsed: false, decisionOddsSource: null };
-  // Keep each over/under pair from the same source. Never create a probability
-  // by mixing one live side with one pre-match side.
-  const pairs = [
-    ["over05", "under05"], ["over15", "under15"], ["over25", "under25"], ["over35", "under35"],
-    ["htOver05", "htUnder05"], ["htOver15", "htUnder15"], ["htOver25", "htUnder25"],
-    ["homeOver05", "homeUnder05"], ["homeOver15", "homeUnder15"],
-    ["awayOver05", "awayUnder05"], ["awayOver15", "awayUnder15"],
-    ["bttsYes", "bttsNo"]
-  ];
-  const usedSources = new Set();
-  for (const pair of pairs) {
-    const [a, b] = pair;
-    if (toNumber(live[a]) > 1 && toNumber(live[b]) > 1) {
-      result[a] = live[a]; result[b] = live[b];
-      result.liveOddsUsed = true;
-      usedSources.add(live.source || "API-Football Live");
-    }
-  }
-  // Match-winner market is also replaced only as a complete 1X2 set.
-  if (toNumber(live.homeWin) > 1 && toNumber(live.draw) > 1 && toNumber(live.awayWin) > 1) {
-    result.homeWin = live.homeWin; result.draw = live.draw; result.awayWin = live.awayWin;
-    result.liveOddsUsed = true;
-    usedSources.add(live.source || "API-Football Live");
-  }
-  // A live bookmaker may expose only one-sided team-goal markets; use them only
-  // when their exact matching pre-match fields are not being paired as O/U.
-  for (const key of ["homeOver05", "homeOver15", "awayOver05", "awayOver15"]) {
-    if (toNumber(live[key]) > 1 && toNumber(live[key.replace("Over", "Under")]) > 1) {
-      result[key] = live[key];
-      result[key.replace("Over", "Under")] = live[key.replace("Over", "Under")];
-      result.liveOddsUsed = true;
-      usedSources.add(live.source || "API-Football Live");
-    }
-  }
-  result.decisionOddsSource = result.liveOddsUsed ? [...usedSources].join(" + ") : (pre.source || null);
-  return result;
 }
 
 function isActionableMarket(marketText) {
@@ -589,11 +519,10 @@ function isActionableMarket(marketText) {
 }
 
 function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, matchInfo) {
-  const baseOdds = odds || {};
+  const o = odds || {};
   const live = Array.isArray(liveStats) ? liveStats : [];
   const minute = Number(matchInfo?.minute || 0);
   const isLive = !!matchInfo && (matchInfo.status === "LIVE" || matchInfo.status === "HT" || (minute > 0 && matchInfo.status !== "FT"));
-  const o = isLive ? selectOddsForLiveMarket(baseOdds, baseOdds.liveOdds) : baseOdds;
   const goals = Number(currentTotalGoals || 0);
   let shotsOnTarget = 0, totalShots = 0, corners = 0, usableStatFields = 0;
   for (const team of live) for (const st of (Array.isArray(team.statistics) ? team.statistics : [])) {
@@ -666,13 +595,11 @@ function decideSmartMarket(_historyData, odds, currentTotalGoals, liveStats, mat
   });
   candidates.sort((a,b)=>b.rank-a.rank);
   const top=candidates[0], next=candidates.find(x=>x.label!==top?.label);
-  const oddsBasis = isLive ? (o.liveOddsUsed ? "canlı oranlar (maç önü oranları referans alınarak)" : "canlı oran bulunamadığı için maç önü oranları") : "maç önü oranları";
-  const scoreText = top ? `${top.label} ${oddsBasis} üzerinden hesaplanan piyasa göstergesi %${top.pct.toFixed(1)}${isLive ? `; canlı skor ${currentHome}-${currentAway}, dakika ${minute}; canlı istatistik: ${shotsOnTarget} isabetli şut, ${totalShots} şut, ${corners} korner; istatistik alanı ${hasUsableLiveStats ? "kullanılabilir" : "yetersiz"}; kalan süre ve gereken gol sayısı filtresi uygulandı` : ""}.` : (isLive && !hasUsableLiveStats ? "Canlı istatistikler okunabilir değil veya eksik; güvenilir canlı tercih üretilmedi." : "İzin verilen pazarlarda kullanılabilir oran bulunamadı." );
+  const scoreText = top ? `${top.label} maç önü oranlarından hesaplanan piyasa göstergesi %${top.pct.toFixed(1)}${isLive ? `; canlı skor ${currentHome}-${currentAway}, dakika ${minute}; canlı istatistik: ${shotsOnTarget} isabetli şut, ${totalShots} şut, ${corners} korner; istatistik alanı ${hasUsableLiveStats ? "kullanılabilir" : "yetersiz"}; kalan süre ve gereken gol sayısı filtresi uygulandı` : ""}.` : (isLive && !hasUsableLiveStats ? "Canlı istatistikler okunabilir değil veya eksik; güvenilir canlı tercih üretilmedi." : "İzin verilen pazarlarda kullanılabilir maç önü oranı bulunamadı." );
   return { mainPick:top?.label || "PİYASA ORANI YETERSİZ", alternative:next?.label || "—",
     confidence:top ? Math.round(top.pct) : null, rationale:scoreText,
     marketProbabilities:{}, marketImpliedProbabilities:probs, surprise:"Ayrı skor olasılık modelinden hesaplanır",
-    oddsSource:o.decisionOddsSource || o.source || null,
-    oddsDirection: isLive && o.liveOddsUsed ? "Canlı oran + maç önü referansı" : (isLive ? "Canlı oran bulunamadı; maç önü oranı referans alındı" : "Maç önü oranı") };
+    oddsSource:o.source || null, oddsDirection:"Oran hareketi kullanılmıyor" };
 }
 
 function poissonPmf(k, lambda) {
@@ -952,34 +879,47 @@ function scoreSupportsMarket(label, prediction) {
   if (market === "KG VAR" && scores.every(s => s.h < 1 || s.a < 1)) return false;
   return true;
 }
-function reconcilePicksWithScore(smartPick, scorePrediction, isLive) {
+function marketsEquivalentAtCurrentScore(a, b, matchInfo, isLive) {
+  if (!isLive) return false;
+  const home = Number(matchInfo?.homeScore || 0);
+  const away = Number(matchInfo?.awayScore || 0);
+  const pair = new Set([String(a || "").toUpperCase(), String(b || "").toUpperCase()]);
+  // Once the away team has scored, KG VAR and home 0.5+ require the same remaining event
+  // whenever the home team has not scored yet. Do not present them as separate picks.
+  if (away >= 1 && home === 0 && pair.has("KG VAR") && pair.has("EV 0.5 ÜST")) return true;
+  // Once the home team has scored, KG VAR and away 0.5+ are equivalent if away is still on zero.
+  if (home >= 1 && away === 0 && pair.has("KG VAR") && pair.has("DEP 0.5 ÜST")) return true;
+  return false;
+}
+
+function reconcilePicksWithScore(smartPick, scorePrediction, isLive, matchInfo = null) {
   const allowed = isLive
     ? ["İY 0.5 ÜST","İY 1.5 ÜST","İY 2.5 ÜST","MS 0.5 ÜST","MS 1.5 ÜST","MS 2.5 ÜST","MS 3.5 ÜST","KG VAR","EV 0.5 ÜST","DEP 0.5 ÜST"]
     : ["EV 1.5 ÜST","DEP 1.5 ÜST","MS 2.5 ÜST","MS 3.5 ÜST","KG VAR"];
   const probs = smartPick?.marketImpliedProbabilities || {};
   const ranked = allowed
-    .filter(label => probs[label] != null && scoreSupportsMarket(label, scorePrediction) )
+    .filter(label => probs[label] != null && scoreSupportsMarket(label, scorePrediction))
     .map(label => ({label, pct:Number(probs[label])}))
     .sort((a,b)=>b.pct-a.pct);
-  const currentIsSupported = scoreSupportsMarket(smartPick?.mainPick, scorePrediction);
-  if (currentIsSupported) {
-    if (smartPick.alternative && !scoreSupportsMarket(smartPick.alternative, scorePrediction)) {
-      smartPick.alternative = ranked.find(x => x.label !== smartPick.mainPick)?.label || "—";
+  let main = smartPick?.mainPick;
+  if (!scoreSupportsMarket(main, scorePrediction)) {
+    const replacement = ranked[0];
+    if (replacement) {
+      main = replacement.label;
+      smartPick.mainPick = main;
+      smartPick.rationale = `${smartPick.rationale || ""} Skor tutarlılık kontrolü: çelişen pazar çıkarıldı.`;
+    } else {
+      smartPick.mainPick = "SKOR MODELİYLE TUTARSIZ — TERCİH YOK";
+      smartPick.alternative = "—";
+      smartPick.confidence = null;
+      smartPick.rationale = "Mevcut skor tahminleriyle tutarlı ve kullanılabilir pazar bulunamadı.";
+      return smartPick;
     }
-    return smartPick;
   }
-  const replacement = ranked[0];
-  const alternative = ranked.find(x => x.label !== replacement?.label);
-  if (replacement) {
-    smartPick.mainPick = replacement.label;
-    smartPick.alternative = alternative?.label || "—";
-    smartPick.rationale = `${smartPick.rationale || ""} Skor tutarlılık kontrolü: skor tahminiyle çelişen pazar çıkarıldı.`;
-  } else {
-    smartPick.mainPick = "SKOR MODELİYLE TUTARSIZ — TERCİH YOK";
-    smartPick.alternative = "—";
-    smartPick.confidence = null;
-    smartPick.rationale = "Mevcut skor tahminleriyle tutarlı ve kullanılabilir pazar bulunamadı.";
-  }
+  // An alternative is optional. It must be supported by the score model and represent
+  // a genuinely different outcome under the current live score, not just a different label.
+  const alternative = ranked.find(x => x.label !== main && !marketsEquivalentAtCurrentScore(x.label, main, matchInfo, isLive));
+  smartPick.alternative = alternative?.label || "—";
   return smartPick;
 }
 
@@ -1005,16 +945,12 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   const isFinished = matchInfo.status === "FT";
   const isLive = !isFinished && (matchInfo.status === "LIVE" || matchInfo.status === "HT" || (matchInfo.minute != null && matchInfo.minute > 0));
   const odds = await fetchRealOdds(fixtureId, isLive);
-  // Keep pre-match and in-play movements in separate tracks; never mix their snapshots.
+  // Capture successive snapshots of the API's pre-match market. The DB records only
+  // the market odds returned by the provider; it never substitutes live odds.
   if (odds && odds.source && Object.values(odds).some(v => typeof v === "number" && Number.isFinite(v))) {
     odds.movement = await recordLiveOddsSnapshot(fixtureId, odds, "prematch");
   } else {
     odds.movement = { state: "maç önü oranı yok", trend: "ölçülemedi", changed: false };
-  }
-  if (isLive && odds?.liveOdds?.isLive) {
-    odds.liveOdds.movement = await recordLiveOddsSnapshot(fixtureId, odds.liveOdds, "live");
-  } else if (isLive && odds?.liveOdds) {
-    odds.liveOdds.movement = { state: "canlı oran bulunamadı", trend: "ölçülemedi", changed: false };
   }
 
   // Son 5 tamamlanmış maç: yüzdeler gerçek skorlarla hesaplanır ve analiz yanıtında doğrulanabilir.
@@ -1043,13 +979,11 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   const teamForm = null;
   const smartPick = decideSmartMarket(null, odds, currentTotalGoals, liveStats, matchInfo);
   const scorePrediction = getStableScorePrediction(fixtureId, odds, matchInfo, liveStats, history);
-  reconcilePicksWithScore(smartPick, scorePrediction, isLive);
+  reconcilePicksWithScore(smartPick, scorePrediction, isLive, matchInfo);
   const surpriseScenariosText = (scorePrediction.surpriseScenarios || [])
     .map(x => `${x.label} %${x.percent}`).join(" · ");
   smartPick.surprise = surpriseScenariosText || "Sürpriz olasılığı hesaplanamadı";
-  smartPick.oddsDirection = isLive
-    ? (odds.liveOdds?.movement?.trend && odds.liveOdds?.isLive ? `Canlı: ${odds.liveOdds.movement.trend}` : "Canlı oran hareketi ölçülemedi")
-    : (odds.movement?.trend || "ölçüm bekleniyor");
+  smartPick.oddsDirection = odds.movement?.trend || "ölçüm bekleniyor";
   let halfTimeDisplayScore = "";
   let surpriseDisplay = "Veri yetersiz";
   let mainPickDisplay = smartPick.mainPick;
@@ -1092,13 +1026,9 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       scorePredictionBasis: scorePrediction.basis || "Maç önü oranlarından kalibre edilen olasılık modeli",
       scoreConfidence: scorePrediction.confidence,
       surprise: isFinished ? surpriseDisplay : (smartPick.surprise || surpriseDisplay),
-      marketDirection: isLive
-        ? (odds.liveOdds?.isLive
-          ? `Canlı piyasa: ${odds.liveOdds.source || "API-Football Live"} · ${odds.liveOdds.movement?.trend || "ilk ölçüm bekleniyor"} · ${odds.liveOdds.movement?.state || "canlı oran ölçüldü"}`
-          : (odds.source ? `Canlı oran bulunamadı; maç önü referansı: ${odds.source} · ${odds.movement?.trend || "hareket ölçülmedi"}` : "Canlı ve maç önü piyasa oranı bulunamadı"))
-        : (odds.source
-          ? `Maç önü piyasa kaynağı: ${odds.source} · ${odds.movement?.trend || "hareket ölçülmedi"} · ${odds.movement?.state || "ilk ölçüm bekleniyor"}${odds.movement?.comparedMarket ? ` · takip edilen pazar: ${odds.movement.comparedMarket}` : ""}`
-          : "Maç önü piyasa oranı bulunamadı"),
+      marketDirection: odds.source
+        ? `Maç önü piyasa kaynağı: ${odds.source} · ${odds.movement?.trend || "hareket ölçülmedi"} · ${odds.movement?.state || "ilk ölçüm bekleniyor"}${odds.movement?.comparedMarket ? ` · takip edilen pazar: ${odds.movement.comparedMarket}` : ""}`
+        : "Maç önü piyasa oranı bulunamadı",
       confidence: confidenceScore > 0 ? `Maç önü oran modeli · %${confidenceScore}` : "Güven puanı hesaplanamadı",
       statsAvailable: liveStats.length > 0,
       stats: liveStats,
@@ -1110,7 +1040,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
           : `Geçmiş maç verisi doğrulanamadı: ev ${history.home.sampleSize}/5, dep ${history.away.sampleSize}/5. Yüzdeler tahmin edilmedi.`,
         confidenceScore > 0 ? `Maç önü oran modeli: %${confidenceScore}` : "Yeterli doğrulanmış veri yok; kupon adayı olarak seçilmemeli"
       ],
-      oddsMovement: isLive ? (odds.liveOdds?.movement || null) : (odds.movement || null),
+      oddsMovement: odds.movement || null,
       surpriseScenarios: scorePrediction.surpriseScenarios || []
     });
   } catch (error) {
