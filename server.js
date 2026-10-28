@@ -136,7 +136,6 @@ async function initDatabase() {
           over25 NUMERIC, under25 NUMERIC, over35 NUMERIC, under35 NUMERIC,
           home_win NUMERIC, draw_odd NUMERIC, away_win NUMERIC, btts_yes NUMERIC, btts_no NUMERIC,
           handicap_home NUMERIC, handicap_away NUMERIC, handicap_line NUMERIC,
-          handicap_source TEXT,
           observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         ALTER TABLE live_odds_snapshots ADD COLUMN IF NOT EXISTS market_type TEXT NOT NULL DEFAULT 'live';
@@ -151,7 +150,6 @@ async function initDatabase() {
         ALTER TABLE live_odds_snapshots ADD COLUMN IF NOT EXISTS handicap_home NUMERIC;
         ALTER TABLE live_odds_snapshots ADD COLUMN IF NOT EXISTS handicap_away NUMERIC;
         ALTER TABLE live_odds_snapshots ADD COLUMN IF NOT EXISTS handicap_line NUMERIC;
-        ALTER TABLE live_odds_snapshots ADD COLUMN IF NOT EXISTS handicap_source TEXT;
         CREATE INDEX IF NOT EXISTS live_odds_snapshots_fixture_time_idx
           ON live_odds_snapshots (fixture_id, observed_at DESC);
       `);
@@ -223,6 +221,7 @@ async function fetchTeamRecentForm(teamId, currentFixtureId, season) {
     }
     const pct = count => Math.round((count / finished.length) * 100);
     const scored = [], teamOver15 = [], conceded = [], over15 = [], over25 = [], btts = [], htOver05 = [], htOver15 = [];
+    const goalsFor = [], goalsAgainst = [], htGoalsFor = [], htGoalsAgainst = [];
     for (const row of finished) {
       const homeId = Number(row.teams?.home?.id);
       const isHome = homeId === id;
@@ -232,15 +231,22 @@ async function fetchTeamRecentForm(teamId, currentFixtureId, season) {
       const htH = row.score?.halftime?.home;
       const htA = row.score?.halftime?.away;
       scored.push(gf > 0); teamOver15.push(gf >= 2); conceded.push(ga > 0);
+      goalsFor.push(gf); goalsAgainst.push(ga);
       over15.push(total >= 2); over25.push(total >= 3);
       btts.push(Number(row.goals.home) > 0 && Number(row.goals.away) > 0);
       if (htH != null && htA != null) {
         const htTotal = Number(htH) + Number(htA);
         htOver05.push(htTotal >= 1); htOver15.push(htTotal >= 2);
+        htGoalsFor.push(isHome ? Number(htH) : Number(htA));
+        htGoalsAgainst.push(isHome ? Number(htA) : Number(htH));
       }
     }
     const result = {
       teamId: id, available: true, sampleSize: finished.length,
+      avgGoalsFor: Number((goalsFor.reduce((a,b)=>a+b,0) / goalsFor.length).toFixed(3)),
+      avgGoalsAgainst: Number((goalsAgainst.reduce((a,b)=>a+b,0) / goalsAgainst.length).toFixed(3)),
+      avgHtGoalsFor: htGoalsFor.length ? Number((htGoalsFor.reduce((a,b)=>a+b,0) / htGoalsFor.length).toFixed(3)) : null,
+      avgHtGoalsAgainst: htGoalsAgainst.length ? Number((htGoalsAgainst.reduce((a,b)=>a+b,0) / htGoalsAgainst.length).toFixed(3)) : null,
       goalsScoredPct: pct(scored.filter(Boolean).length),
       teamGoalsOver15Pct: pct(teamOver15.filter(Boolean).length),
       teamGoalsOver15Count: teamOver15.filter(Boolean).length,
@@ -328,33 +334,23 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
         bets: row.odds.map(item => ({ name: item.name || item.bet || "", values: Array.isArray(item.values) ? item.values : [] })) });
     }
   }
-  const ordered = [...books.filter(b => /bet365/i.test(b.source)), ...books.filter(b => !/bet365/i.test(b.source))];
+  const preferred = books.find(b => /bet365/i.test(b.source));
+  const ordered = preferred ? [preferred, ...books.filter(b => b !== preferred)] : books;
   const keys = ["homeWin","draw","awayWin","over05","under05","over15","under15","over25","under25","over35","under35",
     "htOver05","htUnder05","htOver15","htUnder15","htOver25","htUnder25",
     "homeOver05","homeUnder05","homeOver15","homeUnder15","awayOver05","awayUnder05","awayOver15","awayUnder15",
     "bttsYes","bttsNo","handicapHome","handicapAway"];
   const combined = Object.fromEntries(keys.map(k => [k, null]));
   combined.source = null; combined.sources = {}; combined.handicapLine = null; combined.handicapSource = null;
-  const handicapPairs = [];
-
   for (const book of ordered) {
     const one = Object.fromEntries(keys.map(k => [k, null]));
-    const ahSelections = [];
+    let handicapHomeLine = null, handicapAwayLine = null;
     for (const bet of book.bets) {
       const name = String(bet.name || "").toLowerCase();
       for (const v of (bet.values || [])) {
         const label = String(v.value ?? v.name ?? "").toLowerCase().trim();
         const n = toNumber(v.odd);
         if (n == null || n <= 1) continue;
-        if (/asian handicap|handicap/.test(name)) {
-          const match = label.match(/^(home|away|team\s*1|team\s*2|1|2)\s*(?:\(\s*)?([+-]?\d+(?:\.\d+)?)(?:\s*\))?/i);
-          if (match) {
-            const side = /home|team\s*1|^1\b/i.test(match[1]) ? "home" : "away";
-            const line = Number(match[2]);
-            if (Number.isFinite(line)) ahSelections.push({ side, line, odd: n });
-          }
-          continue;
-        }
         if (/match winner|1x2|full.?time result|winner|match result|regular time result/.test(name)) {
           if (["home", "1", "team 1", "1 (home)"].includes(label)) one.homeWin = n;
           else if (["draw", "x", "tie"].includes(label)) one.draw = n;
@@ -378,45 +374,31 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
         } else if (/both teams to score|both teams score|both teams|btts/.test(name)) {
           if (["yes", "y", "both teams to score - yes"].includes(label)) one.bttsYes = n;
           else if (["no", "n", "both teams to score - no"].includes(label)) one.bttsNo = n;
+        } else if (/asian handicap|handicap/.test(name)) {
+          // Providers format AH selections inconsistently: "Home -0.5", "Home (-0.5)", "1 (-0.5)".
+          const match = label.match(/^(home|away|team\s*1|team\s*2|1|2)\s*(?:\(\s*)?([+-]?\d+(?:\.\d+)?)(?:\s*\))?/i);
+          if (match) {
+            const side = /home|team\s*1|^1\b/i.test(match[1]) ? "home" : "away";
+            const lineValue = Number(match[2]);
+            if (side === "home") { one.handicapHome = n; handicapHomeLine = lineValue; }
+            else { one.handicapAway = n; handicapAwayLine = lineValue; }
+          }
         }
       }
     }
-
-    const pairCandidates = [];
-    for (const h of ahSelections.filter(x => x.side === "home")) {
-      for (const a of ahSelections.filter(x => x.side === "away")) {
-        if (Math.abs(h.line + a.line) > 0.001) continue;
-        pairCandidates.push({ source: book.source, homeOdd: h.odd, awayOdd: a.odd,
-          homeLine: h.line, awayLine: a.line, preferredLine: Math.abs(h.line + 0.5) < 0.001 ? 0 : 1 });
-      }
+    if (one.handicapHome != null && one.handicapAway != null && handicapHomeLine != null && handicapAwayLine != null && Math.abs(handicapHomeLine + handicapAwayLine) < 0.26) {
+      combined.handicapLine ??= handicapHomeLine;
+    } else if (one.handicapHome == null || one.handicapAway == null) {
+      one.handicapHome = null; one.handicapAway = null;
     }
-    pairCandidates.sort((a, b) => a.preferredLine - b.preferredLine);
-    if (pairCandidates.length) handicapPairs.push(pairCandidates[0]);
-
     for (const key of keys) {
-      if (key.startsWith("handicap")) continue;
       if (combined[key] == null && one[key] != null) {
         combined[key] = one[key];
         combined.sources[key] = book.source;
+        if ((key === "handicapHome" || key === "handicapAway") && !combined.handicapSource) combined.handicapSource = book.source;
       }
     }
   }
-
-  handicapPairs.sort((a, b) => {
-    const pa = /bet365/i.test(a.source) ? 0 : 1;
-    const pb = /bet365/i.test(b.source) ? 0 : 1;
-    return a.preferredLine - b.preferredLine || pa - pb;
-  });
-  const ah = handicapPairs[0];
-  if (ah) {
-    combined.handicapHome = ah.homeOdd;
-    combined.handicapAway = ah.awayOdd;
-    combined.handicapLine = ah.homeLine;
-    combined.handicapSource = ah.source;
-    combined.sources.handicapHome = ah.source;
-    combined.sources.handicapAway = ah.source;
-  }
-
   const hasOdds = keys.some(k => combined[k] != null);
   if (hasOdds) {
     const usedSources = [...new Set(Object.values(combined.sources).filter(Boolean))];
@@ -430,6 +412,7 @@ function parseOddsBookmakers(rows, defaultSource = "API-Football") {
   }
   return hasOdds ? combined : null;
 }
+
 async function recordLiveOddsSnapshot(fixtureId, liveOdds, marketType = "live") {
   const current = {
     over05: toNumber(liveOdds?.over05), under05: toNumber(liveOdds?.under05),
@@ -461,19 +444,16 @@ async function recordLiveOddsSnapshot(fixtureId, liveOdds, marketType = "live") 
       const handicapLineChanged = key.startsWith("handicap") && prev &&
         toNumber(prev.handicap_line) != null && current.handicapLine != null &&
         Math.abs(Number(prev.handicap_line) - Number(current.handicapLine)) > 0.001;
-      const handicapSourceChanged = key.startsWith("handicap") && prev &&
-        (!prev.handicap_source || !liveOdds?.handicapSource ||
-         String(prev.handicap_source) !== String(liveOdds.handicapSource));
-      deltas[key] = !handicapLineChanged && !handicapSourceChanged && current[key] != null && old != null
+      deltas[key] = !handicapLineChanged && current[key] != null && old != null
         ? Number((current[key] - old).toFixed(3)) : null;
     }
     // Persist no more than once per 90 seconds to avoid comparing identical cached responses.
     if (!prev || ageMs >= 90_000) {
       await pool.query(
         `INSERT INTO live_odds_snapshots
-         (fixture_id,source,market_type,over05,under05,over15,under15,over25,under25,over35,under35,home_win,draw_odd,away_win,btts_yes,btts_no,handicap_home,handicap_away,handicap_line,handicap_source)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
-        [Number(fixtureId), String(liveOdds.source || "API-Football oran"), marketType, current.over05,current.under05,current.over15,current.under15,current.over25,current.under25,current.over35,current.under35,current.homeWin,current.draw,current.awayWin,current.bttsYes,current.bttsNo,current.handicapHome,current.handicapAway,current.handicapLine,liveOdds.handicapSource || null]
+         (fixture_id,source,market_type,over05,under05,over15,under15,over25,under25,over35,under35,home_win,draw_odd,away_win,btts_yes,btts_no,handicap_home,handicap_away,handicap_line)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+        [Number(fixtureId), String(liveOdds.source || "API-Football oran"), marketType, current.over05,current.under05,current.over15,current.under15,current.over25,current.under25,current.over35,current.under35,current.homeWin,current.draw,current.awayWin,current.bttsYes,current.bttsNo,current.handicapHome,current.handicapAway,current.handicapLine]
       );
     }
     // For the pre-match strategy, prioritize the actual AH -0.5 side if that line was parsed.
@@ -612,7 +592,7 @@ function poissonPmf(k, lambda) {
   for (let i = 1; i <= k; i++) p *= lambda / i;
   return p;
 }
-function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], preferredMarket = "") {
+function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], history = null) {
   const o = odds || {};
   const hw = toNumber(o.homeWin), dr = toNumber(o.draw), aw = toNumber(o.awayWin);
 
@@ -629,15 +609,6 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
       { key: 'draw', target: inv[1] / sum, weight: 1.4 },
       { key: 'away', target: inv[2] / sum, weight: 1.7 });
   }
-  // AH -0.5 is equivalent to a home win. Add it as a corroborating signal only
-  // when both sides of the exact same bookmaker line were parsed.
-  const ahHome = toNumber(o.handicapHome), ahAway = toNumber(o.handicapAway);
-  const ahLine = toNumber(o.handicapLine);
-  if (ahHome > 1 && ahAway > 1 && ahLine != null && Math.abs(Math.abs(ahLine) - 0.5) < 0.001) {
-    const ahHomeProbability = (1 / ahHome) / ((1 / ahHome) + (1 / ahAway));
-    if (ahLine < 0) targets.push({ key: 'home', target: ahHomeProbability, weight: 0.8 });
-    else targets.push({ key: 'away', target: 1 - ahHomeProbability, weight: 0.8 });
-  }
   const o25p = implied('over25', 'under25');
   const o15p = implied('over15', 'under15');
   const o35p = implied('over35', 'under35');
@@ -647,13 +618,17 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
   if (o15p != null) targets.push({ key: 'over15', target: o15p, weight: 0.8 });
   if (o35p != null) targets.push({ key: 'over35', target: o35p, weight: 0.8 });
   if (bttsp != null) targets.push({ key: 'btts', target: bttsp, weight: 1.2 });
-  if (!targets.length) {
-    console.warn(`[Score model] no usable pre-match score markets; fixture=${matchInfo?.fixtureId ?? matchInfo?.id ?? "unknown"}; score prediction withheld`);
-    return {
-      main: "Veri yetersiz", alternative: "Veri yetersiz", ht: "Veri yetersiz",
-      surpriseScenarios: [], confidence: null,
-      basis: "Gerçek maç önü gol veya sonuç oranı bulunmadığı için skor tahmini üretilmedi"
-    };
+  // If prematch odds are absent, use real last-five team results as a separate fallback.
+  // Never pretend this fallback is odds-based; if neither source exists, withhold the score.
+  const formH = history?.home?.available ? history.home : null;
+  const formA = history?.away?.available ? history.away : null;
+  const hasFormFallback = !!(formH && formA && formH.sampleSize > 0 && formA.sampleSize > 0 &&
+    Number.isFinite(Number(formH.avgGoalsFor)) && Number.isFinite(Number(formH.avgGoalsAgainst)) &&
+    Number.isFinite(Number(formA.avgGoalsFor)) && Number.isFinite(Number(formA.avgGoalsAgainst)));
+  if (!targets.length && !hasFormFallback) {
+    console.warn(`[Score model] no prematch odds and no complete recent form; fixture=${matchInfo?.fixtureId ?? matchInfo?.id ?? "unknown"}; score prediction withheld`);
+    return { main: "Veri yetersiz", alternative: "Veri yetersiz", ht: "Veri yetersiz", surpriseScenarios: [], confidence: null,
+      basis: "Maç önü oranı ve iki takım için yeterli gerçek geçmiş maç verisi bulunamadı" };
   }
   const dist = (lambda) => Array.from({ length: 10 }, (_, k) => poissonPmf(k, lambda));
   const marketVector = (lhTry, laTry) => {
@@ -673,21 +648,15 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
       for (const t of targets) loss += t.weight * Math.pow(v[t.key] - t.target, 2);
       if (loss < bestLoss) { bestLoss = loss; lh = h; la = a; }
     }
-  }
-  // A verified pre-match AH -0.5 odds drop can gently tilt the score model
-  // toward that side. Movement is ignored unless source and handicap line matched.
-  const movement = o.movement || {};
-  if (Math.abs(Math.abs(ahLine ?? 99) - 0.5) < 0.001 &&
-      ["handicapHome", "handicapAway"].includes(movement.comparedMarket) &&
-      ["oran düşüyor", "oran yükseliyor"].includes(String(movement.trend || "").toLocaleLowerCase("tr-TR"))) {
-    const drop = Math.min(12, Math.abs(Number(movement.dropPercent) || 0)) / 100;
-    const step = Math.min(0.14, drop * 1.1);
-    const selectedHome = ahLine < 0 && movement.comparedMarket === "handicapHome";
-    const selectedAway = ahLine > 0 && movement.comparedMarket === "handicapAway";
-    const favorable = String(movement.trend).toLocaleLowerCase("tr-TR") === "oran düşüyor" ? 1 : -1;
-    if (selectedHome) { lh += favorable * step; la -= favorable * step * 0.25; }
-    if (selectedAway) { la += favorable * step; lh -= favorable * step * 0.25; }
-    console.info(`[Score model AH] source=${o.handicapSource || "unknown"} line=${ahLine} market=${movement.comparedMarket} trend=${movement.trend} adjustment=${step.toFixed(3)}`);
+  } else if (hasFormFallback) {
+    // Blend each team's scoring rate with the opponent's concession rate.
+    // Clamp extreme small-sample averages to avoid runaway score forecasts.
+    lh = 0.55 * Number(formH.avgGoalsFor) + 0.45 * Number(formA.avgGoalsAgainst);
+    la = 0.55 * Number(formA.avgGoalsFor) + 0.45 * Number(formH.avgGoalsAgainst);
+    lh = Math.max(0.20, Math.min(3.50, lh));
+    la = Math.max(0.20, Math.min(3.50, la));
+    bestLoss = null;
+    console.info(`[Score model] form fallback fixture=${matchInfo?.fixtureId ?? matchInfo?.id ?? "unknown"} samples=${formH.sampleSize}/${formA.sampleSize} lambdaHome=${lh.toFixed(2)} lambdaAway=${la.toFixed(2)}`);
   }
   lh = Math.max(0.20, Math.min(3.8, lh));
   la = Math.max(0.20, Math.min(3.8, la));
@@ -719,26 +688,13 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
   }
   scores.sort((a, b) => b.p - a.p);
 
-  const marketSatisfiedByScore = (marketText, h, a) => {
-    const market = String(marketText || "").toLocaleUpperCase("tr-TR");
-    const total = h + a;
-    if (/KG\s*VAR/.test(market)) return h > 0 && a > 0;
-    if (/EV\s*1[.,]5\s*ÜST/.test(market)) return h >= 2;
-    if (/DEP\s*1[.,]5\s*ÜST/.test(market)) return a >= 2;
-    const line = market.match(/MS\s*(0[.,]5|1[.,]5|2[.,]5|3[.,]5)\s*ÜST/);
-    if (line) return total > Number(line[1].replace(",", "."));
-    return true;
-  };
-  // Keep the exact-score forecast coherent with the primary market when that market is explicit.
-  // Rank only among scores that satisfy the main pick; retain the unrestricted distribution
-  // for probabilities and surprise scenarios so the model does not fabricate their likelihood.
-  const selected = scores.filter(x => marketSatisfiedByScore(preferredMarket, x.home, x.away));
-  const rankedScores = selected.length ? selected : scores;
+  // Score predictions must remain independent of the suggested betting market.
+  // Rank the unrestricted probability distribution; picks are evaluated separately.
+  const rankedScores = [...scores];
 
   // Keep the half-time prediction internally consistent with the current score
   // during the first half; after half-time, use the actual half-time score.
   let ht;
-  let htScoresForPrediction = [];
   if (isLive && minute >= 45) {
     ht = `${matchInfo?.htHomeScore ?? hs}-${matchInfo?.htAwayScore ?? as}`;
   } else {
@@ -763,27 +719,22 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
       htLH *= scale;
       htLA *= scale;
     }
+    const htScores = [];
     for (let addH = 0; addH <= 4; addH++) {
       for (let addA = 0; addA <= 4; addA++) {
-        htScoresForPrediction.push({
-          home: htBaseH + addH, away: htBaseA + addA,
+        htScores.push({
           score: `${htBaseH + addH}-${htBaseA + addA}`,
           p: pmf(addH, htLH) * pmf(addA, htLA)
         });
       }
     }
-    htScoresForPrediction.sort((a, b) => b.p - a.p);
-    ht = htScoresForPrediction[0]?.score || "0-0";
+    htScores.sort((a, b) => b.p - a.p);
+    ht = htScores[0]?.score || "0-0";
   }
 
   rankedScores.sort((a, b) => b.p - a.p);
   const best = rankedScores[0] || scores[0];
   const alternative = rankedScores.find(x => x.score !== best?.score) || scores.find(x => x.score !== best?.score);
-  // The predicted half-time score must be possible given the predicted full-time score.
-  if (!(isLive && minute >= 45) && best && htScoresForPrediction.length) {
-    const compatibleHt = htScoresForPrediction.find(x => x.home <= best.home && x.away <= best.away);
-    if (compatibleHt) ht = compatibleHt.score;
-  }
   const sixPlusProbability = scores.filter(x => x.home + x.away >= 6).reduce((sum, x) => sum + x.p, 0);
   const htBaseH = isLive ? hs : 0;
   const htBaseA = isLive ? as : 0;
@@ -814,14 +765,14 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
     {label:'6+ GOL', probability: sixPlusProbability},
     {label:'2/1 İY/MS', probability: htft['2/1']},
     {label:'1/2 İY/MS', probability: htft['1/2']}
-  ].map(x=>({...x, percent:Math.round(x.probability*1000)/10}));
+  ].sort((a,b)=>b.probability-a.probability).map(x=>({...x, percent:Math.round(x.probability*1000)/10}));
   return {
     main: best?.score || `${baseH}-${baseA}`,
     alternative: alternative?.score || best?.score || `${baseH}-${baseA}`,
     ht,
     surpriseScenarios,
     confidence: best ? Math.round(best.p * 1000) / 10 : null,
-    basis: targets.length ? `Maç önü piyasa olasılıklarına uyarlanmış skor modeli (${targets.length} piyasa sinyali); garanti değildir` : "Gerçek maç önü oran sinyali yetersiz; düşük güvenli varsayımsal skor modeli, garanti değildir"
+    basis: targets.length ? `Maç önü piyasa olasılıklarına uyarlanmış skor modeli (${targets.length} piyasa sinyali); garanti değildir` : `Son 5 tamamlanmış maçın gerçek gol ortalamalarına dayalı yedek model (${formH.sampleSize}/${formA.sampleSize} maç); oran analizi değildir ve düşük güvenlidir`
   };
 }
 
@@ -880,7 +831,7 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
 
   const teamForm = null;
   const smartPick = decideSmartMarket(null, odds, currentTotalGoals, liveStats, matchInfo);
-  const scorePrediction = scorePredictionFromPrematchOdds(odds, matchInfo, liveStats, smartPick.mainPick);
+  const scorePrediction = scorePredictionFromPrematchOdds(odds, matchInfo, liveStats, history);
   const surpriseScenariosText = (scorePrediction.surpriseScenarios || [])
     .map(x => `${x.label} %${x.percent}`).join(" · ");
   smartPick.surprise = surpriseScenariosText || "Sürpriz olasılığı hesaplanamadı";
