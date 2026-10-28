@@ -827,6 +827,75 @@ function getStableScorePrediction(fixtureId, odds, matchInfo, liveStats, history
   return fresh;
 }
 
+
+function scoreSupportsMarket(label, prediction) {
+  const parseScore = (s) => {
+    const m = String(s || "").match(/(\d+)\s*-\s*(\d+)/);
+    return m ? { h: Number(m[1]), a: Number(m[2]) } : null;
+  };
+  const scores = [prediction?.main, prediction?.alternative].map(parseScore).filter(Boolean);
+  const ht = parseScore(prediction?.ht);
+  if (!scores.length) return false;
+  const market = String(label || "").toUpperCase().replace(/\s+/g, " ").trim();
+
+  // Total-goal overs: reject if both leading full-time score candidates stay below the line.
+  const totalLine = market.match(/MS\s*(0[.,]5|1[.,]5|2[.,]5|3[.,]5)\s*ÜST/);
+  if (totalLine) {
+    const threshold = Math.floor(Number(totalLine[1].replace(",", "."))) + 1;
+    if (scores.every(s => s.h + s.a < threshold)) return false;
+  }
+
+  // Half-time overs must be supported by the independently predicted half-time score.
+  const htLine = market.match(/İY\s*(0[.,]5|1[.,]5|2[.,]5)\s*ÜST/);
+  if (htLine) {
+    if (!ht) return false;
+    const threshold = Math.floor(Number(htLine[1].replace(",", "."))) + 1;
+    if (ht.h + ht.a < threshold) return false;
+  }
+
+  // Team goal overs: at least one of the two top FT score candidates must support it.
+  const teamLine = market.match(/(EV|DEP)\s*(0[.,]5|1[.,]5)\s*ÜST/);
+  if (teamLine) {
+    const side = teamLine[1] === "EV" ? "h" : "a";
+    const threshold = Math.floor(Number(teamLine[2].replace(",", "."))) + 1;
+    if (scores.every(s => s[side] < threshold)) return false;
+  }
+
+  // Both teams to score is incompatible if neither top score has both teams scoring.
+  if (market === "KG VAR" && scores.every(s => s.h < 1 || s.a < 1)) return false;
+  return true;
+}
+function reconcilePicksWithScore(smartPick, scorePrediction, isLive) {
+  const allowed = isLive
+    ? ["İY 0.5 ÜST","İY 1.5 ÜST","İY 2.5 ÜST","MS 0.5 ÜST","MS 1.5 ÜST","MS 2.5 ÜST","MS 3.5 ÜST","KG VAR","EV 0.5 ÜST","DEP 0.5 ÜST"]
+    : ["EV 1.5 ÜST","DEP 1.5 ÜST","MS 2.5 ÜST","MS 3.5 ÜST","KG VAR"];
+  const probs = smartPick?.marketImpliedProbabilities || {};
+  const ranked = allowed
+    .filter(label => probs[label] != null && scoreSupportsMarket(label, scorePrediction) )
+    .map(label => ({label, pct:Number(probs[label])}))
+    .sort((a,b)=>b.pct-a.pct);
+  const currentIsSupported = scoreSupportsMarket(smartPick?.mainPick, scorePrediction);
+  if (currentIsSupported) {
+    if (smartPick.alternative && !scoreSupportsMarket(smartPick.alternative, scorePrediction)) {
+      smartPick.alternative = ranked.find(x => x.label !== smartPick.mainPick)?.label || "—";
+    }
+    return smartPick;
+  }
+  const replacement = ranked[0];
+  const alternative = ranked.find(x => x.label !== replacement?.label);
+  if (replacement) {
+    smartPick.mainPick = replacement.label;
+    smartPick.alternative = alternative?.label || "—";
+    smartPick.rationale = `${smartPick.rationale || ""} Skor tutarlılık kontrolü: skor tahminiyle çelişen pazar çıkarıldı.`;
+  } else {
+    smartPick.mainPick = "SKOR MODELİYLE TUTARSIZ — TERCİH YOK";
+    smartPick.alternative = "—";
+    smartPick.confidence = null;
+    smartPick.rationale = "Mevcut skor tahminleriyle tutarlı ve kullanılabilir pazar bulunamadı.";
+  }
+  return smartPick;
+}
+
 async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   // Reuse the fixture already returned by /fixtures?live=all when possible.
   let fRaw = prefetchedFixture || null;
@@ -883,6 +952,7 @@ async function evaluateMatchAdvanced(fixtureId, prefetchedFixture = null) {
   const teamForm = null;
   const smartPick = decideSmartMarket(null, odds, currentTotalGoals, liveStats, matchInfo);
   const scorePrediction = getStableScorePrediction(fixtureId, odds, matchInfo, liveStats, history);
+  reconcilePicksWithScore(smartPick, scorePrediction, isLive);
   const surpriseScenariosText = (scorePrediction.surpriseScenarios || [])
     .map(x => `${x.label} %${x.percent}`).join(" · ");
   smartPick.surprise = surpriseScenariosText || "Sürpriz olasılığı hesaplanamadı";
