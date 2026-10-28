@@ -649,14 +649,24 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], histor
       if (loss < bestLoss) { bestLoss = loss; lh = h; la = a; }
     }
   } else if (hasFormFallback) {
-    // Blend each team's scoring rate with the opponent's concession rate.
-    // Clamp extreme small-sample averages to avoid runaway score forecasts.
-    lh = 0.55 * Number(formH.avgGoalsFor) + 0.45 * Number(formA.avgGoalsAgainst);
-    la = 0.55 * Number(formA.avgGoalsFor) + 0.45 * Number(formH.avgGoalsAgainst);
-    lh = Math.max(0.20, Math.min(3.50, lh));
-    la = Math.max(0.20, Math.min(3.50, la));
+    // Form-only fallback: shrink noisy team rates toward a conservative baseline.
+    // A single recent result must not be allowed to create an extreme score forecast.
+    const baselineGoals = 1.25;
+    const rawHome = 0.55 * Number(formH.avgGoalsFor) + 0.45 * Number(formA.avgGoalsAgainst);
+    const rawAway = 0.55 * Number(formA.avgGoalsFor) + 0.45 * Number(formH.avgGoalsAgainst);
+    const homeN = Math.max(0, Math.min(5, Number(formH.sampleSize) || 0));
+    const awayN = Math.max(0, Math.min(5, Number(formA.sampleSize) || 0));
+    // n/(n+4) keeps the baseline influential until several real matches exist.
+    const homeReliability = homeN / (homeN + 4);
+    const awayReliability = awayN / (awayN + 4);
+    const boundedHome = Math.max(0.25, Math.min(2.80, rawHome));
+    const boundedAway = Math.max(0.25, Math.min(2.80, rawAway));
+    lh = baselineGoals * (1 - homeReliability) + boundedHome * homeReliability;
+    la = baselineGoals * (1 - awayReliability) + boundedAway * awayReliability;
+    lh = Math.max(0.45, Math.min(2.50, lh));
+    la = Math.max(0.45, Math.min(2.50, la));
     bestLoss = null;
-    console.info(`[Score model] form fallback fixture=${matchInfo?.fixtureId ?? matchInfo?.id ?? "unknown"} samples=${formH.sampleSize}/${formA.sampleSize} lambdaHome=${lh.toFixed(2)} lambdaAway=${la.toFixed(2)}`);
+    console.info(`[Score model] form fallback fixture=${matchInfo?.fixtureId ?? matchInfo?.id ?? "unknown"} samples=${homeN}/${awayN} reliability=${homeReliability.toFixed(2)}/${awayReliability.toFixed(2)} rawLambdaHome=${rawHome.toFixed(2)} rawLambdaAway=${rawAway.toFixed(2)} lambdaHome=${lh.toFixed(2)} lambdaAway=${la.toFixed(2)}`);
   }
   lh = Math.max(0.20, Math.min(3.8, lh));
   la = Math.max(0.20, Math.min(3.8, la));
@@ -774,7 +784,9 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], histor
     ht,
     surpriseScenarios,
     confidence: best ? Math.round(best.p * 1000) / 10 : null,
-    basis: targets.length ? `Maç önü piyasa olasılıklarına uyarlanmış skor modeli (${targets.length} piyasa sinyali); garanti değildir` : `Son 5 tamamlanmış maçın gerçek gol ortalamalarına dayalı yedek model (${formH.sampleSize}/${formA.sampleSize} maç); oran analizi değildir ve düşük güvenlidir`
+    basis: targets.length
+      ? `Maç önü piyasa olasılıklarına uyarlanmış skor modeli (${targets.length} piyasa sinyali); garanti değildir`
+      : `Son tamamlanmış maçların gerçek gol ortalamalarına dayalı, küçük örneklem için ortalamaya çekilmiş yedek model (${formH.sampleSize}/${formA.sampleSize} maç); oran analizi değildir ve düşük güvenlidir`
   };
 }
 
