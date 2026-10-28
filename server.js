@@ -247,7 +247,51 @@ app.get("/api/coupon/surprise", async (req, res) => {
   res.json({ draftId: `surprise-${Date.now()}`, date: req.query.date, status: "NO_MATCHES", picks: [] });
 });
 app.get("/api/coupon/live", async (_req, res) => {
-  res.json({ draftId: `live-${Date.now()}`, isLive: true, status: "NO_MATCHES", picks: [] });
+  try {
+    // Canlı kombin yalnızca API-Football'dan gelen canlı maçları kullanır.
+    // Mevcut analiz motoruna ve skor/tercih kurallarına dokunulmaz.
+    const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 20_000);
+    const liveMatches = (payload.response || [])
+      .map(normalizeProviderMatch)
+      .filter(m => m.status === "LIVE" && Number(m.minute) > 0);
+
+    const picks = [];
+    for (const match of liveMatches) {
+      if (picks.length >= 10) break;
+      const analysis = computePerfectSyncAnalysis(match, {}, {});
+      const market = String(analysis.mainPick || "").trim();
+      if (!market || market === "—") continue;
+
+      picks.push({
+        fixtureId: Number(match.id),
+        league: match.league,
+        country: match.country,
+        home: match.home,
+        away: match.away,
+        minute: match.minute,
+        currentScore: `${Number(match.homeScore ?? 0)}-${Number(match.awayScore ?? 0)}`,
+        market
+      });
+    }
+
+    res.json({
+      draftId: `live-${Date.now()}`,
+      isLive: true,
+      date: new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Istanbul" }),
+      status: picks.length ? "OK" : "NO_MATCHES",
+      picks,
+      message: picks.length ? undefined : "Şu anda uygun canlı maç bulunamadı."
+    });
+  } catch (error) {
+    res.status(502).json({
+      draftId: `live-${Date.now()}`,
+      isLive: true,
+      status: "ERROR",
+      picks: [],
+      error: "Canlı kombin oluşturulamadı.",
+      detail: error.message
+    });
+  }
 });
 app.post("/api/coupon/approve", async (req, res) => {
   res.json({ success: true });
