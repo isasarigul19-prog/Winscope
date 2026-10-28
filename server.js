@@ -582,20 +582,60 @@ function poissonPmf(k, lambda) {
 }
 function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], preferredMarket = "") {
   const o = odds || {};
-  const hw = toNumber(o.homeWin), aw = toNumber(o.awayWin);
-  const o25 = toNumber(o.over25);
+  const hw = toNumber(o.homeWin), dr = toNumber(o.draw), aw = toNumber(o.awayWin);
 
-  // Approximate expected goals from available real pre-match odds. This is a
-  // heuristic model, not a calibrated probability claim.
-  let lh = 1.35, la = 1.10;
-  if (hw != null && aw != null) {
-    if (hw < aw) { lh = 1.65; la = 1.00; }
-    else if (aw < hw) { lh = 1.00; la = 1.55; }
+  // Fit expected goals to the actual pre-match market probabilities rather than
+  // assigning the same generic 1.35/1.10 baseline to unrelated fixtures.
+  const implied = (over, under) => {
+    const a = toNumber(o[over]), b = toNumber(o[under]);
+    return a > 1 && b > 1 ? (1 / a) / ((1 / a) + (1 / b)) : null;
+  };
+  const targets = [];
+  if (hw > 1 && dr > 1 && aw > 1) {
+    const inv = [1 / hw, 1 / dr, 1 / aw], sum = inv.reduce((a, b) => a + b, 0);
+    targets.push({ key: 'home', target: inv[0] / sum, weight: 1.7 },
+      { key: 'draw', target: inv[1] / sum, weight: 1.4 },
+      { key: 'away', target: inv[2] / sum, weight: 1.7 });
   }
-  if (o25 != null && o25 > 1 && o25 < 1.85) { lh += 0.25; la += 0.25; }
-  else if (o25 != null && o25 > 2.20) { lh -= 0.15; la -= 0.15; }
-  lh = Math.max(0.25, Math.min(2.8, lh));
-  la = Math.max(0.25, Math.min(2.8, la));
+  const o25p = implied('over25', 'under25');
+  const o15p = implied('over15', 'under15');
+  const o35p = implied('over35', 'under35');
+  const bttsY = toNumber(o.bttsYes), bttsN = toNumber(o.bttsNo);
+  const bttsp = bttsY > 1 && bttsN > 1 ? (1 / bttsY) / ((1 / bttsY) + (1 / bttsN)) : null;
+  if (o25p != null) targets.push({ key: 'over25', target: o25p, weight: 2.0 });
+  if (o15p != null) targets.push({ key: 'over15', target: o15p, weight: 0.8 });
+  if (o35p != null) targets.push({ key: 'over35', target: o35p, weight: 0.8 });
+  if (bttsp != null) targets.push({ key: 'btts', target: bttsp, weight: 1.2 });
+  if (!targets.length) {
+    console.warn(`[Score model] no usable pre-match score markets; fixture=${matchInfo?.fixtureId ?? matchInfo?.id ?? "unknown"}; score prediction withheld`);
+    return {
+      main: "Veri yetersiz", alternative: "Veri yetersiz", ht: "Veri yetersiz",
+      surpriseScenarios: [], confidence: null,
+      basis: "Gerçek maç önü gol veya sonuç oranı bulunmadığı için skor tahmini üretilmedi"
+    };
+  }
+  const dist = (lambda) => Array.from({ length: 10 }, (_, k) => poissonPmf(k, lambda));
+  const marketVector = (lhTry, laTry) => {
+    const ph = dist(lhTry), pa = dist(laTry); let home = 0, drawP = 0, away = 0, over25 = 0, over15 = 0, over35 = 0, btts = 0;
+    for (let h = 0; h < 10; h++) for (let a = 0; a < 10; a++) {
+      const pr = ph[h] * pa[a], total = h + a;
+      if (h > a) home += pr; else if (h === a) drawP += pr; else away += pr;
+      if (total >= 3) over25 += pr; if (total >= 2) over15 += pr; if (total >= 4) over35 += pr;
+      if (h > 0 && a > 0) btts += pr;
+    }
+    return { home, draw: drawP, away, over25, over15, over35, btts };
+  };
+  let lh = 1.35, la = 1.10, bestLoss = Infinity;
+  if (targets.length) {
+    for (let h = 0.25; h <= 3.51; h += 0.05) for (let a = 0.25; a <= 3.51; a += 0.05) {
+      const v = marketVector(h, a); let loss = 0;
+      for (const t of targets) loss += t.weight * Math.pow(v[t.key] - t.target, 2);
+      if (loss < bestLoss) { bestLoss = loss; lh = h; la = a; }
+    }
+  }
+  lh = Math.max(0.20, Math.min(3.8, lh));
+  la = Math.max(0.20, Math.min(3.8, la));
+  console.info(`[Score model] fitted markets=${targets.map(t => t.key).join(",")} lambdaHome=${lh.toFixed(2)} lambdaAway=${la.toFixed(2)} loss=${bestLoss.toFixed(4)}`);
 
   const status = String(matchInfo?.status || "NS").toUpperCase();
   const minute = Math.max(0, Math.min(90, Number(matchInfo?.minute) || 0));
@@ -657,9 +697,10 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
     const htOver15Pct = htOver15 > 1 && htUnder15 > 1
       ? (1 / htOver15) / ((1 / htOver15) + (1 / htUnder15)) : null;
     if (htOver05Pct != null || htOver15Pct != null) {
-      const marketGoalIndex = (htOver05Pct != null ? htOver05Pct : 0.5) + (htOver15Pct != null ? htOver15Pct : 0.25);
-      const baselineIndex = 0.5 + 0.25;
-      const scale = Math.max(0.65, Math.min(1.45, marketGoalIndex / baselineIndex));
+      // Calibrate first-half total scoring using both available HT markets.
+      const marketGoalIndex = (htOver05Pct != null ? htOver05Pct : 0.50) + (htOver15Pct != null ? htOver15Pct : 0.25);
+      const baselineIndex = 0.50 + 0.25;
+      const scale = Math.max(0.45, Math.min(1.65, marketGoalIndex / baselineIndex));
       htLH *= scale;
       htLA *= scale;
     }
@@ -715,7 +756,7 @@ function scorePredictionFromPrematchOdds(odds, matchInfo, liveStats = [], prefer
     ht,
     surpriseScenarios,
     confidence: best ? Math.round(best.p * 1000) / 10 : null,
-    basis: "Maç önü piyasa oranlarıyla yaklaşık skor olasılık modeli; garanti değildir"
+    basis: targets.length ? `Maç önü piyasa olasılıklarına uyarlanmış skor modeli (${targets.length} piyasa sinyali); garanti değildir` : "Gerçek maç önü oran sinyali yetersiz; düşük güvenli varsayımsal skor modeli, garanti değildir"
   };
 }
 
