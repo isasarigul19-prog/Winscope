@@ -1465,8 +1465,8 @@ function formatKickoffForTelegram(value) {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return "Saat bilgisi yok";
   return new Intl.DateTimeFormat("tr-TR", {
-    timeZone: "Europe/Istanbul", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: false
-  }).format(date).replace(/\./g, "");
+    timeZone: "Europe/Istanbul", hour: "2-digit", minute: "2-digit", hour12: false
+  }).format(date);
 }
 
 async function notifyAutoAnalysisRecord(record) {
@@ -1481,9 +1481,9 @@ async function notifyAutoAnalysisRecord(record) {
   const htScore = escapeTelegramHtml(a.halfTimeScore || "—").replace(/^Tahmin:\s*/i, "");
   const ftScore = escapeTelegramHtml(a.fullTimeScore || "—").replace(/^Tahmin:\s*/i, "");
   const altScore = escapeTelegramHtml(a.alternativeFullTimeScore || "—").replace(/^Tahmin:\s*/i, "");
-  const market = escapeTelegramHtml(a.marketDirection || "Piyasa verisi bulunamadı");
-  const surprise = escapeTelegramHtml(a.surprise || "Hesaplanamadı");
-  const message = `📊 <b>WINSCOPE | GÜNÜN ANALİZİ</b>\n━━━━━━━━━━━━━━\n⚽ <b>${home} – ${away}</b>\n🏆 ${league}  ·  🕒 ${kickoff} (TSİ)\n\n<b>TERCİHLER</b>\n🎯 Ana: <b>${mainPick}</b>\n🔁 Alternatif: ${alternative}\n\n<b>SKOR TAHMİNLERİ</b>\n⏱️ İlk yarı: <b>${htScore}</b>\n🏁 Maç sonu: <b>${ftScore}</b>\n🎲 Alternatif skor: <b>${altScore}</b>\n\n<b>PİYASA</b>\n📉 ${market}\n✨ Sürpriz: ${surprise}\n━━━━━━━━━━━━━━\n<i>Maç önü verilerine dayalı olasılık tahmini; garanti değildir.</i>`;
+  const surprise = escapeTelegramHtml(a.surprise || "");
+  const surpriseLine = surprise && surprise !== "—" && surprise !== "Hesaplanamadı" ? `\n\n💣 Sürpriz: ${surprise}` : "\n\n💣 Sürpriz: Veri yeterli değil";
+  const message = `🗓️ <b>WINSCOPE · GÜNÜN ANALİZİ HAZIR</b>\n\n⚽ <b>${home} - ${away}</b>\n\n🏆 ${league}\n\n🕒 Başlama: <b>${kickoff}</b>\n\n🎯 Ana tercih: <b>${mainPick}</b>\n\n🔁 Alternatif: ${alternative}\n\n⏱️ İY skor: Tahmin: ${htScore}\n\n🏁 MS ana skor: Tahmin: ${ftScore}\n\n🎲 MS alternatif: Tahmin: ${altScore}${surpriseLine}\n\n<i>Maç önü verilerine dayalı tahmindir; garanti değildir.</i>`;
   const sent = await sendTelegramMessage(message);
   if (!sent) { console.warn(`[Daily analysis auto] telegram-not-sent fixture=${record.fixture_id}`); return false; }
   record.analysis = { ...a, telegramNotified: true };
