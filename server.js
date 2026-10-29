@@ -563,18 +563,19 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     else if (total === 1) allowed = ["İY 1.5 ÜST"];
     else allowed = ["İY 1.5 ÜST"];
   } else if (minute >= 33 && minute < 45) {
-    // 33. dakikadan sonra: 0-0 ise MS 1.5; tek gol varsa İY 1.5 yalnızca ikinci ilk-yarı golü için değerlendirilir.
+    // Tek gol varsa MS 1.5 ÜST otomatik seçilmez: pazar zaten çok kısa fiyatlı olabilir.
+    // MS 2.5 ancak canlı baskı + form + maç önü pazar desteği birlikte yeterliyse değerlendirilir.
     if (total === 0) allowed = ["MS 1.5 ÜST"];
-    else if (total === 1) allowed = ["İY 1.5 ÜST", "MS 1.5 ÜST", "KG VAR"];
+    else if (total === 1) allowed = ["MS 2.5 ÜST", "KG VAR"];
     else allowed = ["MS 2.5 ÜST", "KG VAR"];
   } else if (minute >= 45 && minute < 55) {
     if (total === 0) allowed = ["MS 0.5 ÜST", "MS 1.5 ÜST"];
-    else if (total === 1) allowed = ["KG VAR"];
+    else if (total === 1) allowed = ["MS 2.5 ÜST", "KG VAR"];
     else if (total === 2) allowed = ["MS 2.5 ÜST", "KG VAR"];
     else allowed = ["MS 3.5 ÜST", "KG VAR"];
   } else if (minute >= 55 && minute <= 65) {
     if (total === 0) allowed = ["MS 0.5 ÜST", "MS 1.5 ÜST"];
-    else if (total === 1) allowed = ["KG VAR"];
+    else if (total === 1) allowed = ["MS 2.5 ÜST", "KG VAR"];
     else if (total === 2) allowed = ["MS 2.5 ÜST", "KG VAR"];
     else allowed = ["MS 3.5 ÜST", "KG VAR"];
   } else if (minute >= 66 && minute <= 75) {
@@ -636,8 +637,8 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
       if (choice.market === "MS 2.5 ÜST" && total >= 3) return null;
       if (choice.market === "MS 3.5 ÜST" && total >= 4) return null;
 
-      // Özel koruma: devrede toplam 1 gol varsa MS 1.5 ÜST için 65. dakika öncesi öneri verme.
-      // 66+ dakikada da yalnızca yeterli canlı baskı, form desteği ve anlamlı oran varsa değerlendir.
+      // Değer filtresi: canlı oran akışı bu dosyada mevcut değil; maç önü oranını canlı oran gibi sunma.
+      // 1 gol varken 1.5 ÜST'e 66. dakikadan önce kesinlikle izin verme.
       if (live && choice.market === "MS 1.5 ÜST" && total === 1) {
         if (minute < 66) return null;
         if (Number(choice.odd || 0) < 1.35) return null;
@@ -645,6 +646,14 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
         if (Number(choice.probability || 0) > 78) return null;
         if (Number(statsM.pressure || 0) < 18) return null;
         if (Number(statsM.shotsOnTarget || 0) < 3 && Number(statsM.totalShots || 0) < 10) return null;
+      }
+      // Tek gol varken 2.5 ÜST en az iki gol daha gerektirir; sadece gerçek baskı ve yeterli fiyatla aday.
+      if (live && choice.market === "MS 2.5 ÜST" && total === 1) {
+        if (Number(choice.odd || 0) < 1.65) return null;
+        if (Number(formPct || 0) < 55) return null;
+        if (Number(statsM.pressure || 0) < 18) return null;
+        if (Number(statsM.shotsOnTarget || 0) < 3 && Number(statsM.totalShots || 0) < 12) return null;
+        if (minute >= 72 && Number(statsM.pressure || 0) < 22) return null;
       }
 
       const lineNum = Number(String(choice.market).match(/(\d)[.,](\d)/)?.[0]?.replace(",", ".") || 0);
