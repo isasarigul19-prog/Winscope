@@ -51,6 +51,8 @@ function normalizeProviderMatch(match) {
     id: idNum, league: String(leagueName), country: String(countryName),
     minute: match.fixture?.status?.elapsed ?? match.minute ?? null, status,
     home: String(homeName), away: String(awayName),
+    homeId: Number(match.teams?.home?.id ?? match.homeId) || null,
+    awayId: Number(match.teams?.away?.id ?? match.awayId) || null,
     homeScore: match.goals?.home ?? 0, awayScore: match.goals?.away ?? 0,
     htHomeScore: match.score?.halftime?.home ?? null, htAwayScore: match.score?.halftime?.away ?? null,
     fixtureDate: match.fixture?.date || match.kickoff_utc || null
@@ -270,6 +272,81 @@ function rankSingleMatchChoices(choices, mode = "prematch") {
   });
 }
 
+
+async function getRecentTeamForm(teamId) {
+  if (!teamId) return [];
+  const payload = await cachedProviderRequest(
+    `team-last5:${teamId}`,
+    `/fixtures?team=${encodeURIComponent(teamId)}&last=5&status=FT`,
+    10 * 60 * 1000
+  );
+  return (payload.response || []).filter(row =>
+    row.fixture?.status?.short === "FT" ||
+    ["FT", "AET", "PEN"].includes(String(row.fixture?.status?.short || "").toUpperCase())
+  ).slice(0, 5);
+}
+
+function recentFormSupport(market, homeRows, awayRows, homeTeamId, awayTeamId) {
+  const all = [...homeRows, ...awayRows];
+  if (!all.length) return null;
+  const values = [];
+  const totalGoals = row => Number(row.goals?.home ?? 0) + Number(row.goals?.away ?? 0);
+  const btts = row => Number(row.goals?.home ?? 0) > 0 && Number(row.goals?.away ?? 0) > 0;
+  const halfGoals = row => {
+    const h = row.score?.halftime?.home;
+    const a = row.score?.halftime?.away;
+    if (h == null || a == null) return null;
+    return Number(h) + Number(a);
+  };
+
+  if (market === "MS 1.5 ÜST") {
+    for (const r of all) values.push(totalGoals(r) >= 2);
+  } else if (market === "MS 2.5 ÜST") {
+    for (const r of all) values.push(totalGoals(r) >= 3);
+  } else if (market === "KG VAR") {
+    for (const r of all) values.push(btts(r));
+  } else if (market === "İY 0.5 ÜST" || market === "İY 1.5 ÜST") {
+    for (const r of all) {
+      const g = halfGoals(r);
+      if (g != null) values.push(market === "İY 0.5 ÜST" ? g >= 1 : g >= 2);
+    }
+  } else if (market === "EV 1.5 ÜST") {
+    for (const r of homeRows) {
+      const teamWasHome = Number(r.teams?.home?.id) === Number(homeTeamId);
+      const scored = teamWasHome ? r.goals?.home : r.goals?.away;
+      values.push(Number(scored ?? 0) >= 2);
+    }
+  } else if (market === "DEP 1.5 ÜST") {
+    for (const r of awayRows) {
+      const teamWasHome = Number(r.teams?.home?.id) === Number(awayTeamId);
+      const scored = teamWasHome ? r.goals?.home : r.goals?.away;
+      values.push(Number(scored ?? 0) >= 2);
+    }
+  } else {
+    return null;
+  }
+  if (!values.length) return null;
+  return { percent: Math.round(values.filter(Boolean).length / values.length * 100), sampleSize: values.length };
+}
+
+function minimumSupportForMarket(market) {
+  return ({
+    "MS 1.5 ÜST": 70,
+    "MS 2.5 ÜST": 50,
+    "KG VAR": 50,
+    "İY 0.5 ÜST": 60,
+    "İY 1.5 ÜST": 40,
+    "EV 1.5 ÜST": 40,
+    "DEP 1.5 ÜST": 40
+  })[market] ?? 101;
+}
+
+function scorePrematchChoice(choice, support) {
+  // Form support is primary; odds are a secondary consistency check, not the sole selector.
+  const impliedProbability = 100 / choice.odd;
+  return support.percent * 0.72 + impliedProbability * 0.28;
+}
+
 async function createCouponByMode(date, mode = "prematch") {
   if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("Geçerli bir maç tarihi seç.");
   const isLiveMode = mode === "live";
@@ -354,7 +431,29 @@ async function createCouponByMode(date, mode = "prematch") {
         }
         if (!pressure) choices = [];
       } else {
-        choices = choices.filter(c => !c.market.startsWith("İY ") || c.odd <= 1.65);
+        // Do not select a market from odds alone. Require last-five team-form data for both teams.
+        if (!fixture.homeId || !fixture.awayId) continue;
+        let homeRows = [], awayRows = [];
+        try {
+          [homeRows, awayRows] = await Promise.all([
+            getRecentTeamForm(fixture.homeId),
+            getRecentTeamForm(fixture.awayId)
+          ]);
+        } catch (formError) {
+          errors.push(`${fixture.home} - ${fixture.away}: son 5 maç verisi alınamadı`);
+          continue;
+        }
+        if (homeRows.length < 3 || awayRows.length < 3) continue;
+
+        choices = choices.map(c => {
+          const support = recentFormSupport(c.market, homeRows, awayRows, fixture.homeId, fixture.awayId);
+          const minimumSample = ["EV 1.5 ÜST", "DEP 1.5 ÜST"].includes(c.market) ? 3 : 6;
+          return support && support.sampleSize >= minimumSample
+            ? { ...c, supportPercent: support.percent, supportSample: support.sampleSize,
+                modelScore: scorePrematchChoice(c, support) }
+            : null;
+        }).filter(c => c && c.supportPercent >= minimumSupportForMarket(c.market));
+        choices.sort((a, b) => b.modelScore - a.modelScore);
       }
       if (!choices.length) continue;
 
@@ -363,6 +462,9 @@ async function createCouponByMode(date, mode = "prematch") {
         fixtureId: fixture.id, league: fixture.league, country: fixture.country,
         home: fixture.home, away: fixture.away, fixtureDate: fixture.fixtureDate,
         market: chosen.market, source: chosen.bookmaker, internalOdd: chosen.odd,
+        supportPercent: chosen.supportPercent ?? null,
+        supportSample: chosen.supportSample ?? null,
+        modelScore: chosen.modelScore ?? null,
         minute: isLiveMode ? fixture.minute : null,
         currentScore: `${fixture.homeScore}-${fixture.awayScore}`,
         isLive: isLiveMode, rank: chosen.rank, oddsBasis, statsSummary,
@@ -374,7 +476,12 @@ async function createCouponByMode(date, mode = "prematch") {
   }
 
   candidates.sort((a, b) => {
-    // More conservative odds first. Keep market/odds internal; never fabricate confidence %.
+    if (!isLiveMode) {
+      return (b.modelScore ?? -1) - (a.modelScore ?? -1) ||
+        (b.supportPercent ?? -1) - (a.supportPercent ?? -1) ||
+        a.internalOdd - b.internalOdd;
+    }
+    // Live choices remain based on live odds plus live-stat eligibility.
     return a.internalOdd - b.internalOdd || a.rank - b.rank;
   });
 
@@ -387,7 +494,7 @@ async function createCouponByMode(date, mode = "prematch") {
       detail: errors.slice(0, 3).join(" | ") };
   }
 
-  const publicPicks = chosen.map(({ internalOdd, rank, scoreTotal, ...p }) => p);
+  const publicPicks = chosen.map(({ internalOdd, rank, scoreTotal, modelScore, supportPercent, supportSample, ...p }) => p);
   const draftId = `coupon-${Date.now()}`;
   const coupon = {
     draftId, date, type: mode, isLive: isLiveMode, status: "READY", picks: publicPicks,
