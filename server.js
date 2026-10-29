@@ -326,6 +326,8 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   const live = mode === "live";
   const total = Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0);
   const minute = Number(fixture.minute || 0);
+  // Live recommendations must wait until minute 35; keep score/form analysis available before then.
+  if (live && minute < 35) return null;
   let allowed;
   if (!live) allowed = ["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
   else if (minute >= 20 && minute <= 30 && total === 0) allowed = ["İY 0.5 ÜST"];
@@ -494,7 +496,7 @@ async function createCouponByMode(date, mode = "prematch") {
   const fixtureKey = isLiveMode ? "liveListForCoupon" : `fixtures:${date}`;
   const fixturePayload = await cachedProviderRequest(fixtureKey, fixturePath, isLiveMode ? 15000 : 60000);
   const allFixtures = (fixturePayload.response || []).map(normalizeProviderMatch)
-    .filter(m => m.id && (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 18 && Number(m.minute || 0) <= 80 : m.status === "NS"));
+    .filter(m => m.id && (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 35 && Number(m.minute || 0) <= 80 : m.status === "NS"));
   // Kupon isteği bir günde bulunan bütün maçlar için onlarca ayrı API çağrısı açmasın.
   const fixtures = allFixtures.slice(0, isLiveMode ? 15 : 35);
   if (!fixtures.length) return { draftId:`coupon-${Date.now()}`, date, type:mode, status:"NO_MATCHES", picks:[], message:isLiveMode ? "Şu anda uygun dakika aralığında canlı maç bulunamadı." : "Seçilen tarihte başlamamış maç bulunamadı." };
@@ -659,10 +661,10 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       fixtureId:match.id,matchStatus:match.status,
       halfTimeScore:match.status==="FT"?`${match.htHomeScore??"?"}-${match.htAwayScore??"?"}`:isLive&&match.minute<45&&total>0?`Canlı skor: ${match.homeScore}-${match.awayScore}`:scores.halfTimeScore,
       fullTimeScore:match.status==="FT"?`${match.homeScore}-${match.awayScore}`:scores.fullTimeScore,
-      mainPick:chosen?.market || "Doğrulanabilir piyasa verisi bulunamadı",alternative:alternativeChoice?.market || "Desteklenen ikinci tercih bulunamadı",surprise:chosen ? "Sürpriz yalnızca ayrı piyasa sinyali desteklerse değerlendirilir" : "Sürpriz için doğrulanabilir piyasa verisi yok",
+      mainPick:chosen?.market || (isLive && Number(match.minute || 0) < 35 ? "Canlı tercih 35. dakikadan itibaren" : "Doğrulanabilir piyasa verisi bulunamadı"),alternative:alternativeChoice?.market || (isLive && Number(match.minute || 0) < 35 ? "Canlı veriler 35. dakikadan sonra değerlendirilecek" : "Desteklenen ikinci tercih bulunamadı"),surprise:chosen ? "Sürpriz yalnızca ayrı piyasa sinyali desteklerse değerlendirilir" : (isLive && Number(match.minute || 0) < 35 ? "Sürpriz için erken; 35. dakikadan sonra yeniden değerlendirilecek" : "Sürpriz için doğrulanabilir piyasa verisi yok"),
       marketPercentages:analysisPercentages(oddsRow,homeForm,awayForm),
       note:chosen?`${chosen.bookmaker}; piyasa olasılığı ve son 5 maç formu birlikte değerlendirildi${isLive && chosen.oddsTiming === "prematch-fallback" ? "; bu tercih için canlı oran yok, maç önü oranı kullanıldı" : ""}${isLive?`; canlı baskı: ${stats.shotsOnTarget} isabetli şut, ${stats.totalShots} toplam şut, ${stats.corners} korner`:""}.`:
-        `Bu maç için doğrulanabilir oran + son 5 maç formu${isLive?" + canlı oran/istatistik":""} birlikte bulunamadı; tahmin uydurulmadı.`,
+        (isLive && Number(match.minute || 0) < 35 ? "Maç analizi ve skor tahmini gösterilir; canlı tercih 35. dakikadan sonra canlı oran + istatistik + form ile değerlendirilecek." : `Bu maç için doğrulanabilir oran + son 5 maç formu${isLive?" + canlı oran/istatistik":""} birlikte bulunamadı; tahmin uydurulmadı.`),
       oddsBasis:isLive?(liveRow?"Canlı oran + maç önü referansı":"Canlı oran bulunamadı; maç önü referansı kullanıldı"):"Maç önü son mevcut oran kaydı; resmî kapanış garantisi yok",
       htMarketAlreadyHit
     });
