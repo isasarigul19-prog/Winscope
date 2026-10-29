@@ -98,6 +98,7 @@ function normalizeProviderMatch(match) {
   else if (["NS", "TBD", "PST", "CANC", "ABD", "AWD", "WO"].includes(status)) status = status === "NS" ? "NS" : status;
   return {
     id: idNum, homeId: Number(match.teams?.home?.id) || null, awayId: Number(match.teams?.away?.id) || null,
+    leagueId: Number(match.league?.id) || null,
     league: String(leagueName), country: String(countryName),
     minute: match.fixture?.status?.elapsed ?? match.minute ?? null, status,
     home: String(homeName), away: String(awayName),
@@ -698,6 +699,31 @@ async function sendCouponAutomatically(coupon, chosen) {
   }
 }
 
+function couponLeaguePriority(fixture) {
+  const league = String(fixture.league || "").toLocaleLowerCase("tr-TR");
+  const country = String(fixture.country || "").toLocaleLowerCase("tr-TR");
+  // Önce en büyük ve en çok takip edilen ligler; ardından güçlü ikinci grup.
+  const topTier = [
+    /premier league/.test(league) && /england|ingiltere/.test(country),
+    /la liga|primera division/.test(league) && /spain|ispanya/.test(country),
+    /serie a/.test(league) && /italy|italya/.test(country),
+    /bundesliga/.test(league) && /germany|almanya/.test(country),
+    /ligue 1/.test(league) && /france|fransa/.test(country),
+    /champions league/.test(league),
+    /europa league/.test(league)
+  ].some(Boolean);
+  if (topTier) return 1;
+  const secondTier = [
+    /eredivisie/.test(league), /primeira liga|liga portugal/.test(league),
+    /super lig|süper lig/.test(league) && /turkey|türkiye/.test(country),
+    /pro league/.test(league) && /belgium|belçika/.test(country),
+    /premiership/.test(league) && /scotland|iskoçya/.test(country),
+    /championship/.test(league) && /england|ingiltere/.test(country),
+    /major league soccer/.test(league)
+  ].some(Boolean);
+  return secondTier ? 2 : 3;
+}
+
 async function createCouponByMode(date, mode = "prematch") {
   if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("Geçerli bir maç tarihi seç.");
   const isLiveMode = mode === "live";
@@ -706,8 +732,11 @@ async function createCouponByMode(date, mode = "prematch") {
   const fixturePayload = await cachedProviderRequest(fixtureKey, fixturePath, isLiveMode ? 15000 : 60000);
   const allFixtures = (fixturePayload.response || []).map(normalizeProviderMatch)
     .filter(m => m.id && (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 25 && Number(m.minute || 0) <= 80 : m.status === "NS"));
-  // Kupon isteği bir günde bulunan bütün maçlar için onlarca ayrı API çağrısı açmasın.
-  const fixtures = allFixtures.slice(0, isLiveMode ? 15 : 35);
+  // Maç sayısına göre kör kesme yapma: büyük ligleri öncele, sonra güçlü ikinci grup.
+  // API kota sınırını korumak için en fazla 50 maçlık aday havuzu; canlıda 15.
+  allFixtures.sort((a, b) => couponLeaguePriority(a) - couponLeaguePriority(b) ||
+    new Date(a.fixtureDate || 0) - new Date(b.fixtureDate || 0));
+  const fixtures = allFixtures.slice(0, isLiveMode ? 15 : 50);
   if (!fixtures.length) return { draftId:`coupon-${Date.now()}`, date, type:mode, status:"NO_MATCHES", picks:[], message:isLiveMode ? "Şu anda uygun dakika aralığında canlı maç bulunamadı." : "Seçilen tarihte başlamamış maç bulunamadı." };
 
   const dateOdds = new Map();
@@ -722,10 +751,11 @@ async function createCouponByMode(date, mode = "prematch") {
   if (!isLiveMode && dateOdds.size) {
     const withBulkOdds = fixtures.filter(f => dateOdds.has(f.id));
     const withoutBulkOdds = fixtures.filter(f => !dateOdds.has(f.id));
-    // Önce toplu oran cevabındaki maçları kullan; gerektiğinde sınırlı sayıda yedek maça bak.
-    fixturesToAnalyze = [...withBulkOdds.slice(0, 25), ...withoutBulkOdds.slice(0, 8)];
+    // Önce büyük liglerden gelen toplu oranlı maçları değerlendir; sonra oranı eksik olanlardan yedek ekle.
+    fixturesToAnalyze = [...withBulkOdds.slice(0, 35), ...withoutBulkOdds.slice(0, 10)];
   } else if (!isLiveMode) {
-    fixturesToAnalyze = fixtures.slice(0, 12);
+    // Toplu oran verisi yoksa tek tek oran sorguları daha pahalıdır; yine de 12 ile erken kesme.
+    fixturesToAnalyze = fixtures.slice(0, 18);
   }
   for (const fixture of fixturesToAnalyze) {
     try {
