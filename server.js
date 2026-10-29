@@ -17,28 +17,60 @@ app.get("/", (_req, res) => res.type("html").send(EMBEDDED_INDEX_HTML));
 app.use(express.static(path.join(ROOT, "public")));
 
 const providerCache = new Map();
+const providerInFlight = new Map();
 const archives = { analyses: [], coupons: [] };
 // Aynı kuponun art arda tıklama/yenilemelerde tekrar Telegram'a gitmesini önler.
 const telegramDeliveryCache = new Map();
+// API-Football plan limitine takılmamak için istekleri tek kuyruktan geçir.
+// 260 ms aralık yaklaşık 231 istek/dk ile 300/dk sınırının altında kalır.
+let providerQueue = Promise.resolve();
+let lastProviderRequestAt = 0;
+let providerCooldownUntil = 0;
+const PROVIDER_MIN_INTERVAL_MS = 260;
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
   const now = Date.now();
   const cached = providerCache.get(cacheKey);
   if (cached && now - cached.at < ttlMs) return cached.payload;
+  if (providerInFlight.has(cacheKey)) return providerInFlight.get(cacheKey);
   if (!API_KEY) throw new Error("Render Environment Variables içinde API_FOOTBALL_KEY eksik.");
-  const response = await fetch(`${BASE_URL}${pathname}`, {
-    headers: { "x-apisports-key": API_KEY, Accept: "application/json" },
-    signal: AbortSignal.timeout(15000)
+
+  const task = providerQueue.then(async () => {
+    const secondCheck = providerCache.get(cacheKey);
+    if (secondCheck && Date.now() - secondCheck.at < ttlMs) return secondCheck.payload;
+    const allowedAt = Math.max(lastProviderRequestAt + PROVIDER_MIN_INTERVAL_MS, providerCooldownUntil);
+    if (allowedAt > Date.now()) await delay(allowedAt - Date.now());
+    lastProviderRequestAt = Date.now();
+    const response = await fetch(`${BASE_URL}${pathname}`, {
+      headers: { "x-apisports-key": API_KEY, Accept: "application/json" },
+      signal: AbortSignal.timeout(15000)
+    });
+    const raw = await response.text();
+    let payload;
+    try { payload = raw ? JSON.parse(raw) : {}; } catch { throw new Error("API-Football geçerli JSON döndürmedi."); }
+    const errors = payload.errors && Object.keys(payload.errors).length ? payload.errors : null;
+    const errorText = errors ? JSON.stringify(errors) : "";
+    if (!response.ok || errors) {
+      if (response.status === 429 || /rate.?limit|too many requests|per-minute/i.test(errorText)) {
+        providerCooldownUntil = Date.now() + 15000;
+        throw new Error(`API-Football istek sınırına ulaşıldı; 15 saniye bekleme uygulandı. ${errorText}`);
+      }
+      throw new Error(`API-Football hatası: ${errors ? errorText : `HTTP ${response.status}`}`);
+    }
+    providerCache.set(cacheKey, { at: Date.now(), payload });
+    // Bellek kullanımını sınırlı tut.
+    if (providerCache.size > 2500) {
+      const cutoff = Date.now() - 6 * 60 * 60 * 1000;
+      for (const [key, value] of providerCache) if (value.at < cutoff) providerCache.delete(key);
+      while (providerCache.size > 2000) providerCache.delete(providerCache.keys().next().value);
+    }
+    return payload;
   });
-  const raw = await response.text();
-  let payload;
-  try { payload = raw ? JSON.parse(raw) : {}; } catch { throw new Error("API-Football geçerli JSON döndürmedi."); }
-  if (!response.ok || (payload.errors && Object.keys(payload.errors).length)) {
-    const detail = payload.errors ? JSON.stringify(payload.errors) : `HTTP ${response.status}`;
-    throw new Error(`API-Football hatası: ${detail}`);
-  }
-  providerCache.set(cacheKey, { at: now, payload });
-  return payload;
+  providerQueue = task.catch(() => undefined);
+  providerInFlight.set(cacheKey, task);
+  try { return await task; }
+  finally { providerInFlight.delete(cacheKey); }
 }
 
 function normalizeProviderMatch(match) {
@@ -449,8 +481,10 @@ async function createCouponByMode(date, mode = "prematch") {
   const fixturePath = isLiveMode ? "/fixtures?live=all" : `/fixtures?date=${encodeURIComponent(date)}&timezone=Europe/Istanbul`;
   const fixtureKey = isLiveMode ? "liveListForCoupon" : `fixtures:${date}`;
   const fixturePayload = await cachedProviderRequest(fixtureKey, fixturePath, isLiveMode ? 15000 : 60000);
-  const fixtures = (fixturePayload.response || []).map(normalizeProviderMatch)
+  const allFixtures = (fixturePayload.response || []).map(normalizeProviderMatch)
     .filter(m => m.id && (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 18 && Number(m.minute || 0) <= 80 : m.status === "NS"));
+  // Kupon isteği bir günde bulunan bütün maçlar için onlarca ayrı API çağrısı açmasın.
+  const fixtures = allFixtures.slice(0, isLiveMode ? 15 : 35);
   if (!fixtures.length) return { draftId:`coupon-${Date.now()}`, date, type:mode, status:"NO_MATCHES", picks:[], message:isLiveMode ? "Şu anda uygun dakika aralığında canlı maç bulunamadı." : "Seçilen tarihte başlamamış maç bulunamadı." };
 
   const dateOdds = new Map();
@@ -461,7 +495,16 @@ async function createCouponByMode(date, mode = "prematch") {
     } catch (e) { console.warn(`[Coupon] date odds: ${e.message}`); }
   }
   const candidates = [], errors = [];
-  for (const fixture of fixtures) {
+  let fixturesToAnalyze = fixtures;
+  if (!isLiveMode && dateOdds.size) {
+    const withBulkOdds = fixtures.filter(f => dateOdds.has(f.id));
+    const withoutBulkOdds = fixtures.filter(f => !dateOdds.has(f.id));
+    // Önce toplu oran cevabındaki maçları kullan; gerektiğinde sınırlı sayıda yedek maça bak.
+    fixturesToAnalyze = [...withBulkOdds.slice(0, 25), ...withoutBulkOdds.slice(0, 8)];
+  } else if (!isLiveMode) {
+    fixturesToAnalyze = fixtures.slice(0, 12);
+  }
+  for (const fixture of fixturesToAnalyze) {
     try {
       let marketOddsRow = null, prematchOddsRow = null, oddsBasis = "";
       if (isLiveMode) {
@@ -491,7 +534,7 @@ async function createCouponByMode(date, mode = "prematch") {
         marketOddsRow = dateOdds.get(fixture.id) || null;
         if (!marketOddsRow) {
           const payload = await cachedProviderRequest(`odds-fixture:${fixture.id}`, `/odds?fixture=${fixture.id}`, 90000);
-          marketOddsRow = (payload.response || []).find(row=>Number(row.fixture?.id)===fixture.id) || payload.response?.[0] || null;
+          marketOddsRow = (payload.response || []).find(row=>Number(row.fixture?.id)===fixture.id) || null;
         }
         if (!marketOddsRow || !fixture.homeId || !fixture.awayId) continue;
         const [homeForm, awayForm] = await Promise.all([fetchTeamRecentForm(fixture.homeId,fixture.id),fetchTeamRecentForm(fixture.awayId,fixture.id)]);
@@ -503,7 +546,11 @@ async function createCouponByMode(date, mode = "prematch") {
           fixtureDate:fixture.fixtureDate,market:chosen.market,source:chosen.bookmaker,internalOdd:chosen.odd,marketProbability:chosen.probability,
           formSupport:chosen.formPct,score:chosen.score,minute:null,currentScore:"0-0",isLive:false,oddsBasis,statsSummary:null});
       }
-    } catch(e) { errors.push(`${fixture.home} - ${fixture.away}: ${e.message}`); }
+    } catch(e) {
+      const message = /istek sınırına ulaşıldı/i.test(e.message) ? "API-Football istek sınırı; kuyruk beklemesi devrede" : e.message;
+      errors.push(`${fixture.home} - ${fixture.away}: ${message}`);
+      if (/istek sınırına ulaşıldı/i.test(e.message)) break;
+    }
   }
   candidates.sort((a,b)=>b.score-a.score || b.formSupport-a.formSupport || a.internalOdd-b.internalOdd);
   const count = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
