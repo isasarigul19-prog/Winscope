@@ -256,6 +256,64 @@ function scorePrediction(fixture, homeForm, awayForm) {
   return { halfTimeScore: live && Number(fixture.minute || 0) >= 45 && fixture.htHomeScore != null && fixture.htAwayScore != null ? `${fixture.htHomeScore}-${fixture.htAwayScore} (Gerçek)` : `${Math.min(finalH, htH)}-${Math.min(finalA, htA)} (tahmin)`, fullTimeScore: `${finalH}-${finalA} (tahmin)` };
 }
 
+function alignScorePredictionWithPick(scores, pick, fixture, homeForm, awayForm) {
+  // Skor tahmini ile ANA TERCİH aynı senaryoyu anlatmalı. Oran/piyasa seçimini
+  // değiştirmez; yalnızca tahmin skorunu, seçilmiş pazarla çelişmeyecek en yakın
+  // skora getirir. Gerçek/canlı skor hiçbir zaman geriye alınmaz.
+  if (!scores || !pick || !/\d+\s*[-:]\s*\d+/.test(String(scores.fullTimeScore || ""))) return scores;
+  const ftMatch = String(scores.fullTimeScore).match(/(\d+)\s*[-:]\s*(\d+)/);
+  let h = Number(ftMatch[1]), a = Number(ftMatch[2]);
+  const live = fixture.status === "LIVE";
+  const currentH = Number(fixture.homeScore || 0), currentA = Number(fixture.awayScore || 0);
+  h = Math.max(h, currentH);
+  a = Math.max(a, currentA);
+
+  const expectedH = 0.58 * Number(homeForm?.avgGoalsFor || 0) + 0.42 * Number(awayForm?.avgGoalsAgainst || 0);
+  const expectedA = 0.58 * Number(awayForm?.avgGoalsFor || 0) + 0.42 * Number(homeForm?.avgGoalsAgainst || 0);
+  const addGoalToLikelySide = () => {
+    if (expectedH > expectedA) h += 1;
+    else if (expectedA > expectedH) a += 1;
+    else if (h <= a) h += 1;
+    else a += 1;
+  };
+
+  const totalOver = String(pick).match(/^MS\s*(0[.,]5|1[.,]5|2[.,]5|3[.,]5)\s*ÜST$/i);
+  if (totalOver) {
+    const line = Number(totalOver[1].replace(',', '.'));
+    const requiredTotal = Math.floor(line) + 1;
+    while (h + a < requiredTotal) addGoalToLikelySide();
+  } else if (/^EV\s*1[.,]5\s*ÜST$/i.test(pick)) {
+    while (h < 2) h += 1;
+  } else if (/^DEP\s*1[.,]5\s*ÜST$/i.test(pick)) {
+    while (a < 2) a += 1;
+  } else if (/^KG\s*VAR$/i.test(pick)) {
+    if (h === 0 && a === 0) {
+      if (expectedH >= expectedA) { h = 1; a = 1; }
+      else { h = 1; a = 1; }
+    } else if (h === 0) h = 1;
+    else if (a === 0) a = 1;
+  }
+
+  // Canlı skorun altına düşülmesini önle ve tahmin etiketi/gerçek skor ayrımını koru.
+  h = Math.max(h, currentH);
+  a = Math.max(a, currentA);
+  const ftSuffix = /\(tahmin\)/i.test(String(scores.fullTimeScore)) ? " (tahmin)" : "";
+  const next = { ...scores, fullTimeScore: `${h}-${a}${ftSuffix}` };
+
+  // İlk yarı pazarı seçilmişse İY skorunu da aynı pazarla tutarlı yap.
+  const htPick = String(pick).match(/^İY\s*(0[.,]5|1[.,]5|2[.,]5)\s*ÜST$/i);
+  if (htPick && /\d+\s*[-:]\s*\d+/.test(String(next.halfTimeScore || "")) && !/Gerçek|Canlı skor/i.test(String(next.halfTimeScore))) {
+    const ht = String(next.halfTimeScore).match(/(\d+)\s*[-:]\s*(\d+)/);
+    let hh = Number(ht[1]), ha = Number(ht[2]);
+    const needed = Math.floor(Number(htPick[1].replace(',', '.'))) + 1;
+    while (hh + ha < needed) {
+      if (expectedH >= expectedA) hh += 1; else ha += 1;
+    }
+    next.halfTimeScore = `${hh}-${ha} (tahmin)`;
+  }
+  return next;
+}
+
 function analysisPercentages(oddsRow, homeForm, awayForm) {
   const map = { ht05: "İY 0.5 ÜST", ht15: "İY 1.5 ÜST", ms05: "MS 0.5 ÜST", ms15: "MS 1.5 ÜST", ms25: "MS 2.5 ÜST", ms35: "MS 3.5 ÜST", btts: "KG VAR", home15: "EV 1.5 ÜST", away15: "DEP 1.5 ÜST" };
   const rows = oddsForFixture(oddsRow); const out = {};
@@ -561,7 +619,8 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     const total=Number(match.homeScore||0)+Number(match.awayScore||0);
     const htGoals = Number(match.htHomeScore||0)+Number(match.htAwayScore||0);
     const htMarketAlreadyHit = match.minute < 45 ? total >= 1 : htGoals >= 1;
-    const scores = scorePrediction(match,homeForm,awayForm);
+    const rawScores = scorePrediction(match,homeForm,awayForm);
+    const scores = alignScorePredictionWithPick(rawScores, chosen?.market, match, homeForm, awayForm);
     const predictedFt = String(scores.fullTimeScore || "").match(/(\d+)\s*[-:]\s*(\d+)/);
     const scoreSuggestsBtts = Boolean(predictedFt && Number(predictedFt[1]) > 0 && Number(predictedFt[2]) > 0);
     const alternativeChoice = chosen && oddsRow && homeForm.available && awayForm.available
