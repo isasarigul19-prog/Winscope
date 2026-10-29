@@ -913,7 +913,9 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
     fixturesToAnalyze = [...withBulkOdds.slice(0, 50), ...withoutBulkOdds.slice(0, 10)];
   }
   let analyzedFixtures = 0;
-  const targetPicks = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
+  // Maç önü kuponunda ilk 2 adayı bulunca durma: daha geniş örneklemden
+  // en iyi 2 tercihi sıralayabilmek için 10 aday hedefle. Nihai kupon boyutu 2 kalır.
+  const targetPicks = mode === "surprise" ? 10 : mode === "prematch" ? 10 : 1;
   for (const fixture of fixturesToAnalyze) {
     // Yeterli sayıda yeni, doğrulanmış aday oluştuğunda gereksiz API çağrılarını kes.
     const uniqueCandidateCount = options.automatic
