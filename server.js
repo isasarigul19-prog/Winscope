@@ -605,8 +605,9 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   // maç önü oranına düş; seçimin dayanağını oddsTiming ile açıkça işaretle.
   const liveMarketRows = live ? oddsForFixture(oddsRow || null) : [];
   const preMarkets = oddsForFixture(prematchOddsRow || (!live ? oddsRow : null) || null);
-  const predictedScores = scorePrediction(fixture, h, a, live && useLiveOdds ? oddsRow : null, prematchOddsRow || (!live ? oddsRow : null) || null);
+  // Initialize before scorePrediction reads it; otherwise live analysis throws a TDZ error.
   const useLiveOdds = live && liveMarketRows.length > 0;
+  const predictedScores = scorePrediction(fixture, h, a, useLiveOdds ? oddsRow : null, prematchOddsRow || (!live ? oddsRow : null) || null);
   const mergedMarketRows = (useLiveOdds ? liveMarketRows : preMarkets)
     .map(x => ({ ...x, oddsTiming: useLiveOdds ? "live" : "prematch" }));
   const choices = mergedMarketRows.filter(x => allowed.includes(x.market) && x.market !== excludeMarket && marketConsistentWithScore(x.market, predictedScores));
