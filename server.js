@@ -270,7 +270,7 @@ function analysisPercentages(oddsRow, homeForm, awayForm) {
   return out;
 }
 
-function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOddsRow) {
+function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOddsRow, excludeMarket = null, preferredMarket = null) {
   const live = mode === "live";
   const total = Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0);
   const minute = Number(fixture.minute || 0);
@@ -284,7 +284,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   else if (minute >= 66 && total >= 1) allowed = ["MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
   else allowed = ["İY 0.5 ÜST", "İY 1.5 ÜST", "MS 0.5 ÜST", "MS 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
 
-  const choices = oddsForFixture(oddsRow).filter(x => allowed.includes(x.market));
+  const choices = oddsForFixture(oddsRow).filter(x => allowed.includes(x.market) && x.market !== excludeMarket);
   const h = forms.home, a = forms.away;
   const statsM = stats || { available: false, pressure: 0, home: {}, away: {} };
   const preMarkets = oddsForFixture(prematchOddsRow || null);
@@ -300,7 +300,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     "KG VAR": 48, "İY 0.5 ÜST": 52, "İY 1.5 ÜST": 32, "MS 0.5 ÜST": 58, "MS 1.5 ÜST": 52 };
   const minFormPct = { "EV 1.5 ÜST": 45, "DEP 1.5 ÜST": 45, "MS 2.5 ÜST": 48, "MS 3.5 ÜST": 32,
     "KG VAR": 48, "İY 0.5 ÜST": 52, "İY 1.5 ÜST": 32, "MS 0.5 ÜST": 52, "MS 1.5 ÜST": 48 };
-  return choices.map(choice => {
+  const ranked = choices.map(choice => {
     const formPct = marketSupport(choice.market, h, a);
     let liveBonus = 0;
     if (live) {
@@ -332,7 +332,13 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     if (formPct == null || choice.probability < minMarketPct[choice.market] || formPct < minFormPct[choice.market]) return null;
     const score = choice.probability*0.55 + formPct*0.45 + liveBonus - (live && choice.market === "MS 3.5 ÜST" ? Math.max(0,minute-65)*0.35 : 0);
     return { ...choice, formPct, score, statsSummary: live ? statsM : null };
-  }).filter(Boolean).sort((a,b)=>b.score-a.score)[0] || null;
+  }).filter(Boolean).sort((a,b)=>b.score-a.score);
+  // Skor tahmini iki takımın da gol atacağını gösteriyorsa ve KG VAR gerçek oran + form eşiğini geçiyorsa, alternatifte bunu önceliklendir.
+  if (preferredMarket) {
+    const preferred = ranked.find(x => x.market === preferredMarket);
+    if (preferred) return preferred;
+  }
+  return ranked[0] || null;
 }
 
 async function sendTelegram(text) {
@@ -556,11 +562,16 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     const htGoals = Number(match.htHomeScore||0)+Number(match.htAwayScore||0);
     const htMarketAlreadyHit = match.minute < 45 ? total >= 1 : htGoals >= 1;
     const scores = scorePrediction(match,homeForm,awayForm);
+    const predictedFt = String(scores.fullTimeScore || "").match(/(\d+)\s*[-:]\s*(\d+)/);
+    const scoreSuggestsBtts = Boolean(predictedFt && Number(predictedFt[1]) > 0 && Number(predictedFt[2]) > 0);
+    const alternativeChoice = chosen && oddsRow && homeForm.available && awayForm.available
+      ? chooseSupportedMarket(oddsRow,isLive?"live":"prematch",match,{home:homeForm,away:awayForm},isLive?stats:null,prematchRow,chosen.market,scoreSuggestsBtts?"KG VAR":null)
+      : null;
     res.json({
       fixtureId:match.id,matchStatus:match.status,
       halfTimeScore:match.status==="FT"?`${match.htHomeScore??"?"}-${match.htAwayScore??"?"}`:isLive&&match.minute<45&&total>0?`Canlı skor: ${match.homeScore}-${match.awayScore}`:scores.halfTimeScore,
       fullTimeScore:match.status==="FT"?`${match.homeScore}-${match.awayScore}`:scores.fullTimeScore,
-      mainPick:chosen?.market || "Piyasa tercihi üretilemedi: doğrulanabilir oran yok",alternative:chosen ? (analysisPercentages(oddsRow,homeForm,awayForm)["ms25"]?.percent >= 50 && chosen.market !== "MS 2.5 ÜST" ? "MS 2.5 ÜST" : "Alternatif piyasa sinyali zayıf") : "Alternatif için doğrulanabilir oran yok",surprise:chosen ? "Sürpriz yalnızca ayrı piyasa sinyali desteklerse değerlendirilir" : "Sürpriz için doğrulanabilir piyasa verisi yok",
+      mainPick:chosen?.market || "Doğrulanabilir piyasa verisi bulunamadı",alternative:alternativeChoice?.market || "Desteklenen ikinci tercih bulunamadı",surprise:chosen ? "Sürpriz yalnızca ayrı piyasa sinyali desteklerse değerlendirilir" : "Sürpriz için doğrulanabilir piyasa verisi yok",
       marketPercentages:analysisPercentages(oddsRow,homeForm,awayForm),
       note:chosen?`${chosen.bookmaker}; piyasa olasılığı ve son 5 maç formu birlikte değerlendirildi${isLive?`; canlı baskı: ${stats.shotsOnTarget} isabetli şut, ${stats.totalShots} toplam şut, ${stats.corners} korner`:""}.`:
         `Bu maç için doğrulanabilir oran + son 5 maç formu${isLive?" + canlı oran/istatistik":""} birlikte bulunamadı; tahmin uydurulmadı.`,
