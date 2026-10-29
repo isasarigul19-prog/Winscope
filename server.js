@@ -282,18 +282,127 @@ function liveStatsMetrics(stats, fixture) {
   return out;
 }
 
-function scorePrediction(fixture, homeForm, awayForm) {
+function poissonProbabilityAtLeast(threshold, lambda, currentGoals = 0) {
+  const need = Number(threshold) - Number(currentGoals || 0);
+  if (need <= 0) return 1;
+  let cumulative = 0;
+  for (let k = 0; k < need; k++) cumulative += Math.exp(-lambda) * Math.pow(lambda, k) / factorial(k);
+  return Math.max(0, Math.min(1, 1 - cumulative));
+}
+function factorial(n) { let out = 1; for (let i = 2; i <= n; i++) out *= i; return out; }
+function lambdaFromMarketProbability(probability, threshold, currentGoals = 0) {
+  const p = Number(probability);
+  if (!Number.isFinite(p) || p <= 0.01 || p >= 0.99 || Number(currentGoals || 0) >= Number(threshold)) return null;
+  let low = 0, high = 8;
+  for (let i = 0; i < 50; i++) {
+    const mid = (low + high) / 2;
+    if (poissonProbabilityAtLeast(threshold, mid, currentGoals) < p) low = mid;
+    else high = mid;
+  }
+  return (low + high) / 2;
+}
+function marketProbabilitiesByName(oddsRow) {
+  const rows = oddsForFixture(oddsRow);
+  const grouped = new Map();
+  for (const row of rows) {
+    if (!Number.isFinite(Number(row.probability))) continue;
+    if (!grouped.has(row.market)) grouped.set(row.market, []);
+    grouped.get(row.market).push(Number(row.probability) / 100);
+  }
+  const result = {};
+  for (const [market, values] of grouped) {
+    // Birden fazla bahis şirketi varsa olasılıkları ortala; oran değerlerini kullanıcıya açma.
+    result[market] = values.reduce((sum, value) => sum + value, 0) / values.length;
+  }
+  return result;
+}
+function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, prematchOddsRow = null) {
   const hNow = Number(fixture.homeScore || 0), aNow = Number(fixture.awayScore || 0);
   const live = fixture.status === "LIVE";
-  if (fixture.status === "FT") return { halfTimeScore: `${fixture.htHomeScore ?? "?"}-${fixture.htAwayScore ?? "?"}`, fullTimeScore: `${hNow}-${aNow}` };
-  if (!homeForm?.available || !awayForm?.available) return { halfTimeScore: "Form verisi bulunamadı", fullTimeScore: "Form verisi bulunamadı" };
-  const expectedHome = Math.max(0.15, 0.58 * Number(homeForm.avgGoalsFor || 0) + 0.42 * Number(awayForm.avgGoalsAgainst || 0));
-  const expectedAway = Math.max(0.15, 0.58 * Number(awayForm.avgGoalsFor || 0) + 0.42 * Number(homeForm.avgGoalsAgainst || 0));
-  const clamp = n => Math.max(0, Math.min(5, Math.round(n)));
-  let finalH = clamp(expectedHome), finalA = clamp(expectedAway);
-  if (live) { finalH = Math.max(hNow, clamp(hNow + Math.max(0, expectedHome * (90 - Number(fixture.minute || 0)) / 90))); finalA = Math.max(aNow, clamp(aNow + Math.max(0, expectedAway * (90 - Number(fixture.minute || 0)) / 90))); }
-  const htH = clamp(expectedHome * 0.46), htA = clamp(expectedAway * 0.46);
-  return { halfTimeScore: live && Number(fixture.minute || 0) >= 45 && fixture.htHomeScore != null && fixture.htAwayScore != null ? `${fixture.htHomeScore}-${fixture.htAwayScore} (Gerçek)` : `${Math.min(finalH, htH)}-${Math.min(finalA, htA)} (tahmin)`, fullTimeScore: `${finalH}-${finalA} (tahmin)` };
+  if (fixture.status === "FT") return { halfTimeScore: `${fixture.htHomeScore ?? "?"}-${fixture.htAwayScore ?? "?"}`, fullTimeScore: `${hNow}-${aNow}`, scoreBasis: "Gerçekleşen skor" };
+  if (!homeForm?.available || !awayForm?.available) return { halfTimeScore: "Form verisi bulunamadı", fullTimeScore: "Skor tahmini için veri yetersiz", scoreBasis: "Son 5 maç formu eksik" };
+
+  const pre = marketProbabilitiesByName(prematchOddsRow);
+  const liveMarkets = live ? marketProbabilitiesByName(liveOddsRow) : {};
+  const hasLiveMarket = live && Object.keys(liveMarkets).length > 0;
+  const market = hasLiveMarket ? liveMarkets : pre;
+  const currentTotal = hNow + aNow;
+  const minute = Math.max(0, Math.min(90, Number(fixture.minute || 0)));
+  const remainingFraction = live ? Math.max(0.05, (90 - minute) / 90) : 1;
+
+  // Maç önü piyasa olasılıklarından tam maç gol beklentisi çıkarılır.
+  const preHomeMarket = lambdaFromMarketProbability(pre["EV 1.5 ÜST"], 2, 0);
+  const preAwayMarket = lambdaFromMarketProbability(pre["DEP 1.5 ÜST"], 2, 0);
+  const preTotalCandidates = [
+    lambdaFromMarketProbability(pre["MS 1.5 ÜST"], 2, 0),
+    lambdaFromMarketProbability(pre["MS 2.5 ÜST"], 3, 0),
+    lambdaFromMarketProbability(pre["MS 3.5 ÜST"], 4, 0)
+  ].filter(Number.isFinite);
+  const preTotal = preTotalCandidates.length ? preTotalCandidates.reduce((a,b)=>a+b,0) / preTotalCandidates.length : null;
+
+  // Canlı toplam gol ve takım gol pazarları mevcut skor koşulunda kalan gol beklentisine çevrilir.
+  let homeMarketLambda = hasLiveMarket ? lambdaFromMarketProbability(liveMarkets["EV 1.5 ÜST"], 2, hNow) : null;
+  let awayMarketLambda = hasLiveMarket ? lambdaFromMarketProbability(liveMarkets["DEP 1.5 ÜST"], 2, aNow) : null;
+  const liveTotalCandidates = hasLiveMarket ? [
+    lambdaFromMarketProbability(liveMarkets["MS 1.5 ÜST"], 2, currentTotal),
+    lambdaFromMarketProbability(liveMarkets["MS 2.5 ÜST"], 3, currentTotal),
+    lambdaFromMarketProbability(liveMarkets["MS 3.5 ÜST"], 4, currentTotal)
+  ].filter(Number.isFinite) : [];
+  let totalRemainingMarket = liveTotalCandidates.length ? liveTotalCandidates.reduce((a,b)=>a+b,0) / liveTotalCandidates.length : null;
+
+  const formHomeFull = Math.max(0.15, 0.58 * Number(homeForm.avgGoalsFor || 0) + 0.42 * Number(awayForm.avgGoalsAgainst || 0));
+  const formAwayFull = Math.max(0.15, 0.58 * Number(awayForm.avgGoalsFor || 0) + 0.42 * Number(homeForm.avgGoalsAgainst || 0));
+  let lambdaHome, lambdaAway;
+  if (live) {
+    // Canlı oranlar varsa öncelik canlı pazarda; kapanış/maç önü referansı sadece eksik pazarları destekler.
+    const formHomeRemaining = formHomeFull * remainingFraction;
+    const formAwayRemaining = formAwayFull * remainingFraction;
+    if (homeMarketLambda == null && preHomeMarket != null) homeMarketLambda = preHomeMarket * remainingFraction;
+    if (awayMarketLambda == null && preAwayMarket != null) awayMarketLambda = preAwayMarket * remainingFraction;
+    if (homeMarketLambda == null && totalRemainingMarket != null && awayMarketLambda != null) homeMarketLambda = Math.max(0.05, totalRemainingMarket - awayMarketLambda);
+    if (awayMarketLambda == null && totalRemainingMarket != null && homeMarketLambda != null) awayMarketLambda = Math.max(0.05, totalRemainingMarket - homeMarketLambda);
+    if (homeMarketLambda == null) homeMarketLambda = formHomeRemaining;
+    if (awayMarketLambda == null) awayMarketLambda = formAwayRemaining;
+    if (totalRemainingMarket != null && homeMarketLambda + awayMarketLambda > 0) {
+      const scale = totalRemainingMarket / (homeMarketLambda + awayMarketLambda);
+      homeMarketLambda *= scale; awayMarketLambda *= scale;
+    }
+    lambdaHome = hasLiveMarket ? 0.75 * homeMarketLambda + 0.25 * formHomeRemaining : homeMarketLambda;
+    lambdaAway = hasLiveMarket ? 0.75 * awayMarketLambda + 0.25 * formAwayRemaining : awayMarketLambda;
+  } else {
+    let h = preHomeMarket, a = preAwayMarket;
+    if (h == null && a == null && preTotal != null) {
+      const sum = formHomeFull + formAwayFull;
+      h = preTotal * formHomeFull / Math.max(0.01, sum);
+      a = preTotal * formAwayFull / Math.max(0.01, sum);
+    } else if (h == null && preTotal != null) h = Math.max(0.1, preTotal - a);
+    else if (a == null && preTotal != null) a = Math.max(0.1, preTotal - h);
+    lambdaHome = h == null ? formHomeFull : 0.75 * h + 0.25 * formHomeFull;
+    lambdaAway = a == null ? formAwayFull : 0.75 * a + 0.25 * formAwayFull;
+    if (preTotal != null && lambdaHome + lambdaAway > 0) {
+      const target = 0.65 * preTotal + 0.35 * (lambdaHome + lambdaAway);
+      const scale = target / (lambdaHome + lambdaAway);
+      lambdaHome *= scale; lambdaAway *= scale;
+    }
+  }
+
+  // Olası skorları bağımsız Poisson gol dağılımıyla sıralar; canlıda mevcut skorun altına inemez.
+  const pmf = (k, lambda) => Math.exp(-lambda) * Math.pow(lambda, k) / factorial(k);
+  let best = null;
+  const maxExtra = 6;
+  for (let gh = 0; gh <= maxExtra; gh++) for (let ga = 0; ga <= maxExtra; ga++) {
+    const probability = pmf(gh, Math.max(0.01, lambdaHome)) * pmf(ga, Math.max(0.01, lambdaAway));
+    const finalH = live ? hNow + gh : gh;
+    const finalA = live ? aNow + ga : ga;
+    if (!best || probability > best.probability) best = { finalH, finalA, probability };
+  }
+  const fullTimeScore = best ? `${best.finalH}-${best.finalA} (tahmin)` : "Skor tahmini için veri yetersiz";
+  let halfTimeScore;
+  if (live && minute >= 45 && fixture.htHomeScore != null && fixture.htAwayScore != null) halfTimeScore = `${fixture.htHomeScore}-${fixture.htAwayScore} (Gerçek)`;
+  else if (live && minute < 45) halfTimeScore = `${hNow}-${aNow} (canlı skor; İY tahmini ayrı doğrulanmadı)`;
+  else halfTimeScore = `${Math.max(0, Math.round(lambdaHome * 0.46))}-${Math.max(0, Math.round(lambdaAway * 0.46))} (tahmin)`;
+  const basis = hasLiveMarket ? "Canlı oranlar + maç önü referansı + son 5 maç formu" : (Object.keys(pre).length ? "Maç önü oran referansı (resmî kapanış olduğu doğrulanmadı) + son 5 maç formu" : "Son 5 maç formu; kullanılabilir oran pazarı bulunamadı");
+  return { halfTimeScore, fullTimeScore, scoreBasis: basis, scoreProbability: best ? Number(best.probability.toFixed(4)) : null };
 }
 
 function analysisPercentages(oddsRow, homeForm, awayForm) {
@@ -374,7 +483,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   }
 
   const h = forms.home, a = forms.away;
-  const predictedScores = scorePrediction(fixture, h, a);
+  const predictedScores = scorePrediction(fixture, h, a, live ? oddsRow : null, prematchOddsRow || (!live ? oddsRow : null));
   const liveMarketRows = oddsForFixture(oddsRow);
   const preMarkets = oddsForFixture(prematchOddsRow || null);
   // Canlı maçta canlı kotasyon önceliklidir; maç önü oranı piyasa hareketini ölçmek
@@ -414,7 +523,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     if (live) {
       if (!statsM.available) return null;
 
-      // Oran hareketi kullanılmaz: canlı tercihlerde yalnızca maç önü oranı + canlı istatistik kullanılır.
+      // Canlı piyasa olasılığı seçim puanında kullanılır; maç önü oranı scorePrediction içinde referans olarak kalır.
 
       if (choice.market.startsWith("İY ") && minute >= 45) return null;
       if (choice.market.startsWith("İY ")) {
@@ -761,7 +870,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     const total=Number(match.homeScore||0)+Number(match.awayScore||0);
     const htGoals = Number(match.htHomeScore||0)+Number(match.htAwayScore||0);
     const htMarketAlreadyHit = match.minute < 45 ? total >= 1 : htGoals >= 1;
-    const scores = scorePrediction(match,homeForm,awayForm);
+    const scores = scorePrediction(match,homeForm,awayForm,isLive && usableLiveRow ? usableLiveRow : null,prematchRow);
     const predictedFt = String(scores.fullTimeScore || "").match(/(\d+)\s*[-:]\s*(\d+)/);
     const scoreSuggestsBtts = Boolean(predictedFt && Number(predictedFt[1]) > 0 && Number(predictedFt[2]) > 0);
     const alternativeChoice = activeChoice && homeForm.available && awayForm.available
@@ -771,6 +880,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       fixtureId:match.id,matchStatus:match.status,
       halfTimeScore:match.status==="FT"?`${match.htHomeScore??"?"}-${match.htAwayScore??"?"}`:isLive&&match.minute<45&&total>0?`Canlı skor: ${match.homeScore}-${match.awayScore}`:scores.halfTimeScore,
       fullTimeScore:match.status==="FT"?`${match.homeScore}-${match.awayScore}`:scores.fullTimeScore,
+      scoreBasis:scores.scoreBasis || "Skor tahmininde kullanılan kaynak bilgisi yok",
       mainPick:chosen?.market || (earlyLive && prematchChoice ? `${prematchChoice.market} (maç önü sinyali)` : earlyLive ? "Maç önü piyasa sinyali bulunamadı; canlı tercih 25. dakikadan sonra değerlendirilecek" : "Doğrulanabilir piyasa verisi bulunamadı"),
       alternative:alternativeChoice?.market || (earlyLive ? "Canlı tercih 25. dakikadan sonra değerlendirilecek" : "Desteklenen ikinci tercih bulunamadı"),
       surprise:chosen ? "Sürpriz yalnızca ayrı piyasa sinyali desteklerse değerlendirilir" : (earlyLive ? "Canlı sürpriz tercihi 25. dakikadan sonra değerlendirilecek" : "Sürpriz için doğrulanabilir piyasa verisi yok"),
