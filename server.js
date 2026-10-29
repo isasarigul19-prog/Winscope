@@ -43,20 +43,20 @@ if (databasePool) {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`);
       await databasePool.query("CREATE INDEX IF NOT EXISTS winscope_archive_category_id_idx ON winscope_archive(category, id DESC)");
-      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_telegram_sent_matches (
+      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_telegram_fixture_sent (
         fixture_id BIGINT PRIMARY KEY,
-        match_date TEXT NOT NULL,
-        coupon_type TEXT NOT NULL,
-        home_team TEXT,
-        away_team TEXT,
+        match_date DATE,
+        coupon_type TEXT,
         sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`);
-      const [analysisRows, couponRows] = await Promise.all([
+      const [analysisRows, couponRows, sentRows] = await Promise.all([
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'analysis' ORDER BY id DESC LIMIT 100"),
-        databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'coupon' ORDER BY id DESC LIMIT 50")
+        databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'coupon' ORDER BY id DESC LIMIT 50"),
+        databasePool.query("SELECT fixture_id FROM winscope_telegram_fixture_sent")
       ]);
       archives.analyses = analysisRows.rows.map(row => row.payload);
       archives.coupons = couponRows.rows.map(row => row.payload);
+      for (const row of sentRows.rows) telegramSentFixtureIds.add(Number(row.fixture_id));
       console.log(`[Archive] PostgreSQL arşivi yüklendi: analyses=${archives.analyses.length}, coupons=${archives.coupons.length}`);
     } catch (error) {
       console.error(`[Archive] PostgreSQL başlatılamadı; servis bellek içi arşivle devam edecek: ${error.message}`);
@@ -79,9 +79,10 @@ async function saveArchiveItem(category, payload) {
 }
 // Aynı kuponun art arda tıklama/yenilemelerde tekrar Telegram'a gitmesini önler.
 const telegramDeliveryCache = new Map();
-// Süreç içi yedek; kalıcı tekilleştirme PostgreSQL tablosuyla yapılır.
+// Otomatik gönderimde aynı gün aynı maçı tekrar seçmemek için takip edilir.
 const autoSentFixtureKeys = new Set();
-const sentFixtureIds = new Set();
+// Fixture ID bazında tekrar engeli; PostgreSQL varsa sunucu yeniden başlasa da korunur.
+const telegramSentFixtureIds = new Set();
 let autoLiveTaskInFlight = false;
 let autoPrematchTaskInFlight = false;
 // Telegram'a gönderilmiş kuponlardaki maçlar için gol/skor değişimi takibi.
@@ -791,66 +792,61 @@ function rankSingleMatchChoices(choices, mode = "prematch") {
 
 
 async function sendCouponAutomatically(coupon, chosen) {
+  await archiveDatabaseReady;
   const originalPicks = coupon.picks || [];
-  if (!originalPicks.length) return { sent: false, reason: "Gönderilecek maç yok." };
-
-  // Aynı fikstür daha önce hangi kupon türünde gönderildiyse tekrar gönderme.
-  const freshPicks = [];
-  for (const pick of originalPicks) {
-    const fixtureId = Number(pick.fixtureId);
-    if (!fixtureId || sentFixtureIds.has(fixtureId)) continue;
-    if (databasePool) {
-      try {
-        await archiveDatabaseReady;
-        const prior = await databasePool.query(
-          "SELECT fixture_id FROM winscope_telegram_sent_matches WHERE fixture_id = $1 LIMIT 1",
-          [fixtureId]
-        );
-        if (prior.rowCount) {
-          sentFixtureIds.add(fixtureId);
-          continue;
-        }
-      } catch (error) {
-        console.error(`[Telegram] Tekrar kontrolü veritabanında başarısız (${fixtureId}): ${error.message}`);
-        return { sent: false, reason: "Kalıcı tekrar kontrolü yapılamadı; güvenlik için gönderim durduruldu." };
+  const alreadySent = new Set(telegramSentFixtureIds);
+  if (databasePool && originalPicks.length) {
+    try {
+      const ids = originalPicks.map(p => Number(p.fixtureId)).filter(Boolean);
+      if (ids.length) {
+        const rows = await databasePool.query("SELECT fixture_id FROM winscope_telegram_fixture_sent WHERE fixture_id = ANY($1::bigint[])", [ids]);
+        for (const row of rows.rows) alreadySent.add(Number(row.fixture_id));
       }
-    }
-    freshPicks.push(pick);
+    } catch (error) { console.warn(`[Telegram] Tekrar kontrolü DB'de yapılamadı: ${error.message}`); }
   }
-
-  if (!freshPicks.length) {
-    return { sent: true, duplicateSuppressed: true, message: "Bu maçların tamamı daha önce Telegram'a gönderildi; tekrar gönderilmedi." };
-  }
-
-  const sendCoupon = { ...coupon, picks: freshPicks };
-  const signature = `${coupon.date}|${coupon.type}|${freshPicks.map(p => Number(p.fixtureId)).sort((a,b)=>a-b).join(",")}`;
+  const remainingPicks = originalPicks.filter(p => !Number(p.fixtureId) || !alreadySent.has(Number(p.fixtureId)));
+  if (!remainingPicks.length) return { sent: true, duplicateSuppressed: true, message: "Bu maçlar daha önce Telegram'a gönderildi; tekrar gönderilmedi." };
+  const remainingIds = new Set(remainingPicks.map(p => Number(p.fixtureId)).filter(Boolean));
+  coupon = { ...coupon, picks: remainingPicks };
+  chosen = (chosen || []).filter(p => !Number(p.fixtureId) || remainingIds.has(Number(p.fixtureId)));
+  const signature = `${coupon.date}|${coupon.type}|${chosen.map(p => `${p.fixtureId}:${p.market}`).sort().join(",")}`;
   const now = Date.now();
   for (const [key, at] of telegramDeliveryCache) if (now - at > 24 * 60 * 60 * 1000) telegramDeliveryCache.delete(key);
   if (telegramDeliveryCache.has(signature)) {
     return { sent: true, duplicateSuppressed: true, message: "Bu kupon daha önce Telegram'a gönderildi; tekrar gönderilmedi." };
   }
   try {
-    const result = await sendTelegram(couponMessage(sendCoupon));
+    const result = await sendTelegram(couponMessage(coupon));
     if (result.sent) {
       telegramDeliveryCache.set(signature, now);
-      for (const p of freshPicks) {
+      if (telegramDeliveryCache.size > 500) telegramDeliveryCache.delete(telegramDeliveryCache.keys().next().value);
+      if (coupon.autoGenerated) {
+        for (const p of (coupon.picks || [])) {
+          if (p.fixtureId) autoSentFixtureKeys.add(`${coupon.type}|${coupon.date}|${Number(p.fixtureId)}`);
+        }
+      }
+      for (const p of (coupon.picks || [])) {
         const fixtureId = Number(p.fixtureId);
         if (!fixtureId) continue;
-        sentFixtureIds.add(fixtureId);
-        autoSentFixtureKeys.add(`${coupon.type}|${coupon.date}|${fixtureId}`);
+        telegramSentFixtureIds.add(fixtureId);
         if (databasePool) {
-          await databasePool.query(
-            `INSERT INTO winscope_telegram_sent_matches(fixture_id, match_date, coupon_type, home_team, away_team)
-             VALUES ($1,$2,$3,$4,$5) ON CONFLICT (fixture_id) DO NOTHING`,
-            [fixtureId, coupon.date, coupon.type, p.home || "", p.away || ""]
-          );
+          try {
+            await databasePool.query(
+              "INSERT INTO winscope_telegram_fixture_sent(fixture_id, match_date, coupon_type) VALUES ($1, $2::date, $3) ON CONFLICT (fixture_id) DO NOTHING",
+              [fixtureId, /^\d{4}-\d{2}-\d{2}$/.test(String(coupon.date || "")) ? coupon.date : null, coupon.type]
+            );
+          } catch (error) { console.warn(`[Telegram] Tekrar kaydı saklanamadı fixture=${fixtureId}: ${error.message}`); }
         }
-        const sourceLabel = coupon.type === "live" ? "Canlı en güvenilir tek tercih" : coupon.type === "surprise" ? "Maç önü sürpriz kuponu" : "Günün kuponu";
+      }
+      const sourceLabel = coupon.type === "live" ? "Canlı en güvenilir tek tercih" : coupon.type === "surprise" ? "Maç önü sürpriz kuponu" : "Günün kuponu";
+      for (const p of (coupon.picks || [])) {
+        const fixtureId = Number(p.fixtureId);
+        if (!fixtureId) continue;
         const score = String(p.currentScore || "0-0");
         goalTrackedFixtures.set(fixtureId, { home: p.home, away: p.away, league: p.league, sourceLabel, baselineScore: score });
+        // Kupon üretilirken bilinen skor başlangıç kabul edilir.
         if (!goalScoreCache.has(fixtureId)) goalScoreCache.set(fixtureId, score);
       }
-      return { ...result, sentPickCount: freshPicks.length, duplicateCount: originalPicks.length - freshPicks.length };
     }
     return result;
   } catch (error) {
@@ -876,31 +872,41 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   const fixturePayload = await cachedProviderRequest(fixtureKey, fixturePath, isLiveMode ? 15000 : 60000);
   const allFixtures = (fixturePayload.response || []).map(normalizeProviderMatch)
     .filter(m => m.id && (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 25 && Number(m.minute || 0) <= 80 : m.status === "NS"));
-  // Tüm bülteni bellekte tut; analiz havuzu oran verisine göre aşağıda genişletilir.
+  // Büyük ligleri önceliklendir; aynı öncelikte erken başlayacak maçları öne al.
   allFixtures.sort((a, b) => automaticLeaguePriority(a) - automaticLeaguePriority(b) ||
     String(a.fixtureDate || "").localeCompare(String(b.fixtureDate || "")));
-  const fixtures = allFixtures;
+  // Otomatik tarama ilk birkaç maçla sınırlı kalmasın; API istek kuyruğu hız sınırını korur.
+  // Maç önü havuzunu sabit 20/35 maçla kesme: bültenin tamamını oran eşleştirmesine al.
+  // Canlı taramada API kotası ve hız için ayrı, sınırlı havuz kullanılır.
+  const fixtures = isLiveMode
+    ? allFixtures.slice(0, options.automatic ? 12 : 15)
+    : allFixtures;
   if (!fixtures.length) return { draftId:`coupon-${Date.now()}`, date, type:mode, status:"NO_MATCHES", picks:[], message:isLiveMode ? "Şu anda uygun dakika aralığında canlı maç bulunamadı." : "Seçilen tarihte başlamamış maç bulunamadı." };
 
   const dateOdds = new Map();
   if (!isLiveMode) {
+    // API-Football /odds uç noktası sayfalanır. Tek sayfayı okumak 390 maçın yalnızca
+    // küçük bir bölümünün oranlarını getirir; toplam sayfa bitene kadar sayfaları tara.
     try {
-      const payload = await cachedProviderRequest(`odds-date:${date}`, `/odds?date=${encodeURIComponent(date)}`, 90000);
-      for (const row of (payload.response || [])) dateOdds.set(Number(row.fixture?.id), row);
-    } catch (e) { console.warn(`[Coupon] date odds: ${e.message}`); }
+      const first = await cachedProviderRequest(`odds-date:${date}:page:1`, `/odds?date=${encodeURIComponent(date)}&page=1`, 15 * 60 * 1000);
+      for (const row of (first.response || [])) if (row.fixture?.id) dateOdds.set(Number(row.fixture.id), row);
+      const totalPages = Math.max(1, Math.min(100, Number(first.paging?.total || 1)));
+      for (let page = 2; page <= totalPages; page++) {
+        const payload = await cachedProviderRequest(`odds-date:${date}:page:${page}`, `/odds?date=${encodeURIComponent(date)}&page=${page}`, 15 * 60 * 1000);
+        for (const row of (payload.response || [])) if (row.fixture?.id) dateOdds.set(Number(row.fixture.id), row);
+      }
+      console.log(`[Coupon] Piyasa oran sayfaları tamamlandı: date=${date}, pages=${totalPages}, oddsFixtures=${dateOdds.size}`);
+    } catch (e) { console.warn(`[Coupon] date odds pagination: ${e.message}`); }
   }
   const candidates = [], errors = [];
   const rejected = { noOdds: 0, noIds: 0, noForm: 0, noStats: 0, noMarket: 0, noSignal: 0, apiErrors: 0, duplicate: 0 };
   let fixturesToAnalyze = fixtures;
-  if (!isLiveMode && dateOdds.size) {
+  if (!isLiveMode) {
     const withBulkOdds = fixtures.filter(f => dateOdds.has(f.id));
     const withoutBulkOdds = fixtures.filter(f => !dateOdds.has(f.id));
-    // Önce toplu oran cevabındaki maçları kullan; gerektiğinde sınırlı sayıda yedek maça bak.
-    const preferredLimit = mode === "surprise" ? 40 : (options.automatic ? 20 : 30);
-    const fallbackLimit = mode === "surprise" ? 10 : (options.automatic ? 5 : 8);
-    fixturesToAnalyze = [...withBulkOdds.slice(0, preferredLimit), ...withoutBulkOdds.slice(0, fallbackLimit)];
-  } else if (!isLiveMode) {
-    fixturesToAnalyze = fixtures.slice(0, mode === "surprise" ? 40 : (options.automatic ? 20 : 30));
+    // Önce bütün fikstürlerin oran sayfalarını tara; takım formu API kotasını korumak için
+    // en fazla 50 oranlı ve 10 oran-yedek fikstürde çekilir. Canlı istatistik çağrısı yoktur.
+    fixturesToAnalyze = [...withBulkOdds.slice(0, 50), ...withoutBulkOdds.slice(0, 10)];
   }
   for (const fixture of fixturesToAnalyze) {
     try {
@@ -962,22 +968,9 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
     }
   }
   // Otomatik gönderimlerde aynı gün daha önce gönderilmiş maçları yeniden seçme.
-  let availableCandidates = candidates;
-  if (options.automatic) {
-    availableCandidates = candidates.filter(p => !sentFixtureIds.has(Number(p.fixtureId)) &&
-      !autoSentFixtureKeys.has(`${mode}|${date}|${Number(p.fixtureId)}`));
-    if (databasePool && availableCandidates.length) {
-      await archiveDatabaseReady;
-      const ids = availableCandidates.map(p => Number(p.fixtureId)).filter(Boolean);
-      const prior = await databasePool.query(
-        "SELECT fixture_id FROM winscope_telegram_sent_matches WHERE fixture_id = ANY($1::bigint[])",
-        [ids]
-      );
-      const alreadySent = new Set(prior.rows.map(r => Number(r.fixture_id)));
-      alreadySent.forEach(id => sentFixtureIds.add(id));
-      availableCandidates = availableCandidates.filter(p => !alreadySent.has(Number(p.fixtureId)));
-    }
-  }
+  const availableCandidates = options.automatic
+    ? candidates.filter(p => !autoSentFixtureKeys.has(`${mode}|${date}|${Number(p.fixtureId)}`))
+    : candidates;
   rejected.duplicate = candidates.length - availableCandidates.length;
   console.log(`[COUPON SCAN ${mode.toUpperCase()}] date=${date} live=${isLiveMode} fixtures=${allFixtures.length} prioritized=${fixtures.length} analyzed=${fixturesToAnalyze.length} candidates=${candidates.length} available=${availableCandidates.length} rejected=${JSON.stringify(rejected)} errors=${errors.length}`);
   availableCandidates.sort((a,b)=>b.score-a.score || b.formSupport-a.formSupport || a.internalOdd-b.internalOdd);
@@ -987,7 +980,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
     const needed = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
     return {draftId:`coupon-${Date.now()}`,date,type:mode,status:"NO_MATCHES",picks:[],
       message:`Maç önü oranı + son 5 maç formu${isLiveMode ? " + canlı istatistik" : ""} eşiklerini geçen yeterli maç yok (gereken: ${needed}). Kupon zorlanmadı.`,
-      detail:`Tarama: ${fixturesToAnalyze.length}; aday: ${candidates.length}; elenme: oran=${rejected.noOdds}, form=${rejected.noForm}, canlı-istatistik=${rejected.noStats}, piyasa-sinyali=${rejected.noSignal}, API-hatası=${rejected.apiErrors}, tekrar=${rejected.duplicate}. ${errors.slice(0,2).join(" | ")}`};
+      detail:`Fikstür: ${allFixtures.length}; oran sayfasından eşleşen: ${dateOdds.size}; form/statistik için incelenen: ${fixturesToAnalyze.length}; aday: ${candidates.length}; elenme: oran=${rejected.noOdds}, form=${rejected.noForm}, canlı-istatistik=${rejected.noStats}, piyasa-sinyali=${rejected.noSignal}, API-hatası=${rejected.apiErrors}, tekrar=${rejected.duplicate}. ${errors.slice(0,2).join(" | ")}`};
   }
   // internalOdd / score iç skorlama; canlı kupon Telegram'da olasılık + form + dk/skor gösterilsin.
   const publicPicks = chosen.map(({ internalOdd, score, ...p }) => p);
