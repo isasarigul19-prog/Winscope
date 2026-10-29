@@ -329,17 +329,23 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   const hNow = Number(fixture.homeScore || 0), aNow = Number(fixture.awayScore || 0);
   const live = fixture.status === "LIVE";
   if (fixture.status === "FT") return { halfTimeScore: `${fixture.htHomeScore ?? "?"}-${fixture.htAwayScore ?? "?"}`, fullTimeScore: `${hNow}-${aNow}`, scoreBasis: "Gerçekleşen skor" };
-  if (!homeForm?.available || !awayForm?.available) return { halfTimeScore: "Form verisi bulunamadı", fullTimeScore: "Skor tahmini için veri yetersiz", scoreBasis: "Son 5 maç formu eksik" };
 
+  // Oran verisi, form verisi eksik olsa bile skor tahmininde kullanılabilir.
+  // Piyasa ana kaynak; son 5 maç formu yalnızca destekleyici ağırlık alır.
+  const homeFormAvailable = Boolean(homeForm?.available);
+  const awayFormAvailable = Boolean(awayForm?.available);
+  const hasForm = homeFormAvailable && awayFormAvailable;
   const pre = marketProbabilitiesByName(prematchOddsRow);
   const liveMarkets = live ? marketProbabilitiesByName(liveOddsRow) : {};
   const hasLiveMarket = live && Object.keys(liveMarkets).length > 0;
-  const market = hasLiveMarket ? liveMarkets : pre;
+  const hasPreGoalMarket = ["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST"]
+    .some(key => Number.isFinite(pre[key]));
+  const hasLiveGoalMarket = hasLiveMarket && ["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST"]
+    .some(key => Number.isFinite(liveMarkets[key]));
   const currentTotal = hNow + aNow;
   const minute = Math.max(0, Math.min(90, Number(fixture.minute || 0)));
-  const remainingFraction = live ? Math.max(0.05, (90 - minute) / 90) : 1;
+  const remainingFraction = live ? Math.max(0.03, (90 - minute) / 90) : 1;
 
-  // Maç önü piyasa olasılıklarından tam maç gol beklentisi çıkarılır.
   const preHomeMarket = lambdaFromMarketProbability(pre["EV 1.5 ÜST"], 2, 0);
   const preAwayMarket = lambdaFromMarketProbability(pre["DEP 1.5 ÜST"], 2, 0);
   const preTotalCandidates = [
@@ -349,68 +355,85 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   ].filter(Number.isFinite);
   const preTotal = preTotalCandidates.length ? preTotalCandidates.reduce((a,b)=>a+b,0) / preTotalCandidates.length : null;
 
-  // Canlı toplam gol ve takım gol pazarları mevcut skor koşulunda kalan gol beklentisine çevrilir.
-  let homeMarketLambda = hasLiveMarket ? lambdaFromMarketProbability(liveMarkets["EV 1.5 ÜST"], 2, hNow) : null;
-  let awayMarketLambda = hasLiveMarket ? lambdaFromMarketProbability(liveMarkets["DEP 1.5 ÜST"], 2, aNow) : null;
-  const liveTotalCandidates = hasLiveMarket ? [
+  let homeMarketLambda = hasLiveGoalMarket ? lambdaFromMarketProbability(liveMarkets["EV 1.5 ÜST"], 2, hNow) : null;
+  let awayMarketLambda = hasLiveGoalMarket ? lambdaFromMarketProbability(liveMarkets["DEP 1.5 ÜST"], 2, aNow) : null;
+  const liveTotalCandidates = hasLiveGoalMarket ? [
     lambdaFromMarketProbability(liveMarkets["MS 1.5 ÜST"], 2, currentTotal),
     lambdaFromMarketProbability(liveMarkets["MS 2.5 ÜST"], 3, currentTotal),
     lambdaFromMarketProbability(liveMarkets["MS 3.5 ÜST"], 4, currentTotal)
   ].filter(Number.isFinite) : [];
   let totalRemainingMarket = liveTotalCandidates.length ? liveTotalCandidates.reduce((a,b)=>a+b,0) / liveTotalCandidates.length : null;
 
-  const formHomeFull = Math.max(0.15, 0.58 * Number(homeForm.avgGoalsFor || 0) + 0.42 * Number(awayForm.avgGoalsAgainst || 0));
-  const formAwayFull = Math.max(0.15, 0.58 * Number(awayForm.avgGoalsFor || 0) + 0.42 * Number(homeForm.avgGoalsAgainst || 0));
-  let lambdaHome, lambdaAway;
+  const formHomeFull = hasForm ? Math.max(0.05, 0.58 * Number(homeForm.avgGoalsFor || 0) + 0.42 * Number(awayForm.avgGoalsAgainst || 0)) : null;
+  const formAwayFull = hasForm ? Math.max(0.05, 0.58 * Number(awayForm.avgGoalsFor || 0) + 0.42 * Number(homeForm.avgGoalsAgainst || 0)) : null;
+  let lambdaHome = null, lambdaAway = null;
+
   if (live) {
-    // Canlı oranlar varsa öncelik canlı pazarda; kapanış/maç önü referansı sadece eksik pazarları destekler.
-    const formHomeRemaining = formHomeFull * remainingFraction;
-    const formAwayRemaining = formAwayFull * remainingFraction;
+    const formHomeRemaining = formHomeFull == null ? null : formHomeFull * remainingFraction;
+    const formAwayRemaining = formAwayFull == null ? null : formAwayFull * remainingFraction;
     if (homeMarketLambda == null && preHomeMarket != null) homeMarketLambda = preHomeMarket * remainingFraction;
     if (awayMarketLambda == null && preAwayMarket != null) awayMarketLambda = preAwayMarket * remainingFraction;
-    if (homeMarketLambda == null && totalRemainingMarket != null && awayMarketLambda != null) homeMarketLambda = Math.max(0.05, totalRemainingMarket - awayMarketLambda);
-    if (awayMarketLambda == null && totalRemainingMarket != null && homeMarketLambda != null) awayMarketLambda = Math.max(0.05, totalRemainingMarket - homeMarketLambda);
+    if (homeMarketLambda == null && totalRemainingMarket != null && awayMarketLambda != null) homeMarketLambda = Math.max(0.01, totalRemainingMarket - awayMarketLambda);
+    if (awayMarketLambda == null && totalRemainingMarket != null && homeMarketLambda != null) awayMarketLambda = Math.max(0.01, totalRemainingMarket - homeMarketLambda);
+    // Yalnızca toplam gol pazarı varsa taraflara form oranında, form yoksa eşit bölüştür.
+    if (totalRemainingMarket != null && homeMarketLambda == null && awayMarketLambda == null) {
+      const ratio = formHomeRemaining != null && formAwayRemaining != null
+        ? formHomeRemaining / Math.max(0.01, formHomeRemaining + formAwayRemaining) : 0.5;
+      homeMarketLambda = totalRemainingMarket * ratio;
+      awayMarketLambda = totalRemainingMarket - homeMarketLambda;
+    }
     if (homeMarketLambda == null) homeMarketLambda = formHomeRemaining;
     if (awayMarketLambda == null) awayMarketLambda = formAwayRemaining;
+    if (homeMarketLambda == null || awayMarketLambda == null) {
+      return { halfTimeScore: minute < 45 ? `${hNow}-${aNow} (canlı skor; devre tahmini hesaplanamadı)` : `${fixture.htHomeScore ?? "?"}-${fixture.htAwayScore ?? "?"} (devre skoru)`, fullTimeScore: `${hNow}-${aNow} (mevcut skor; tahmin için kullanılabilir gol pazarı/form yok)`, scoreBasis: "Skor tahmini için kullanılabilir gol oranı ve yeterli form verisi bulunamadı" };
+    }
     if (totalRemainingMarket != null && homeMarketLambda + awayMarketLambda > 0) {
       const scale = totalRemainingMarket / (homeMarketLambda + awayMarketLambda);
       homeMarketLambda *= scale; awayMarketLambda *= scale;
     }
-    lambdaHome = hasLiveMarket ? 0.75 * homeMarketLambda + 0.25 * formHomeRemaining : homeMarketLambda;
-    lambdaAway = hasLiveMarket ? 0.75 * awayMarketLambda + 0.25 * formAwayRemaining : awayMarketLambda;
+    // Piyasa varsa %85 piyasa / %15 form; canlı piyasa yoksa maç önü oranı öncelikli.
+    lambdaHome = formHomeRemaining == null ? homeMarketLambda : (hasLiveGoalMarket ? 0.85 * homeMarketLambda + 0.15 * formHomeRemaining : 0.85 * homeMarketLambda + 0.15 * formHomeRemaining);
+    lambdaAway = formAwayRemaining == null ? awayMarketLambda : (hasLiveGoalMarket ? 0.85 * awayMarketLambda + 0.15 * formAwayRemaining : 0.85 * awayMarketLambda + 0.15 * formAwayRemaining);
   } else {
     let h = preHomeMarket, a = preAwayMarket;
     if (h == null && a == null && preTotal != null) {
-      const sum = formHomeFull + formAwayFull;
-      h = preTotal * formHomeFull / Math.max(0.01, sum);
-      a = preTotal * formAwayFull / Math.max(0.01, sum);
-    } else if (h == null && preTotal != null) h = Math.max(0.1, preTotal - a);
-    else if (a == null && preTotal != null) a = Math.max(0.1, preTotal - h);
-    lambdaHome = h == null ? formHomeFull : 0.75 * h + 0.25 * formHomeFull;
-    lambdaAway = a == null ? formAwayFull : 0.75 * a + 0.25 * formAwayFull;
-    if (preTotal != null && lambdaHome + lambdaAway > 0) {
-      const target = 0.65 * preTotal + 0.35 * (lambdaHome + lambdaAway);
+      const sum = formHomeFull != null && formAwayFull != null ? formHomeFull + formAwayFull : 0;
+      const ratio = sum > 0 ? formHomeFull / sum : 0.5;
+      h = preTotal * ratio; a = preTotal - h;
+    } else if (h == null && preTotal != null && a != null) h = Math.max(0.01, preTotal - a);
+    else if (a == null && preTotal != null && h != null) a = Math.max(0.01, preTotal - h);
+    lambdaHome = h == null ? formHomeFull : (formHomeFull == null ? h : 0.85 * h + 0.15 * formHomeFull);
+    lambdaAway = a == null ? formAwayFull : (formAwayFull == null ? a : 0.85 * a + 0.15 * formAwayFull);
+    if (preTotal != null && lambdaHome != null && lambdaAway != null && lambdaHome + lambdaAway > 0) {
+      const target = preHomeMarket != null || preAwayMarket != null ? 0.85 * preTotal + 0.15 * (lambdaHome + lambdaAway) : preTotal;
       const scale = target / (lambdaHome + lambdaAway);
       lambdaHome *= scale; lambdaAway *= scale;
     }
+    if (lambdaHome == null || lambdaAway == null) {
+      return { halfTimeScore: "Skor tahmini hesaplanamadı: kullanılabilir gol pazarı/form yok", fullTimeScore: "Skor tahmini hesaplanamadı: kullanılabilir gol pazarı/form yok", scoreBasis: "Doğrulanabilir skor girdisi yok" };
+    }
   }
 
-  // Olası skorları bağımsız Poisson gol dağılımıyla sıralar; canlıda mevcut skorun altına inemez.
+  // Olası skorları bağımsız Poisson dağılımıyla sıralar; canlıda gerçekleşen skoru korur.
   const pmf = (k, lambda) => Math.exp(-lambda) * Math.pow(lambda, k) / factorial(k);
   let best = null;
-  const maxExtra = 6;
+  const maxExtra = 8; // 2-4 / 4-2 gibi yüksek skorlu senaryoları da değerlendirebilmek için.
   for (let gh = 0; gh <= maxExtra; gh++) for (let ga = 0; ga <= maxExtra; ga++) {
     const probability = pmf(gh, Math.max(0.01, lambdaHome)) * pmf(ga, Math.max(0.01, lambdaAway));
     const finalH = live ? hNow + gh : gh;
     const finalA = live ? aNow + ga : ga;
     if (!best || probability > best.probability) best = { finalH, finalA, probability };
   }
-  const fullTimeScore = best ? `${best.finalH}-${best.finalA} (tahmin)` : "Skor tahmini için veri yetersiz";
+  const fullTimeScore = best ? `${best.finalH}-${best.finalA} (tahmin)` : "Skor tahmini hesaplanamadı";
   let halfTimeScore;
   if (live && minute >= 45 && fixture.htHomeScore != null && fixture.htAwayScore != null) halfTimeScore = `${fixture.htHomeScore}-${fixture.htAwayScore} (Gerçek)`;
   else if (live && minute < 45) halfTimeScore = `${hNow}-${aNow} (canlı skor; İY tahmini ayrı doğrulanmadı)`;
   else halfTimeScore = `${Math.max(0, Math.round(lambdaHome * 0.46))}-${Math.max(0, Math.round(lambdaAway * 0.46))} (tahmin)`;
-  const basis = hasLiveMarket ? "Canlı oranlar + maç önü referansı + son 5 maç formu" : (Object.keys(pre).length ? "Maç önü oran referansı (resmî kapanış olduğu doğrulanmadı) + son 5 maç formu" : "Son 5 maç formu; kullanılabilir oran pazarı bulunamadı");
+  const basis = hasLiveGoalMarket
+    ? (hasForm ? "Canlı gol oranları (%85) + son 5 maç formu (%15)" : "Canlı gol oranları; form verisi mevcut değil")
+    : hasPreGoalMarket
+      ? (hasForm ? "Maç önü gol oranları (%85) + son 5 maç formu (%15)" : "Maç önü gol oranları; form verisi mevcut değil")
+      : "Son 5 maç formu; kullanılabilir gol oranı bulunamadı";
   return { halfTimeScore, fullTimeScore, scoreBasis: basis, scoreProbability: best ? Number(best.probability.toFixed(4)) : null };
 }
 
