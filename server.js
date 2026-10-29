@@ -324,7 +324,6 @@ function couponMessage(coupon) {
   coupon.picks.forEach((p, i) => {
     lines.push(`${i + 1}. ${p.home} - ${p.away}`, `Tercih: ${p.market}`, `Lig: ${p.league}`, "");
   });
-  lines.push("Not: Oranlar arka planda değerlendirilmiştir; mesajda gösterilmez.", "WinScope otomatik analizidir; kesin sonuç garantisi değildir.");
   return lines.join("\n");
 }
 
