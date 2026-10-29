@@ -86,10 +86,12 @@ function computeAnalysis(match) {
 function oddsForFixture(oddsRow) {
   const candidates = [];
   const preferred = [
-    { names: ["Goals Over/Under", "Over/Under"], value: "Over 1.5", market: "MS 1.5 ÜST", rank: 1 },
-    { names: ["Goals Over/Under", "Over/Under"], value: "Over 2.5", market: "MS 2.5 ÜST", rank: 2 },
-    { names: ["Both Teams Score", "Both Teams to Score"], value: "Yes", market: "KG VAR", rank: 3 },
-    { names: ["First Half Goals Over/Under", "1st Half Goals Over/Under", "Half Time Over/Under"], value: "Over 0.5", market: "İY 0.5 ÜST", rank: 4 }
+    { names: ["Goals Over/Under", "Over/Under"], value: "Over 0.5", market: "MS 0.5 ÜST", rank: 1 },
+    { names: ["Goals Over/Under", "Over/Under"], value: "Over 1.5", market: "MS 1.5 ÜST", rank: 2 },
+    { names: ["Goals Over/Under", "Over/Under"], value: "Over 2.5", market: "MS 2.5 ÜST", rank: 4 },
+    { names: ["Both Teams Score", "Both Teams to Score"], value: "Yes", market: "KG VAR", rank: 5 },
+    { names: ["First Half Goals Over/Under", "1st Half Goals Over/Under", "Half Time Over/Under"], value: "Over 0.5", market: "İY 0.5 ÜST", rank: 3 },
+    { names: ["First Half Goals Over/Under", "1st Half Goals Over/Under", "Half Time Over/Under"], value: "Over 1.5", market: "İY 1.5 ÜST", rank: 6 }
   ];
   for (const bookmaker of (oddsRow.bookmakers || [])) {
     for (const bet of (bookmaker.bets || [])) {
@@ -123,7 +125,9 @@ async function sendTelegram(text) {
 }
 
 function couponMessage(coupon) {
-  const heading = "🎯 WINSCOPE EN GÜVENİLİR TEK MAÇ";
+  const heading = coupon.type === "surprise" ? "🎲 WINSCOPE MAÇ ÖNÜ SÜRPRİZ 10 MAÇ" :
+    coupon.type === "live" ? "⚡ WINSCOPE CANLI EN GÜVENİLİR TEK TERCİH" :
+    "🎯 WINSCOPE MAÇ ÖNÜ KUPONU";
   const lines = [heading, `Tarih: ${coupon.date || "Bugün"}`, ""];
   coupon.picks.forEach((p, i) => {
     lines.push(`${i + 1}. ${p.home} - ${p.away}`, `Tercih: ${p.market}`, `Lig: ${p.league}`, "");
@@ -151,126 +155,130 @@ async function getOddsForFixture(fixtureId, date) {
   return row;
 }
 
-function rankSingleMatchChoices(choices) {
-  // Prefer the most likely supported market, but reject very short/very long odds.
-  // Odds are internal only and never displayed to the user.
-  const allowed = choices.filter(x => x.odd >= 1.15 && x.odd <= 1.80);
-  const marketSafety = {
-    "MS 0.5 ÜST": 1,
-    "MS 1.5 ÜST": 2,
-    "İY 0.5 ÜST": 3,
-    "KG VAR": 4,
-    "MS 2.5 ÜST": 5
-  };
+function rankSingleMatchChoices(choices, mode = "prematch") {
+  const allowed = choices.filter(x => x.odd >= 1.15 && x.odd <= 2.10);
   return allowed.sort((a, b) => {
-    const aScore = Math.abs(a.odd - 1.35) + (marketSafety[a.market] || 10) * 0.025;
-    const bScore = Math.abs(b.odd - 1.35) + (marketSafety[b.market] || 10) * 0.025;
-    return aScore - bScore;
+    // Conservative odds first; tie-break with market hierarchy, not invented percentages.
+    return Math.abs(a.odd - 1.35) - Math.abs(b.odd - 1.35) || a.rank - b.rank;
   });
 }
 
-async function createBestSingleMatch(date) {
-  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    throw new Error("Geçerli bir maç tarihi seç.");
-  }
 
-  const fixturesPayload = await cachedProviderRequest(
-    `fixtures:${date}`, `/fixtures?date=${encodeURIComponent(date)}&timezone=Europe/Istanbul`, 60000
-  );
-  const fixtures = (fixturesPayload.response || [])
-    .map(normalizeProviderMatch)
-    .filter(m => m.id && ["NS", "LIVE"].includes(m.status));
+async function createCouponByMode(date, mode = "prematch") {
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("Geçerli bir maç tarihi seç.");
+  const isLiveMode = mode === "live";
+  const fixturePath = isLiveMode
+    ? "/fixtures?live=all"
+    : `/fixtures?date=${encodeURIComponent(date)}&timezone=Europe/Istanbul`;
+  const fixtureKey = isLiveMode ? "liveListForCoupon" : `fixtures:${date}`;
+  const fixturePayload = await cachedProviderRequest(fixtureKey, fixturePath, isLiveMode ? 15000 : 60000);
+  let fixtures = (fixturePayload.response || []).map(normalizeProviderMatch)
+    .filter(m => m.id && (isLiveMode ? m.status === "LIVE" : m.status === "NS"));
 
   if (!fixtures.length) {
-    return {
-      draftId: `single-${Date.now()}`, date, type: "single", status: "NO_MATCHES", picks: [],
-      message: "Seçilen tarih için başlamamış veya devam eden maç bulunamadı."
-    };
+    return { draftId: `coupon-${Date.now()}`, date, type: mode, status: "NO_MATCHES", picks: [],
+      message: isLiveMode ? "Şu anda uygun canlı maç bulunamadı." : "Seçilen tarihte başlamamış maç bulunamadı." };
   }
 
   const candidates = [];
   const errors = [];
-  // The date endpoint is the efficient first pass. Fixture-specific odds are a fallback.
   let dateOdds = [];
-  try {
-    const payload = await cachedProviderRequest(`odds-date:${date}`, `/odds?date=${encodeURIComponent(date)}`, 90000);
-    dateOdds = payload.response || [];
-  } catch (e) {
-    errors.push(e.message);
+  if (!isLiveMode) {
+    try {
+      const payload = await cachedProviderRequest(`odds-date:${date}`, `/odds?date=${encodeURIComponent(date)}`, 90000);
+      dateOdds = payload.response || [];
+    } catch (e) { errors.push(e.message); }
   }
   const oddsMap = new Map(dateOdds.map(row => [Number(row.fixture?.id), row]));
 
   for (const fixture of fixtures) {
     try {
-      let oddsRow = oddsMap.get(fixture.id);
-      // If the fixture is already live, try API-Football's live-odds endpoint first.
-      // If unavailable on the account/plan, fall back to the latest odds record for the fixture.
-      let oddsBasis = fixture.status === "LIVE"
-        ? "Canlı maç için API'de bulunan son oran kaydı"
-        : "Maç önü için API'de bulunan son oran kaydı";
-      if (fixture.status === "LIVE") {
-        try {
-          const livePayload = await cachedProviderRequest(
-            `odds-live:${fixture.id}`, `/odds/live?fixture=${fixture.id}`, 20000
-          );
-          oddsRow = (livePayload.response || []).find(row => Number(row.fixture?.id) === fixture.id) || oddsRow;
-          if (oddsRow) oddsBasis = "API-Football canlı oran uç noktası";
-        } catch (e) {
-          console.warn(`Live odds unavailable for fixture ${fixture.id}:`, e.message);
+      let oddsRow = null;
+      let oddsBasis = "";
+      if (isLiveMode) {
+        const livePayload = await cachedProviderRequest(`odds-live:${fixture.id}`, `/odds/live?fixture=${fixture.id}`, 15000);
+        oddsRow = (livePayload.response || []).find(row => Number(row.fixture?.id) === fixture.id) || null;
+        if (!oddsRow) continue;
+        oddsBasis = "API-Football canlı oran kaydı";
+      } else {
+        oddsRow = oddsMap.get(fixture.id) || null;
+        if (!oddsRow) {
+          const payload = await cachedProviderRequest(`odds-fixture:${fixture.id}`, `/odds?fixture=${fixture.id}`, 90000);
+          oddsRow = (payload.response || []).find(row => Number(row.fixture?.id) === fixture.id) || payload.response?.[0] || null;
         }
+        if (!oddsRow) continue;
+        oddsBasis = "API-Football maç önü oran kaydı; resmî kapanış olduğu garanti edilemez";
       }
-      if (!oddsRow) {
-        const payload = await cachedProviderRequest(
-          `odds-fixture:${fixture.id}`, `/odds?fixture=${fixture.id}`, 90000
-        );
-        oddsRow = (payload.response || []).find(row => Number(row.fixture?.id) === fixture.id) || payload.response?.[0] || null;
-      }
-      if (!oddsRow) continue;
 
-      const choices = rankSingleMatchChoices(oddsForFixture(oddsRow));
+      // For live picks, require current match statistics as well as live odds.
+      let statsSummary = null;
+      if (isLiveMode) {
+        const statsPayload = await cachedProviderRequest(`stats:${fixture.id}`, `/fixtures/statistics?fixture=${fixture.id}`, 15000);
+        const stats = statsPayload.response || [];
+        const values = stats.flatMap(team => (team.statistics || []).map(st => ({
+          type: String(st.type || "").toLowerCase(), value: st.value
+        })));
+        const hasUsefulStats = values.some(v => /shots on goal|total shots|dangerous attacks|shots off goal|corner kicks|ball possession/.test(v.type) && v.value != null);
+        if (!hasUsefulStats) continue;
+        statsSummary = values.filter(v => /shots on goal|total shots|dangerous attacks|corner kicks/.test(v.type) && v.value != null)
+          .slice(0, 8).map(v => `${v.type}: ${v.value}`);
+      }
+
+      let choices = rankSingleMatchChoices(oddsForFixture(oddsRow), mode);
+      // Do not recommend half-time goals after half-time or when match state contradicts it.
+      if (isLiveMode) {
+        if (Number(fixture.minute) > 45 || fixture.status === "HT") {
+          choices = choices.filter(c => !c.market.startsWith("İY "));
+        }
+        if (Number(fixture.minute) >= 45 && Number(fixture.homeScore) + Number(fixture.awayScore) >= 1) {
+          choices = choices.filter(c => c.market === "İY 1.5 ÜST" ? false : true);
+        }
+        // A live market must be backed by live odds and actual match stats; otherwise skip.
+      }
       if (!choices.length) continue;
+
+      // Keep only one preferred market per fixture.
       const chosen = choices[0];
-      const isLive = fixture.status === "LIVE";
       candidates.push({
-        fixtureId: fixture.id, league: fixture.league, home: fixture.home, away: fixture.away,
-        fixtureDate: fixture.fixtureDate, market: chosen.market, source: chosen.bookmaker,
-        internalOdd: chosen.odd, minute: isLive ? fixture.minute : null,
+        fixtureId: fixture.id, league: fixture.league, country: fixture.country,
+        home: fixture.home, away: fixture.away, fixtureDate: fixture.fixtureDate,
+        market: chosen.market, source: chosen.bookmaker, internalOdd: chosen.odd,
+        minute: isLiveMode ? fixture.minute : null,
         currentScore: `${fixture.homeScore}-${fixture.awayScore}`,
-        isLive, confidenceScore: Math.max(0, Math.min(100, Math.round(100 / chosen.odd))),
-        oddsBasis
+        isLive: isLiveMode, rank: chosen.rank, oddsBasis, statsSummary,
+        scoreTotal: Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0)
       });
     } catch (e) {
       errors.push(`${fixture.home} - ${fixture.away}: ${e.message}`);
     }
   }
 
-  // For a single selection, prioritize a conservative market price and then the source's
-  // market hierarchy. Live matches may be considered only if no eligible pre-match fixture exists.
   candidates.sort((a, b) => {
-    if (a.isLive !== b.isLive) return a.isLive ? 1 : -1;
-    return a.internalOdd - b.internalOdd || b.confidenceScore - a.confidenceScore;
+    // More conservative odds first. Keep market/odds internal; never fabricate confidence %.
+    return a.internalOdd - b.internalOdd || a.rank - b.rank;
   });
 
-  const chosen = candidates[0];
-  if (!chosen) {
-    return {
-      draftId: `single-${Date.now()}`, date, type: "single", status: "NO_MATCHES", picks: [],
-      message: "Bu bültende doğrulanabilir uygun oran bulunamadı. Oran uydurulmadı.",
-      detail: errors.slice(0, 3).join(" | ")
-    };
+  const count = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
+  const chosen = candidates.slice(0, count);
+  if (!chosen.length || (mode === "prematch" && chosen.length < 2) || (mode === "surprise" && chosen.length < 10)) {
+    const needed = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
+    return { draftId: `coupon-${Date.now()}`, date, type: mode, status: "NO_MATCHES", picks: [],
+      message: `Güvenilir seçim için gerekli sayıda doğrulanabilir maç bulunamadı (gereken: ${needed}). Eksik veriyle kupon üretilmedi.`,
+      detail: errors.slice(0, 3).join(" | ") };
   }
 
-  const { internalOdd, confidenceScore, ...publicPick } = chosen;
+  const publicPicks = chosen.map(({ internalOdd, rank, scoreTotal, ...p }) => p);
+  const draftId = `coupon-${Date.now()}`;
   const coupon = {
-    draftId: `single-${Date.now()}`, date, type: "single", isLive: chosen.isLive,
-    status: "READY", picks: [publicPick],
-    message: "Bültendeki uygun oranlar arasından tek seçim yapıldı. API-Football son oran kaydı sunar; bunun resmi kapanış oranı olduğu ayrıca doğrulanamaz."
+    draftId, date, type: mode, isLive: isLiveMode, status: "READY", picks: publicPicks,
+    message: mode === "live"
+      ? "Tek canlı tercih: canlı oran ve maç istatistiği bulunan maçlardan seçildi."
+      : mode === "surprise"
+        ? "10 maçlık sürpriz kupon. Tüm maçlar için doğrulanabilir oran bulunması şarttır."
+        : "Maç önü kuponu: en az iki maç ve doğrulanabilir maç önü oranları."
   };
-  drafts.set(coupon.draftId, { ...coupon, picks: [chosen] });
-  archives.coupons.unshift({
-    date, isLive: chosen.isLive, type: "single",
-    picks: [publicPick], createdAt: new Date().toISOString()
-  });
+  drafts.set(draftId, { ...coupon, picks: chosen });
+  archives.coupons.unshift({ date, type: mode, picks: publicPicks, createdAt: new Date().toISOString() });
   archives.coupons = archives.coupons.slice(0, 50);
   return coupon;
 }
@@ -354,20 +362,20 @@ app.get("/api/fixtures", async (req, res) => {
 
 
 app.get("/api/coupon/daily", async (req, res) => {
-  try { res.json(await createBestSingleMatch(String(req.query.date || ""))); }
-  catch (e) { res.status(502).json({ status: "ERROR", picks: [], error: "Tek maç seçilemedi.", detail: e.message }); }
+  try { res.json(await createCouponByMode(String(req.query.date || ""), "prematch")); }
+  catch (e) { res.status(502).json({ status: "ERROR", picks: [], error: "Maç önü kuponu oluşturulamadı.", detail: e.message }); }
 });
 app.get("/api/coupon/best", async (req, res) => {
-  try { res.json(await createBestSingleMatch(String(req.query.date || ""))); }
-  catch (e) { res.status(502).json({ status: "ERROR", picks: [], error: "Tek maç seçilemedi.", detail: e.message }); }
+  try { res.json(await createCouponByMode(String(req.query.date || ""), "prematch")); }
+  catch (e) { res.status(502).json({ status: "ERROR", picks: [], error: "Maç önü kuponu oluşturulamadı.", detail: e.message }); }
 });
 app.get("/api/coupon/surprise", async (req, res) => {
-  try {
-    const result = await createBestSingleMatch(String(req.query.date || ""));
-    result.type = "surprise";
-    if (result.status === "READY") result.message = "Sürpriz seçeneği de tek maç verir; yalnızca API'de doğrulanabilir oran bulunan maç değerlendirilir.";
-    res.json(result);
-  } catch (e) { res.status(502).json({ status: "ERROR", type: "surprise", picks: [], error: "Sürpriz tek maç seçilemedi.", detail: e.message }); }
+  try { res.json(await createCouponByMode(String(req.query.date || ""), "surprise")); }
+  catch (e) { res.status(502).json({ status: "ERROR", type: "surprise", picks: [], error: "10 maçlık sürpriz kupon oluşturulamadı.", detail: e.message }); }
+});
+app.get("/api/coupon/live-best", async (req, res) => {
+  try { res.json(await createCouponByMode(String(req.query.date || new Date().toISOString().slice(0,10)), "live")); }
+  catch (e) { res.status(502).json({ status: "ERROR", type: "live", picks: [], error: "Canlı tek tercih oluşturulamadı.", detail: e.message }); }
 });
 
 app.post("/api/coupon/approve", async (req, res) => {
