@@ -569,21 +569,21 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     else allowed = ["MS 2.5 ÜST", "KG VAR"];
   } else if (minute >= 45 && minute < 55) {
     if (total === 0) allowed = ["MS 0.5 ÜST", "MS 1.5 ÜST"];
-    else if (total === 1) allowed = ["MS 1.5 ÜST", "KG VAR"];
+    else if (total === 1) allowed = ["KG VAR"];
     else if (total === 2) allowed = ["MS 2.5 ÜST", "KG VAR"];
     else allowed = ["MS 3.5 ÜST", "KG VAR"];
   } else if (minute >= 55 && minute <= 65) {
     if (total === 0) allowed = ["MS 0.5 ÜST", "MS 1.5 ÜST"];
-    else if (total === 1) allowed = ["MS 1.5 ÜST", "KG VAR"];
+    else if (total === 1) allowed = ["KG VAR"];
     else if (total === 2) allowed = ["MS 2.5 ÜST", "KG VAR"];
     else allowed = ["MS 3.5 ÜST", "KG VAR"];
   } else if (minute >= 66 && minute <= 75) {
     if (total === 0) allowed = ["MS 1.5 ÜST", "MS 2.5 ÜST"];
-    else if (total === 1) allowed = ["MS 2.5 ÜST", "KG VAR"];
+    else if (total === 1) allowed = ["MS 1.5 ÜST", "MS 2.5 ÜST", "KG VAR"];
     else if (total === 2) allowed = ["MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
     else allowed = ["MS 3.5 ÜST"];
   } else {
-    // 76–85: sadece yüksek baskı + az gol ihtiyacı
+    // 76–85: yalnızca kalan süre, baskı ve oran eşiği yeterliyse
     if (total <= 1) allowed = ["MS 1.5 ÜST", "MS 2.5 ÜST"];
     else if (total === 2) allowed = ["MS 2.5 ÜST", "MS 3.5 ÜST"];
     else allowed = ["MS 3.5 ÜST"];
@@ -595,7 +595,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   const preMarkets = oddsForFixture(prematchOddsRow || oddsRow || null);
   const predictedScores = scorePrediction(fixture, h, a, null, prematchOddsRow || oddsRow || null);
   const mergedMarketRows = preMarkets.map(x => ({ ...x, oddsTiming: "prematch" }));
-  const choices = mergedMarketRows.filter(x => allowed.includes(x.market) && x.market !== excludeMarket);
+  const choices = mergedMarketRows.filter(x => allowed.includes(x.market) && x.market !== excludeMarket && marketConsistentWithScore(x.market, predictedScores));
   const statsM = stats || { available: false, pressure: 0, home: {}, away: {} };
   const favorite = (() => {
     const winners = preMarkets.filter(x => x.market === "MS 1");
@@ -611,11 +611,9 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     "EV 1.5 ÜST": 48, "DEP 1.5 ÜST": 48, "MS 2.5 ÜST": 50, "MS 3.5 ÜST": 30,
     "KG VAR": 50, "İY 0.5 ÜST": 54, "İY 1.5 ÜST": 34, "MS 0.5 ÜST": 60, "MS 1.5 ÜST": 54
   };
-  // Son 5 maç örneklemi küçük olduğundan form yüzdesi 5 maçlık adımlarla değişir.
-  // Form desteği tek başına veto olmasın; piyasa olasılığıyla birlikte ağırlıklı puanlansın.
   const minFormPct = {
-    "EV 1.5 ÜST": 35, "DEP 1.5 ÜST": 35, "MS 2.5 ÜST": 35, "MS 3.5 ÜST": 30,
-    "KG VAR": 35, "İY 0.5 ÜST": 40, "İY 1.5 ÜST": 30, "MS 0.5 ÜST": 40, "MS 1.5 ÜST": 35
+    "EV 1.5 ÜST": 45, "DEP 1.5 ÜST": 45, "MS 2.5 ÜST": 48, "MS 3.5 ÜST": 34,
+    "KG VAR": 48, "İY 0.5 ÜST": 52, "İY 1.5 ÜST": 34, "MS 0.5 ÜST": 54, "MS 1.5 ÜST": 50
   };
 
   const ranked = choices.map(choice => {
@@ -623,11 +621,9 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     let liveBonus = 0;
     let rejectReason = null;
     if (live) {
-      // İstatistik akışı eksikse tüm gol pazarlarını otomatik reddetme.
-      // KG VAR gibi takım baskısı gerektiren pazarlar için canlı istatistik şarttır.
-      if (!statsM.available && choice.market === "KG VAR") return null;
+      if (!statsM.available) return null;
 
-      // Canlı tercih için yalnızca maç önü oranı kullanılır; canlı oran kullanılmaz.
+      // Canlı piyasa olasılığı seçim puanında kullanılır; maç önü oranı scorePrediction içinde referans olarak kalır.
 
       if (choice.market.startsWith("İY ") && minute >= 45) return null;
       if (choice.market.startsWith("İY ")) {
@@ -640,14 +636,25 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
       if (choice.market === "MS 2.5 ÜST" && total >= 3) return null;
       if (choice.market === "MS 3.5 ÜST" && total >= 4) return null;
 
+      // Özel koruma: devrede toplam 1 gol varsa MS 1.5 ÜST için 65. dakika öncesi öneri verme.
+      // 66+ dakikada da yalnızca yeterli canlı baskı, form desteği ve anlamlı oran varsa değerlendir.
+      if (live && choice.market === "MS 1.5 ÜST" && total === 1) {
+        if (minute < 66) return null;
+        if (Number(choice.odd || 0) < 1.35) return null;
+        if (Number(formPct || 0) < 60) return null;
+        if (Number(choice.probability || 0) > 78) return null;
+        if (Number(statsM.pressure || 0) < 18) return null;
+        if (Number(statsM.shotsOnTarget || 0) < 3 && Number(statsM.totalShots || 0) < 10) return null;
+      }
+
       const lineNum = Number(String(choice.market).match(/(\d)[.,](\d)/)?.[0]?.replace(",", ".") || 0);
       const needed = choice.market.startsWith("MS ") ? Math.max(0, Math.ceil(lineNum + 0.01) - total) : 1;
 
       // Geç dakikada çok gol ihtiyacı + düşük baskı = red.
-      if (statsM.available && minute >= 66 && needed > 1 && statsM.pressure < 16) return null;
-      if (statsM.available && minute >= 72 && needed > 1 && statsM.pressure < 22) return null;
-      if (statsM.available && minute >= 78 && needed >= 1 && statsM.pressure < 20) return null;
-      if (minute >= 75 && choice.market === "MS 3.5 ÜST" && (needed > 1 || (statsM.available && statsM.pressure < 26))) return null;
+      if (minute >= 66 && needed > 1 && statsM.pressure < 16) return null;
+      if (minute >= 72 && needed > 1 && statsM.pressure < 22) return null;
+      if (minute >= 78 && needed >= 1 && statsM.pressure < 20) return null;
+      if (minute >= 75 && choice.market === "MS 3.5 ÜST" && (needed > 1 || statsM.pressure < 26)) return null;
 
       // KG VAR: geride kalan favori takım baskısı şart.
       if (choice.market === "KG VAR") {
@@ -666,8 +673,8 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
       }
 
       // 0-0 / 1-0 senaryolarında erken-orta canlı: baskı eşiği.
-      if (statsM.available && minute >= 55 && minute <= 65 && total === 0 && choice.market === "MS 0.5 ÜST" && statsM.pressure < 5.5) return null;
-      if (statsM.available && minute >= 25 && minute < 33 && total === 0 && choice.market === "İY 0.5 ÜST" && statsM.pressure < 4) return null;
+      if (minute >= 55 && minute <= 65 && total === 0 && choice.market === "MS 0.5 ÜST" && statsM.pressure < 5.5) return null;
+      if (minute >= 25 && minute < 33 && total === 0 && choice.market === "İY 0.5 ÜST" && statsM.pressure < 4) return null;
 
       // Genel baskı bonusu (isabetli şut ağırlıklı).
       liveBonus += Math.min(16, statsM.pressure * 0.28);
@@ -678,17 +685,14 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     }
 
     if (formPct == null || choice.probability < minMarketPct[choice.market] || formPct < minFormPct[choice.market]) return null;
-    const scoreAligned = marketConsistentWithScore(choice.market, predictedScores);
-    const consistencyAdjustment = scoreAligned ? 0 : -8;
-    const score = choice.probability * 0.52 + formPct * 0.38 + liveBonus + consistencyAdjustment
+    const score = choice.probability * 0.52 + formPct * 0.38 + liveBonus
       - (live && choice.market === "MS 3.5 ÜST" ? Math.max(0, minute - 65) * 0.4 : 0);
     return {
       ...choice,
       formPct,
       score,
-      statsSummary: live && statsM.available ? statsM : null,
-      scoreConsistency: scoreAligned ? "uyumlu" : "oran/form sinyali skor tahminiyle tam uyumlu değil",
-      liveContext: live ? { minute, total, pressure: statsM.pressure, liveStatsAvailable: Boolean(statsM.available), neededGoals: choice.market.startsWith("MS ") ? Math.max(0, Math.ceil(Number(String(choice.market).match(/(\d)[.,](\d)/)?.[0]?.replace(",", ".") || 0) + 0.01) - total) : null } : null
+      statsSummary: live ? statsM : null,
+      liveContext: live ? { minute, total, pressure: statsM.pressure, neededGoals: choice.market.startsWith("MS ") ? Math.max(0, Math.ceil(Number(String(choice.market).match(/(\d)[.,](\d)/)?.[0]?.replace(",", ".") || 0) + 0.01) - total) : null } : null
     };
   }).filter(Boolean).sort((a, b) => b.score - a.score);
 
