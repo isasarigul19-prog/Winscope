@@ -338,9 +338,19 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
 
   const h = forms.home, a = forms.away;
   const predictedScores = scorePrediction(fixture, h, a);
-  const choices = oddsForFixture(oddsRow).filter(x => allowed.includes(x.market) && x.market !== excludeMarket && marketConsistentWithScore(x.market, predictedScores));
-  const statsM = stats || { available: false, pressure: 0, home: {}, away: {} };
+  const liveMarketRows = oddsForFixture(oddsRow);
   const preMarkets = oddsForFixture(prematchOddsRow || null);
+  // Live feeds often omit first-half markets. Fall back per-market to verified prematch odds,
+  // but prefer a live quote whenever that same market is actually present live.
+  const liveMarketNames = new Set(liveMarketRows.map(x => x.market));
+  const mergedMarketRows = live
+    ? [
+        ...liveMarketRows.map(x => ({ ...x, oddsTiming: "live" })),
+        ...preMarkets.filter(x => !liveMarketNames.has(x.market)).map(x => ({ ...x, oddsTiming: "prematch-fallback" }))
+      ]
+    : liveMarketRows.map(x => ({ ...x, oddsTiming: "prematch" }));
+  const choices = mergedMarketRows.filter(x => allowed.includes(x.market) && x.market !== excludeMarket && marketConsistentWithScore(x.market, predictedScores));
+  const statsM = stats || { available: false, pressure: 0, home: {}, away: {} };
   const favorite = (() => {
     const winners = preMarkets.filter(x=>x.market==="MS 1");
     const home = winners.find(x=>x.bookmaker && x.market==="MS 1" && x.homeOdd)?.homeOdd;
@@ -359,7 +369,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     if (live) {
       if (!statsM.available) return null;
       // Canlı piyasa olasılığını maç önü aynı piyasa ile karşılaştır; veri yoksa hareket varmış gibi davranma.
-      if (oddsRow !== prematchOddsRow) {
+      if (choice.oddsTiming === "live") {
         const pre = preMarkets.find(x => x.market === choice.market);
         if (pre && Number.isFinite(pre.probability)) {
           const movement = choice.probability - pre.probability;
@@ -387,6 +397,8 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
         liveBonus += Math.min(12, trailingPressure*0.5);
       }
       if (minute <= 30 && total === 0 && choice.market === "İY 0.5 ÜST" && statsM.pressure < 3.5) return null;
+      // If first-half goal form is strong and live pressure confirms it, prioritize the relevant half-time market.
+      if (minute <= 30 && total === 0 && choice.market === "İY 0.5 ÜST" && Number(formPct || 0) >= 70) liveBonus += 8;
       if (minute >= 55 && minute <= 65 && total === 0 && choice.market === "MS 0.5 ÜST" && statsM.pressure < 6) return null;
       liveBonus += Math.min(14, statsM.pressure*0.25);
     }
@@ -649,7 +661,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       fullTimeScore:match.status==="FT"?`${match.homeScore}-${match.awayScore}`:scores.fullTimeScore,
       mainPick:chosen?.market || "Doğrulanabilir piyasa verisi bulunamadı",alternative:alternativeChoice?.market || "Desteklenen ikinci tercih bulunamadı",surprise:chosen ? "Sürpriz yalnızca ayrı piyasa sinyali desteklerse değerlendirilir" : "Sürpriz için doğrulanabilir piyasa verisi yok",
       marketPercentages:analysisPercentages(oddsRow,homeForm,awayForm),
-      note:chosen?`${chosen.bookmaker}; piyasa olasılığı ve son 5 maç formu birlikte değerlendirildi${isLive?`; canlı baskı: ${stats.shotsOnTarget} isabetli şut, ${stats.totalShots} toplam şut, ${stats.corners} korner`:""}.`:
+      note:chosen?`${chosen.bookmaker}; piyasa olasılığı ve son 5 maç formu birlikte değerlendirildi${isLive && chosen.oddsTiming === "prematch-fallback" ? "; bu tercih için canlı oran yok, maç önü oranı kullanıldı" : ""}${isLive?`; canlı baskı: ${stats.shotsOnTarget} isabetli şut, ${stats.totalShots} toplam şut, ${stats.corners} korner`:""}.`:
         `Bu maç için doğrulanabilir oran + son 5 maç formu${isLive?" + canlı oran/istatistik":""} birlikte bulunamadı; tahmin uydurulmadı.`,
       oddsBasis:isLive?(liveRow?"Canlı oran + maç önü referansı":"Canlı oran bulunamadı; maç önü referansı kullanıldı"):"Maç önü son mevcut oran kaydı; resmî kapanış garantisi yok",
       htMarketAlreadyHit
