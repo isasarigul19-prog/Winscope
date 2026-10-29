@@ -519,7 +519,10 @@ function couponMessage(coupon) {
     lines.push("");
   });
   if (coupon.type === "live") {
-    lines.push("Dayanak: yalnızca maç önü oranı + son 5 maç formu + canlı şut/korner baskısı + dakika/skor penceresi. Canlı oran kullanılmadı.");
+    const usedLiveOdds = coupon.picks.some(p => p.oddsTiming === "live" || /canlı oran/i.test(String(p.oddsBasis || "")));
+    lines.push(usedLiveOdds
+      ? "Dayanak: canlı oran mevcutsa kullanıldı ve maç önü oranıyla karşılaştırıldı; son 5 maç formu + canlı şut/korner baskısı + dakika/skor penceresi de değerlendirildi."
+      : "Dayanak: bu maçta kullanılabilir canlı oran alınamadı; maç önü oranı yedek olarak kullanıldı. Son 5 maç formu + canlı şut/korner baskısı + dakika/skor penceresi değerlendirildi.");
   }
   return lines.join("\n");
 }
@@ -674,7 +677,9 @@ async function createCouponByMode(date, mode = "prematch") {
   const publicPicks = chosen.map(({ internalOdd, score, ...p }) => p);
   const draftId = `coupon-${Date.now()}`;
   const coupon = {draftId,date,type:mode,isLive:isLiveMode,status:"READY",picks:publicPicks,
-    message:mode==="live" ? "Tek canlı tercih: maç önü oranı + dakika/skor penceresi + son 5 form + şut/korner baskısı eşiklerini geçen maç. Canlı oran kullanılmadı." :
+    message:mode==="live" ? (chosen.some(p => p.oddsTiming === "live")
+      ? "Tek canlı tercih: kullanılabilir canlı oran + maç önü oranına göre piyasa hareketi + dakika/skor + son 5 form + canlı şut/korner baskısı değerlendirildi."
+      : "Tek canlı tercih: kullanılabilir canlı oran bulunamadı; maç önü oranı yedek olarak kullanıldı. Dakika/skor + son 5 form + canlı şut/korner baskısı değerlendirildi.") :
       mode==="surprise" ? "10 maçlık sürpriz kupon: her maç oran ve son 5 gerçek skor formu ile doğrulandı." :
       "Maç önü kuponu: en az iki maç, maç önü son mevcut oran ve son 5 gerçek skor formu birlikte değerlendirildi."};
   archives.coupons.unshift({date,type:mode,picks:publicPicks,createdAt:new Date().toISOString()});
