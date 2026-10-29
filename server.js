@@ -471,6 +471,30 @@ function marketConsistentWithScore(market, scoreObj) {
   return true;
 }
 
+function chooseFormFallbackMarket(mode, fixture, forms, excludeMarket = null) {
+  // Fallback only when no usable market odds are available. It is explicitly labelled
+  // as form-based, never presented as an odds-backed signal.
+  if (!forms?.home?.available || !forms?.away?.available) return null;
+  const live = mode === "live";
+  const minute = Number(fixture.minute || 0);
+  if (live && (minute < 25 || minute > 85)) return null;
+  const total = Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0);
+  let allowed;
+  if (!live) allowed = ["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR", "MS 1.5 ÜST"];
+  else if (minute < 33) allowed = total === 0 ? ["İY 0.5 ÜST"] : ["İY 1.5 ÜST", "MS 1.5 ÜST"];
+  else if (minute < 45) allowed = total === 0 ? ["MS 1.5 ÜST"] : ["MS 1.5 ÜST", "KG VAR", "MS 2.5 ÜST"];
+  else if (minute < 66) allowed = total === 0 ? ["MS 0.5 ÜST", "MS 1.5 ÜST"] : total === 1 ? ["MS 1.5 ÜST", "KG VAR"] : ["MS 2.5 ÜST", "KG VAR"];
+  else if (minute <= 75) allowed = total <= 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST", "KG VAR"] : ["MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
+  else allowed = total <= 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST"] : ["MS 2.5 ÜST", "MS 3.5 ÜST"];
+  const thresholds = { "EV 1.5 ÜST": 45, "DEP 1.5 ÜST": 45, "MS 0.5 ÜST": 55, "MS 1.5 ÜST": 50, "MS 2.5 ÜST": 48, "MS 3.5 ÜST": 34, "KG VAR": 48, "İY 0.5 ÜST": 52, "İY 1.5 ÜST": 34 };
+  const scoreObj = scorePrediction(fixture, forms.home, forms.away, null, null);
+  const candidates = allowed.filter(m => m !== excludeMarket && marketConsistentWithScore(m, scoreObj))
+    .map(m => ({ market: m, formPct: marketSupport(m, forms.home, forms.away), bookmaker: "Son 5 maç formu (oran bulunamadı)", oddsTiming: "form-fallback", probability: null }))
+    .filter(x => x.formPct != null && x.formPct >= (thresholds[x.market] ?? 50))
+    .sort((a,b) => b.formPct - a.formPct);
+  return candidates[0] || null;
+}
+
 function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOddsRow, excludeMarket = null, preferredMarket = null) {
   const live = mode === "live";
   const total = Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0);
@@ -934,7 +958,12 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     const chosen = oddsRow && homeForm.available && awayForm.available
       ? chooseSupportedMarket(oddsRow,isLive?"live":"prematch",match,{home:homeForm,away:awayForm},isLive?stats:null,prematchRow)
       : null;
-    const activeChoice = chosen || prematchChoice;
+    // If the provider has no usable odds for this fixture, still provide a transparent
+    // form-based fallback when the five-match samples are available. Never label it as market-backed.
+    const formFallback = !chosen && !(earlyLive && prematchChoice)
+      ? chooseFormFallbackMarket(isLive ? "live" : "prematch", match, {home:homeForm,away:awayForm})
+      : null;
+    const activeChoice = chosen || prematchChoice || formFallback;
     const activeChoiceMode = chosen ? (isLive ? "live" : "prematch") : "prematch";
     const total=Number(match.homeScore||0)+Number(match.awayScore||0);
     const htGoals = Number(match.htHomeScore||0)+Number(match.htAwayScore||0);
@@ -942,7 +971,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     const scores = scorePrediction(match,homeForm,awayForm,isLive && usableLiveRow ? usableLiveRow : null,prematchRow);
     const predictedFt = String(scores.fullTimeScore || "").match(/(\d+)\s*[-:]\s*(\d+)/);
     const scoreSuggestsBtts = Boolean(predictedFt && Number(predictedFt[1]) > 0 && Number(predictedFt[2]) > 0);
-    const alternativeChoice = activeChoice && homeForm.available && awayForm.available
+    const alternativeChoice = activeChoice && homeForm.available && awayForm.available && activeChoice.oddsTiming !== "form-fallback"
       ? chooseSupportedMarket(activeChoiceMode === "prematch" ? prematchRow : oddsRow,activeChoiceMode,match,{home:homeForm,away:awayForm},activeChoiceMode === "live" ? stats : null,prematchRow,activeChoice.market,scoreSuggestsBtts?"KG VAR":null)
       : null;
     res.json({
@@ -950,12 +979,12 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       halfTimeScore:match.status==="FT"?`${match.htHomeScore??"?"}-${match.htAwayScore??"?"}`:isLive&&match.minute<45&&total>0?`Canlı skor: ${match.homeScore}-${match.awayScore}`:scores.halfTimeScore,
       fullTimeScore:match.status==="FT"?`${match.homeScore}-${match.awayScore}`:scores.fullTimeScore,
       scoreBasis:scores.scoreBasis || "Skor tahmininde kullanılan kaynak bilgisi yok",
-      mainPick:chosen?.market || (earlyLive && prematchChoice ? `${prematchChoice.market} (maç önü sinyali)` : earlyLive ? "Maç önü piyasa sinyali bulunamadı; canlı tercih 25. dakikadan sonra değerlendirilecek" : "Doğrulanabilir piyasa verisi bulunamadı"),
-      alternative:alternativeChoice?.market || (earlyLive ? "Canlı tercih 25. dakikadan sonra değerlendirilecek" : "Desteklenen ikinci tercih bulunamadı"),
-      surprise:chosen ? "Sürpriz yalnızca ayrı piyasa sinyali desteklerse değerlendirilir" : (earlyLive ? "Canlı sürpriz tercihi 25. dakikadan sonra değerlendirilecek" : "Sürpriz için doğrulanabilir piyasa verisi yok"),
+      mainPick:chosen?.market || (earlyLive && prematchChoice ? `${prematchChoice.market} (maç önü sinyali)` : formFallback ? `${formFallback.market} (son 5 maç formu; oran sinyali bulunamadı)` : earlyLive ? "Maç önü oranı eşleşmedi; canlı tercih 25. dakikadan sonra yeniden değerlendirilecek" : "Kullanılabilir piyasa oranı bulunamadı; form eşiği de karşılanmadı"),
+      alternative:alternativeChoice?.market || (earlyLive ? (formFallback ? "Canlı veri 25. dakikadan sonra tekrar kontrol edilecek" : "Canlı tercih 25. dakikadan sonra değerlendirilecek") : "Desteklenen ikinci tercih bulunamadı"),
+      surprise:chosen ? "Sürpriz yalnızca ayrı piyasa sinyali desteklerse değerlendirilir" : (formFallback ? "Form tabanlı yedek analiz; piyasa tarafından doğrulanmadı" : earlyLive ? "Canlı sürpriz tercihi 25. dakikadan sonra değerlendirilecek" : "Sürpriz için yeterli piyasa/form sinyali yok"),
       marketPercentages:analysisPercentages(isLive && usableLiveRow ? usableLiveRow : prematchRow,homeForm,awayForm),
       note:chosen?`${chosen.bookmaker}; ${isLive && chosen.oddsTiming === "live" ? "canlı oran, maç önü oranına göre piyasa hareketi ve " : "maç önü piyasa olasılığı ve "}son 5 maç formu birlikte değerlendirildi${isLive?`; canlı baskı: ${stats.shotsOnTarget} isabetli şut, ${stats.totalShots} toplam şut, ${stats.corners} korner`:""}.`:
-        (earlyLive ? (prematchChoice ? `Maç önü piyasa sinyali ${prematchChoice.market} olarak korundu. Bu, canlı tercih değildir; canlı tercih 25. dakikadan sonra maç önü oranı + canlı istatistik + form ile hesaplanacak.` : "Maç önü tercih için yeterli doğrulanabilir piyasa/form verisi yok. Canlı tercih 25. dakikadan sonra değerlendirilecek.") : `Bu maç için doğrulanabilir maç önü oranı + son 5 maç formu${isLive?" + canlı istatistik":""} birlikte bulunamadı; tahmin uydurulmadı.`),
+        (formFallback ? `Kullanılabilir piyasa oranı eşleşmedi. Bu yedek tercih son 5 maç formuna dayanır; oran sinyali olarak değerlendirilmemelidir.${isLive?` Canlı istatistik durumu: ${stats.available ? "mevcut" : "eksik"}.`:""}` : earlyLive ? (prematchChoice ? `Maç önü piyasa sinyali ${prematchChoice.market} olarak korundu. Canlı tercih 25. dakikadan sonra maç önü oranı + canlı istatistik + form ile yeniden hesaplanacak.` : "Maç önü oranı eşleşmedi; canlı tercih 25. dakikadan sonra yeniden değerlendirilecek.") : `Kullanılabilir piyasa oranı eşleşmedi ve son 5 maç formu da tercih eşiğini karşılamadı.`),
       oddsBasis:isLive?(usableLiveRow?"Canlı oran + maç önü referansı; oran değerleri arayüzde gösterilmez":"Canlı oran bulunamadı/kapalı; maç önü oranı yedek kullanıldı"):"API-Football maç önü son mevcut oran kaydı; resmî kapanış garantisi yok",
       htMarketAlreadyHit
     });
