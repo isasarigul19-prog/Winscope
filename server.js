@@ -30,6 +30,8 @@ const providerInFlight = new Map();
 const archives = { analyses: [], coupons: [] };
 // Maç önü skor tahminleri maç boyunca sabit tutulur. Bellek içi yedek + PostgreSQL kalıcılığı.
 const lockedScorePredictions = new Map();
+// Skor motoru sürümü: önceki sürümün genellenmiş/eski kayıtları yeni analizde kullanılmaz.
+const SCORE_ENGINE_VERSION = "SCORE_ENGINE_V2";
 const { Pool } = pg;
 const databasePool = process.env.DATABASE_URL
   ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL) ? false : { rejectUnauthorized: false } })
@@ -57,7 +59,7 @@ if (databasePool) {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`);
-      const lockedRows = await databasePool.query("SELECT fixture_id, halftime_score, fulltime_score, score_basis, score_probability FROM winscope_score_predictions");
+      const lockedRows = await databasePool.query("SELECT fixture_id, halftime_score, fulltime_score, score_basis, score_probability FROM winscope_score_predictions WHERE score_basis LIKE 'SCORE_ENGINE_V2:%'");
       for (const row of lockedRows.rows) lockedScorePredictions.set(Number(row.fixture_id), { halfTimeScore: row.halftime_score, fullTimeScore: row.fulltime_score, scoreBasis: row.score_basis, scoreProbability: row.score_probability == null ? null : Number(row.score_probability), locked: true });
       // Telegram tekrar engeli tercih bazındadır: aynı maç + aynı tercih bir kez gönderilir.
       await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_telegram_pick_sent (
@@ -619,6 +621,9 @@ async function getOrCreateLockedScorePrediction(fixture, homeForm, awayForm, pre
   // Canlı analiz ilk kez maç başladıktan sonra açılsa bile skor tahmini yalnızca maç önü oranı + form ile, 0-0 başlangıç koşulunda üretilir.
   const baselineFixture = { ...fixture, status: "NS", minute: 0, homeScore: 0, awayScore: 0, htHomeScore: null, htAwayScore: null };
   const prediction = scorePrediction(baselineFixture, homeForm, awayForm, null, prematchOddsRow);
+  // Önceki sürümlerdeki varsayılan/tekrarlanan skorlar sessizce yeniden kullanılmasın.
+  // Yeni tahmin yine sadece maç önü oranları + mevcut form ile 0-0 başlangıç koşulunda hesaplanır.
+  prediction.scoreBasis = `${SCORE_ENGINE_VERSION}: ${prediction.scoreBasis || "maç önü oranları ve takım formu"}`;
   const locked = { ...prediction, locked: true, lockedAt: new Date().toISOString() };
   // Set immediately to prevent two concurrent analysis requests from producing different scores.
   lockedScorePredictions.set(fixtureId, locked);
@@ -627,8 +632,17 @@ async function getOrCreateLockedScorePrediction(fixture, homeForm, awayForm, pre
       await archiveDatabaseReady;
       const result = await databasePool.query(
         `INSERT INTO winscope_score_predictions (fixture_id, home_team, away_team, halftime_score, fulltime_score, score_basis, score_probability)
-         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (fixture_id) DO NOTHING
-         RETURNING fixture_id, halftime_score, fulltime_score, score_basis, score_probability`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (fixture_id) DO UPDATE SET
+           home_team = EXCLUDED.home_team,
+           away_team = EXCLUDED.away_team,
+           halftime_score = EXCLUDED.halftime_score,
+           fulltime_score = EXCLUDED.fulltime_score,
+           score_basis = EXCLUDED.score_basis,
+           score_probability = EXCLUDED.score_probability,
+           updated_at = NOW()
+         WHERE winscope_score_predictions.score_basis NOT LIKE 'SCORE_ENGINE_V2:%'
+         RETURNING fixture_id, halftime_score, fulltime_score, score_basis, score_probability`, 
         [fixtureId, String(fixture.home || fixture.homeTeam || ""), String(fixture.away || fixture.awayTeam || ""), String(prediction.halfTimeScore || ""), String(prediction.fullTimeScore || ""), String(prediction.scoreBasis || ""), prediction.scoreProbability ?? null]
       );
       if (!result.rows.length) {
@@ -1340,7 +1354,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       fullTimeScore:match.status==="FT"?`${match.homeScore}-${match.awayScore}`:scores.fullTimeScore,
       livePick:isLive?(finalChoice ? `${finalChoice.market}${finalChoice.oddsTiming === "live" ? " (canlı oran)" : finalChoice.oddsTiming === "scenario-estimate" ? " (skor/dakika senaryosu)" : " (maç önü oranı; canlı oran yok)"}` : "Yeterli veri yok — canlı tercih oluşturulmadı"):"Maç canlı değil",
       livePickBasis:isLive?(finalChoice ? (finalChoice.oddsTiming === "live" ? `Dayanak: ${finalChoice.bookmaker} gerçek canlı oranı + dakika/skor/canlı istatistik.` : finalChoice.oddsTiming === "scenario-estimate" ? "Dayanak: gerçek maç skoru, dakika ve varsa canlı istatistik; oran uydurulmadı." : `Dayanak: ${finalChoice.bookmaker} maç önü oranı + gerçek skor/dakika/canlı istatistik; canlı oran değildir.`) : "Dayanak: mevcut skor ve dakika senaryosu."):"Canlı maç başladığında değerlendirilir.",
-      scoreBasis:scores.scoreBasis || "Skor tahmininde kullanılan kaynak bilgisi yok",
+      scoreBasis:String(scores.scoreBasis || "Skor tahmininde kullanılan kaynak bilgisi yok").replace(/^SCORE_ENGINE_V2:\s*/, ""),
       scoreLocked: Boolean(scores.locked),
       scoreLockedAt: scores.lockedAt || null,
       mainPick:finalChoice?.market || prematchChoice?.market || "Yeterli veri yok — net tercih oluşturulmadı",
