@@ -306,6 +306,56 @@ function oddsForFixture(oddsRow) {
   return candidates.sort((a,b) => (/bet365/i.test(b.bookmaker)-/bet365/i.test(a.bookmaker)) || b.probability-a.probability || a.rank-b.rank);
 }
 
+// WinScope maç önü oran sinyalleri. Eşikler kullanıcı tarafından belirlenen aday kurallardır;
+// oranlar yalnızca dahili sıralamada kullanılır ve arayüz/Telegram mesajına eklenmez.
+function prematchOddsSignals(oddsRow) {
+  const markets = oddsForFixture(oddsRow || null);
+  const bestFor = (market) => markets
+    .filter(x => x.market === market && Number.isFinite(Number(x.odd)))
+    .sort((a, b) => (/bet365/i.test(b.bookmaker) - /bet365/i.test(a.bookmaker)) || Number(a.odd) - Number(b.odd))[0] || null;
+  const over25 = bestFor("MS 2.5 ÜST");
+  const btts = bestFor("KG VAR");
+
+  // Hareket ancak sağlayıcı açıkça hem önceki/açılış hem güncel oran veriyorsa kabul edilir.
+  // API cevabında yalnızca tek oran varsa hareket uydurulmaz.
+  let ahAwayDrop = null;
+  for (const bookmaker of bookmakerRows(oddsRow)) {
+    for (const bet of (bookmaker.bets || [])) {
+      if (!/asian handicap|handicap|handicap result/i.test(String(bet.name || ""))) continue;
+      for (const value of (bet.values || [])) {
+        const label = String(value.value ?? value.name ?? "").toLowerCase();
+        const isAway = /\b(away|visitor|team 2|\b2\b)/.test(label);
+        const isMinusHalf = /-\s*0[.,]5/.test(label);
+        if (!isAway || !isMinusHalf) continue;
+        const current = Number(value.odd ?? value.currentOdd ?? value.current_odd);
+        const opening = Number(value.openingOdd ?? value.opening_odd ?? value.initialOdd ?? value.initial_odd ?? value.previousOdd ?? value.previous_odd);
+        if (Number.isFinite(current) && current > 1.01 && Number.isFinite(opening) && opening > 1.01 && opening > current) {
+          ahAwayDrop = { opening, current, drop: opening - current, dropPct: (opening - current) / opening * 100, bookmaker: bookmaker.name || "Kaynak belirtilmedi" };
+        }
+      }
+    }
+  }
+  return {
+    over25Odd: over25 ? Number(over25.odd) : null,
+    over25Strong: Boolean(over25 && Number(over25.odd) <= 1.73),
+    bttsYesOdd: btts ? Number(btts.odd) : null,
+    bttsStrong: Boolean(btts && Number(btts.odd) <= 1.60),
+    bothGoalSignals: Boolean(over25 && btts && Number(over25.odd) <= 1.73 && Number(btts.odd) <= 1.60),
+    ahAwayDrop
+  };
+}
+
+function prematchSignalBonus(choice, signals) {
+  if (!choice || !signals) return 0;
+  let bonus = 0;
+  if (choice.market === "MS 2.5 ÜST" && signals.over25Strong) bonus += 16;
+  if (choice.market === "KG VAR" && signals.bttsStrong) bonus += 16;
+  if (signals.bothGoalSignals && ["MS 2.5 ÜST", "KG VAR"].includes(choice.market)) bonus += 4;
+  // Dep 1.5 ÜST yalnızca AH -0.5 deplasman oranının gerçek açılış/güncel düşüşü veride mevcutsa desteklenir.
+  if (choice.market === "DEP 1.5 ÜST" && signals.bothGoalSignals && signals.ahAwayDrop && signals.ahAwayDrop.dropPct >= 5) bonus += 18;
+  return bonus;
+}
+
 function marketSupport(market, homeForm, awayForm) {
   if (!homeForm?.available || !awayForm?.available) return null;
   const avg = (a,b) => a == null || b == null ? null : (Number(a)+Number(b))/2;
@@ -647,7 +697,9 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   // Canlı maçta önce gerçek /odds/live piyasasını kullan. Yalnızca bu uç nokta boşsa
   // maç önü oranına düş; seçimin dayanağını oddsTiming ile açıkça işaretle.
   const liveMarketRows = live ? oddsForFixture(oddsRow || null) : [];
-  const preMarkets = oddsForFixture(prematchOddsRow || (!live ? oddsRow : null) || null);
+  const preOddsSource = prematchOddsRow || (!live ? oddsRow : null) || null;
+  const preMarkets = oddsForFixture(preOddsSource);
+  const preSignals = prematchOddsSignals(preOddsSource);
   // Initialize before scorePrediction reads it; otherwise live analysis throws a TDZ error.
   const useLiveOdds = live && liveMarketRows.length > 0;
   const predictedScores = scorePrediction(fixture, h, a, useLiveOdds ? oddsRow : null, prematchOddsRow || (!live ? oddsRow : null) || null);
@@ -758,7 +810,8 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
 
     if (choice.probability < minMarketPct[choice.market]) return null;
     if (!live && formPct != null && formPct < minFormPct[choice.market]) return null;
-    const score = choice.probability * (live ? 0.78 : 0.58) + (formPct == null ? 0 : formPct * (live ? 0.04 : 0.32)) + liveBonus
+    const oddsSignalBonus = live ? 0 : prematchSignalBonus(choice, preSignals);
+    const score = choice.probability * (live ? 0.78 : 0.58) + (formPct == null ? 0 : formPct * (live ? 0.04 : 0.32)) + liveBonus + oddsSignalBonus
       - (live && choice.market === "MS 3.5 ÜST" ? Math.max(0, minute - 65) * 0.4 : 0);
     return {
       ...choice,
