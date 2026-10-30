@@ -1216,7 +1216,37 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     const htMarketAlreadyHit = match.minute < 45 ? total >= 1 : htGoals >= 1;
     const scores = scorePrediction(match,homeForm,awayForm,isLive ? liveOddsRow : null,prematchRow);
     const predictedFt = String(scores.fullTimeScore || "").match(/(\d+)\s*[-:]\s*(\d+)/);
-    const scoreSuggestsBtts = Boolean(predictedFt && Number(predictedFt[1]) > 0 && Number(predictedFt[2]) > 0);
+    let scoreSuggestsBtts = Boolean(predictedFt && Number(predictedFt[1]) > 0 && Number(predictedFt[2]) > 0);
+    // Final consistency gate: align displayed scoreline with the selected main market.
+    // This does not claim certainty; it prevents logically incompatible output labels.
+    if (activeChoice && predictedFt) {
+      let sh = Number(predictedFt[1]), sa = Number(predictedFt[2]);
+      const pick = String(activeChoice.market || '').toUpperCase();
+      if (pick === 'KG VAR' && (sh === 0 || sa === 0)) { sh = Math.max(1, sh); sa = Math.max(1, sa); }
+      if (pick === 'KG YOK' && sh > 0 && sa > 0) { if (sh <= sa) sa = 0; else sh = 0; }
+      const overMatch = pick.match(/^MS ([0-9]+(?:[.,][0-9]+)?) ÜST$/);
+      if (overMatch) {
+        const line = Number(overMatch[1].replace(',', '.'));
+        const required = Math.floor(line) + 1;
+        while (sh + sa < required) {
+          if (pick.startsWith('MS') && sh >= sa) sa++; else sh++;
+        }
+      }
+      const underMatch = pick.match(/^MS ([0-9]+(?:[.,][0-9]+)?) ALT$/);
+      if (underMatch) {
+        const maxGoals = Math.ceil(Number(underMatch[1].replace(',', '.'))) - 1;
+        while (sh + sa > maxGoals) { if (sh >= sa) sh--; else sa--; }
+      }
+      scores.fullTimeScore = `${sh}-${sa} (tahmin; ana tercihle tutarlı)`;
+      scoreSuggestsBtts = sh > 0 && sa > 0;
+      // Half-time score cannot contain more goals than the projected full-time score.
+      const htMatch = String(scores.halfTimeScore || '').match(/(\d+)\s*[-:]\s*(\d+)/);
+      if (htMatch) {
+        const hh = Math.min(sh, Number(htMatch[1]));
+        const ha = Math.min(sa, Number(htMatch[2]));
+        scores.halfTimeScore = `${hh}-${ha} (tahmin; MS skoruyla tutarlı)`;
+      }
+    }
     const alternativeChoice = activeChoice && activeChoice.oddsTiming !== "scenario-estimate" && activeChoice.oddsTiming !== "form-fallback"
       ? chooseSupportedMarket(activeChoiceMode === "live" ? (liveOddsRow || prematchRow) : prematchRow,activeChoiceMode,match,{home:homeForm,away:awayForm},activeChoiceMode === "live" ? stats : null,prematchRow,activeChoice.market,scoreSuggestsBtts?"KG VAR":null)
       : null;
