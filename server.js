@@ -278,8 +278,8 @@ function oddsForFixture(oddsRow) {
         const side = overMatch ? "over" : underMatch ? "under" : null;
         if (!side) continue;
         let key = null;
-        if (isHomeTeam && Number(line) === 1.5) key = "EV 1.5 ÜST";
-        else if (isAwayTeam && Number(line) === 1.5) key = "DEP 1.5 ÜST";
+        if (isHomeTeam && [0.5, 1.5].includes(Number(line))) key = `EV ${line} ÜST`;
+        else if (isAwayTeam && [0.5, 1.5].includes(Number(line))) key = `DEP ${line} ÜST`;
         else if (isHalf && [0.5, 1.5, 2.5].includes(Number(line))) key = `İY ${line} ÜST`;
         else if (isTotal && [0.5, 1.5, 2.5, 3.5].includes(Number(line))) key = `MS ${line} ÜST`;
         if (key) add(book, key, side, odd);
@@ -297,7 +297,7 @@ function oddsForFixture(oddsRow) {
     }
     const odd = item.over || item.yes || item.home;
     if (pct == null || !Number.isFinite(pct)) continue;
-    const ranks = { "EV 1.5 ÜST": 1, "DEP 1.5 ÜST": 1, "İY 0.5 ÜST": 2, "MS 0.5 ÜST": 2, "İY 1.5 ÜST": 3, "MS 1.5 ÜST": 3, "MS 2.5 ÜST": 4, "KG VAR": 5, "MS 3.5 ÜST": 6 };
+    const ranks = { "EV 0.5 ÜST": 1, "DEP 0.5 ÜST": 1, "EV 1.5 ÜST": 2, "DEP 1.5 ÜST": 2, "İY 0.5 ÜST": 2, "MS 0.5 ÜST": 2, "İY 1.5 ÜST": 3, "MS 1.5 ÜST": 3, "MS 2.5 ÜST": 4, "KG VAR": 5, "MS 3.5 ÜST": 6 };
     candidates.push({ market: item.market, odd, probability: pct, rank: ranks[item.market] ?? 9, bookmaker: item.bookmaker,
       homeOdd: item.market === "MS 1" ? item.home : null, drawOdd: item.market === "MS 1" ? item.draw : null,
       awayOdd: item.market === "MS 1" ? item.away : null });
@@ -359,6 +359,8 @@ function prematchSignalBonus(choice, signals) {
 function marketSupport(market, homeForm, awayForm) {
   if (!homeForm?.available || !awayForm?.available) return null;
   const avg = (a,b) => a == null || b == null ? null : (Number(a)+Number(b))/2;
+  if (market === "EV 0.5 ÜST") return 0.65*Number(homeForm.teamGoalsOver05Pct ?? 0) + 0.35*Number(awayForm.goalsConcededPct ?? 0);
+  if (market === "DEP 0.5 ÜST") return 0.65*Number(awayForm.teamGoalsOver05Pct ?? 0) + 0.35*Number(homeForm.goalsConcededPct ?? 0);
   if (market === "EV 1.5 ÜST") return 0.65*Number(homeForm.teamGoalsOver15Pct ?? 0) + 0.35*Number(awayForm.goalsConcededPct ?? 0);
   if (market === "DEP 1.5 ÜST") return 0.65*Number(awayForm.teamGoalsOver15Pct ?? 0) + 0.35*Number(homeForm.goalsConcededPct ?? 0);
   if (market === "MS 2.5 ÜST") return avg(homeForm.over25Pct, awayForm.over25Pct);
@@ -393,6 +395,7 @@ async function fetchTeamRecentForm(teamId, fixtureId) {
     const htVals = vals.filter(x => x.htTotal != null);
     return {
       available: true, sampleSize: rows.length,
+      teamGoalsOver05Pct: pct(x => x.gf >= 1),
       teamGoalsOver15Pct: pct(x => x.gf >= 2),
       goalsConcededPct: pct(x => x.ga > 0),
       over05Pct: pct(x => x.total >= 1), over15Pct: pct(x => x.total >= 2),
@@ -592,7 +595,7 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
 }
 
 function analysisPercentages(oddsRow, homeForm, awayForm) {
-  const map = { ht05: "İY 0.5 ÜST", ht15: "İY 1.5 ÜST", ms05: "MS 0.5 ÜST", ms15: "MS 1.5 ÜST", ms25: "MS 2.5 ÜST", ms35: "MS 3.5 ÜST", btts: "KG VAR", home15: "EV 1.5 ÜST", away15: "DEP 1.5 ÜST" };
+  const map = { ht05: "İY 0.5 ÜST", ht15: "İY 1.5 ÜST", ms05: "MS 0.5 ÜST", ms15: "MS 1.5 ÜST", ms25: "MS 2.5 ÜST", ms35: "MS 3.5 ÜST", btts: "KG VAR", home05: "EV 0.5 ÜST", away05: "DEP 0.5 ÜST", home15: "EV 1.5 ÜST", away15: "DEP 1.5 ÜST" };
   const rows = oddsForFixture(oddsRow); const out = {};
   for (const [key, market] of Object.entries(map)) {
     const o = rows.filter(x => x.market === market).sort((a,b)=>(/bet365/i.test(b.bookmaker)-/bet365/i.test(a.bookmaker)) || b.probability-a.probability)[0];
@@ -614,6 +617,8 @@ function marketConsistentWithScore(market, scoreObj) {
   const htText = String(scoreObj?.halfTimeScore || "");
   const ht = /Canlı skor/i.test(htText) ? null : pair(htText);
   if (market === "KG VAR" && ft && (ft[0] < 1 || ft[1] < 1)) return false;
+  if (market === "EV 0.5 ÜST" && ft && ft[0] < 1) return false;
+  if (market === "DEP 0.5 ÜST" && ft && ft[1] < 1) return false;
   if (market === "EV 1.5 ÜST" && ft && ft[0] < 2) return false;
   if (market === "DEP 1.5 ÜST" && ft && ft[1] < 2) return false;
   if (market === "MS 0.5 ÜST" && ft && ft[0] + ft[1] < 1) return false;
@@ -634,13 +639,13 @@ function chooseFormFallbackMarket(mode, fixture, forms, excludeMarket = null) {
   if (live && (minute < 20 || minute > 85)) return null;
   const total = Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0);
   let allowed;
-  if (!live) allowed = ["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR", "MS 1.5 ÜST"];
+  if (!live) allowed = ["EV 0.5 ÜST", "DEP 0.5 ÜST", "EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR", "MS 1.5 ÜST"];
   else if (minute < 33) allowed = total === 0 ? ["İY 0.5 ÜST"] : ["İY 1.5 ÜST", "MS 1.5 ÜST"];
   else if (minute < 45) allowed = total === 0 ? ["MS 1.5 ÜST"] : ["MS 1.5 ÜST", "KG VAR", "MS 2.5 ÜST"];
   else if (minute < 66) allowed = total === 0 ? ["MS 0.5 ÜST", "MS 1.5 ÜST"] : total === 1 ? ["MS 1.5 ÜST", "KG VAR"] : ["MS 2.5 ÜST", "KG VAR"];
   else if (minute <= 75) allowed = total <= 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST", "KG VAR"] : ["MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
   else allowed = total <= 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST"] : ["MS 2.5 ÜST", "MS 3.5 ÜST"];
-  const thresholds = { "EV 1.5 ÜST": 45, "DEP 1.5 ÜST": 45, "MS 0.5 ÜST": 55, "MS 1.5 ÜST": 50, "MS 2.5 ÜST": 48, "MS 3.5 ÜST": 34, "KG VAR": 48, "İY 0.5 ÜST": 52, "İY 1.5 ÜST": 34 };
+  const thresholds = { "EV 0.5 ÜST": 55, "DEP 0.5 ÜST": 55, "EV 1.5 ÜST": 45, "DEP 1.5 ÜST": 45, "MS 0.5 ÜST": 55, "MS 1.5 ÜST": 50, "MS 2.5 ÜST": 48, "MS 3.5 ÜST": 34, "KG VAR": 48, "İY 0.5 ÜST": 52, "İY 1.5 ÜST": 34 };
   const scoreObj = scorePrediction(fixture, forms.home, forms.away, null, null);
   const candidates = allowed.filter(m => m !== excludeMarket && marketConsistentWithScore(m, scoreObj))
     .map(m => ({ market: m, formPct: marketSupport(m, forms.home, forms.away), bookmaker: "Son 5 maç formu (oran bulunamadı)", oddsTiming: "form-fallback", probability: null }))
@@ -659,7 +664,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   // Dakika + anlık skora göre izin verilen piyasalar (dayanak: kalan süre ve mevcut gol sayısı).
   let allowed;
   if (!live) {
-    allowed = ["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
+    allowed = ["EV 0.5 ÜST", "DEP 0.5 ÜST", "EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
   } else if (minute >= 20 && minute < 33) {
     // 20–32. dakika: 0-0 ise İY 0.5; bir gol varsa İY 1.5, oran/form/istatistik desteğiyle değerlendirilir.
     if (total === 0) allowed = ["İY 0.5 ÜST"];
@@ -693,6 +698,15 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     else allowed = ["MS 3.5 ÜST"];
   }
 
+  // Takım gol pazarları her canlı dakika aralığında ayrıca sorgulanır; mevcut skorla
+  // gerçekleşmiş olan pazarlar aşağıdaki doğrulama katmanında elenir.
+  const homeNow = Number(fixture.homeScore || 0), awayNow = Number(fixture.awayScore || 0);
+  if (homeNow < 1) allowed.push("EV 0.5 ÜST");
+  if (awayNow < 1) allowed.push("DEP 0.5 ÜST");
+  if (homeNow < 2) allowed.push("EV 1.5 ÜST");
+  if (awayNow < 2) allowed.push("DEP 1.5 ÜST");
+  allowed = [...new Set(allowed)];
+
   const h = forms.home, a = forms.away;
   // Canlı maçta önce gerçek /odds/live piyasasını kullan. Yalnızca bu uç nokta boşsa
   // maç önü oranına düş; seçimin dayanağını oddsTiming ile açıkça işaretle.
@@ -720,14 +734,14 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   // Daha seçici eşikler: “bankoya yakın” hedefi için piyasa ve son-5 form desteği birlikte aranır.
   // Bunlar garanti değildir; yeterli destek yoksa tercih üretilmez.
   const minMarketPct = live ? {
-    "EV 1.5 ÜST": 58, "DEP 1.5 ÜST": 58, "MS 2.5 ÜST": 58, "MS 3.5 ÜST": 48,
+    "EV 0.5 ÜST": 62, "DEP 0.5 ÜST": 62, "EV 1.5 ÜST": 58, "DEP 1.5 ÜST": 58, "MS 2.5 ÜST": 58, "MS 3.5 ÜST": 48,
     "KG VAR": 58, "İY 0.5 ÜST": 60, "İY 1.5 ÜST": 48, "MS 0.5 ÜST": 64, "MS 1.5 ÜST": 60
   } : {
-    "EV 1.5 ÜST": 60, "DEP 1.5 ÜST": 60, "MS 2.5 ÜST": 58, "MS 3.5 ÜST": 50,
+    "EV 0.5 ÜST": 64, "DEP 0.5 ÜST": 64, "EV 1.5 ÜST": 60, "DEP 1.5 ÜST": 60, "MS 2.5 ÜST": 58, "MS 3.5 ÜST": 50,
     "KG VAR": 58, "İY 0.5 ÜST": 60, "İY 1.5 ÜST": 48, "MS 0.5 ÜST": 64, "MS 1.5 ÜST": 60
   };
   const minFormPct = {
-    "EV 1.5 ÜST": 56, "DEP 1.5 ÜST": 56, "MS 2.5 ÜST": 56, "MS 3.5 ÜST": 48,
+    "EV 0.5 ÜST": 58, "DEP 0.5 ÜST": 58, "EV 1.5 ÜST": 56, "DEP 1.5 ÜST": 56, "MS 2.5 ÜST": 56, "MS 3.5 ÜST": 48,
     "KG VAR": 56, "İY 0.5 ÜST": 58, "İY 1.5 ÜST": 46, "MS 0.5 ÜST": 58, "MS 1.5 ÜST": 56
   };
 
@@ -747,6 +761,10 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
         const line = Number(choice.market.match(/(\d)[.,](\d)/)?.[1] || 0) + 0.5;
         if (currentHalfGoals >= Math.ceil(line)) return null;
       }
+      if (choice.market === "EV 0.5 ÜST" && Number(fixture.homeScore || 0) >= 1) return null;
+      if (choice.market === "DEP 0.5 ÜST" && Number(fixture.awayScore || 0) >= 1) return null;
+      if (choice.market === "EV 1.5 ÜST" && Number(fixture.homeScore || 0) >= 2) return null;
+      if (choice.market === "DEP 1.5 ÜST" && Number(fixture.awayScore || 0) >= 2) return null;
       if (choice.market === "MS 0.5 ÜST" && total >= 1) return null;
       if (choice.market === "MS 1.5 ÜST" && total >= 2) return null;
       if (choice.market === "MS 2.5 ÜST" && total >= 3) return null;
@@ -810,6 +828,10 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
 
     if (choice.probability < minMarketPct[choice.market]) return null;
     if (!live && formPct != null && formPct < minFormPct[choice.market]) return null;
+    // Maç önü Alt yönü kuvvetliyse, yalnızca toplam şut/korner canlı Üst seçimini haklı çıkarmaz.
+    // Gerçek maç önü 2.5 Üst oranı 2.20+ ve isabetli şut azsa canlı MS 2.5 ÜST adayını ele.
+    if (live && choice.market === "MS 2.5 ÜST" && preSignals.over25Odd != null && preSignals.over25Odd >= 2.20 &&
+        Number(statsM.shotsOnTarget || 0) < 2 && Number(statsM.totalShots || 0) >= 10) return null;
     const oddsSignalBonus = live ? 0 : prematchSignalBonus(choice, preSignals);
     const score = choice.probability * (live ? 0.78 : 0.58) + (formPct == null ? 0 : formPct * (live ? 0.04 : 0.32)) + liveBonus + oddsSignalBonus
       - (live && choice.market === "MS 3.5 ÜST" ? Math.max(0, minute - 65) * 0.4 : 0);
