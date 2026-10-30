@@ -625,8 +625,8 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   const leader = Number(fixture.homeScore || 0) > Number(fixture.awayScore || 0) ? "home"
     : Number(fixture.awayScore || 0) > Number(fixture.homeScore || 0) ? "away" : null;
 
-  // Canlıda biraz daha sıkı eşikler: oran olasılığı + form birlikte doğrulanmalı.
-  // Daha seçici eşikler: “bankoya yakın” hedefi için piyasa ve son-5 form desteği birlikte aranır.
+  // Canlıda oran olasılığı + gerçek canlı istatistik değerlendirilir; takım formu kullanılmaz.
+  // Maç önü seçimlerinde piyasa ve son-5 form desteği birlikte aranır.
   // Bunlar garanti değildir; yeterli destek yoksa tercih üretilmez.
   const minMarketPct = live ? {
     "EV 1.5 ÜST": 58, "DEP 1.5 ÜST": 58, "MS 2.5 ÜST": 58, "MS 3.5 ÜST": 48,
@@ -665,7 +665,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
       if (live && choice.market === "MS 1.5 ÜST" && total === 1) {
         if (minute < 55) return null;
         if (Number(choice.odd || 0) < 1.25) return null;
-        if (Number(formPct || 0) < 55) return null;
+        if (!live && Number(formPct || 0) < 55) return null;
         if (Number(choice.probability || 0) < 55 || Number(choice.probability || 0) > 82) return null;
         if (Number(statsM.pressure || 0) < 10) return null;
         if (Number(statsM.shotsOnTarget || 0) < 1 && Number(statsM.totalShots || 0) < 6) return null;
@@ -673,7 +673,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
       // Tek gol varken 2.5 ÜST en az iki gol daha gerektirir; sadece gerçek baskı ve yeterli fiyatla aday.
       if (live && choice.market === "MS 2.5 ÜST" && total === 1) {
         if (Number(choice.odd || 0) < 1.65) return null;
-        if (Number(formPct || 0) < 55) return null;
+        if (!live && Number(formPct || 0) < 55) return null;
         if (Number(statsM.pressure || 0) < 18) return null;
         if (Number(statsM.shotsOnTarget || 0) < 3 && Number(statsM.totalShots || 0) < 12) return null;
         if (minute >= 72 && Number(statsM.pressure || 0) < 22) return null;
@@ -695,7 +695,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
           const trailing = leader === "home" ? "away" : "home";
           const p = statsM[trailing] || {};
           const trailingPressure = Number(p.shotsOnTarget || 0) * 2.5 + Number(p.totalShots || 0) * 0.45 + Number(p.corners || 0) * 0.8;
-          if (trailingPressure < 5.5 || Number(formPct || 0) < 50) return null;
+          if (trailingPressure < 5.5 || (!live && Number(formPct || 0) < 50)) return null;
           liveBonus += Math.min(14, trailingPressure * 0.55);
         } else if (!leader) {
           // Beraberlikte her iki tarafın da şut baskısı olmalı.
@@ -716,8 +716,8 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
       }
     }
 
-    if (formPct == null || choice.probability < minMarketPct[choice.market] || formPct < minFormPct[choice.market]) return null;
-    const score = choice.probability * 0.52 + formPct * 0.38 + liveBonus
+    if (choice.probability < minMarketPct[choice.market] || (!live && (formPct == null || formPct < minFormPct[choice.market]))) return null;
+    const score = live ? choice.probability * 0.80 + liveBonus : choice.probability * 0.52 + formPct * 0.38 + liveBonus
       - (live && choice.market === "MS 3.5 ÜST" ? Math.max(0, minute - 65) * 0.4 : 0);
     return {
       ...choice,
@@ -771,7 +771,7 @@ function couponMessage(coupon) {
     lines.push("");
   });
   if (coupon.type === "live") {
-    lines.push("Dayanak: yalnızca maç önü oranı kullanıldı; canlı oran kullanılmadı. Son 5 maç formu + canlı şut/korner baskısı + dakika/skor penceresi ayrıca değerlendirildi.");
+    lines.push("Dayanak: kullanılabilir oran verisi + canlı şut/korner istatistikleri + dakika/skor penceresi; takım formu kullanılmadı.");
   }
   return lines.join("\n");
 }
@@ -935,12 +935,10 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
     try {
       let marketOddsRow = null, prematchOddsRow = null, oddsBasis = "";
       if (isLiveMode) {
-        const [prePayload, liveOddsPayload, statsPayload, homeForm, awayForm] = await Promise.all([
+        const [prePayload, liveOddsPayload, statsPayload] = await Promise.all([
           cachedProviderRequest(`odds-fixture:${fixture.id}`, `/odds?fixture=${fixture.id}`, 90000).catch(()=>({response:[]})),
           cachedProviderRequest(`odds-live-fixture:${fixture.id}`, `/odds/live?fixture=${fixture.id}`, 10000).catch(()=>({response:[]})),
-          cachedProviderRequest(`stats:${fixture.id}`, `/fixtures/statistics?fixture=${fixture.id}`, 15000),
-          fetchTeamRecentForm(fixture.homeId, fixture.id),
-          fetchTeamRecentForm(fixture.awayId, fixture.id)
+          cachedProviderRequest(`stats:${fixture.id}`, `/fixtures/statistics?fixture=${fixture.id}`, 15000)
         ]);
         prematchOddsRow = (prePayload.response || []).find(row=>Number(row.fixture?.id)===fixture.id) || null;
         const liveOddsRow = (liveOddsPayload.response || []).find(row=>Number(row.fixture?.fixture?.id ?? row.fixture?.id ?? row.fixtureId)===fixture.id) || null;
@@ -949,8 +947,8 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
         const stats = liveStatsMetrics(statsRows, fixture);
         if (!marketOddsRow) { rejected.noOdds++; continue; }
         if (!stats.available) { rejected.noStats++; continue; }
-        if (!homeForm.available || !awayForm.available) { rejected.noForm++; continue; }
-        const chosen = chooseSupportedMarket(liveOddsRow, mode, fixture, {home:homeForm,away:awayForm}, stats, prematchOddsRow);
+        // Canlı tercihte takım formu kullanılmaz: yalnızca doğrulanabilir piyasa oranı + canlı istatistik.
+        const chosen = chooseSupportedMarket(liveOddsRow, mode, fixture, {home:{available:false},away:{available:false}}, stats, prematchOddsRow);
         if (!chosen) { rejected.noSignal++; continue; }
         oddsBasis = chosen.oddsTiming === "live"
           ? `Gerçek canlı oran · ${chosen.bookmaker}`
@@ -960,7 +958,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
           home: fixture.home, away: fixture.away, fixtureDate: fixture.fixtureDate,
           market: chosen.market, source: chosen.bookmaker, oddsTiming: chosen.oddsTiming,
           internalOdd: chosen.odd, marketProbability: chosen.probability,
-          formSupport: chosen.formPct, score: chosen.score,
+          formSupport: null, score: chosen.score,
           minute: fixture.minute, currentScore: `${fixture.homeScore}-${fixture.awayScore}`,
           isLive: true, oddsBasis,
           statsSummary: [
@@ -1006,14 +1004,14 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   if (!chosen.length || (mode === "prematch" && chosen.length < 2)) {
     const needed = mode === "prematch" ? 2 : 1;
     return {draftId:`coupon-${Date.now()}`,date,type:mode,status:"NO_MATCHES",picks:[],
-      message:`Maç önü oranı + son 5 maç formu${isLiveMode ? " + canlı istatistik" : ""} eşiklerini geçen yeterli maç yok (gereken: ${needed}). Kupon zorlanmadı.`,
+      message:`${isLiveMode ? "Canlı oran + canlı istatistik" : "Maç önü oranı + son 5 maç formu"} eşiklerini geçen yeterli maç yok (gereken: ${needed}). Kupon zorlanmadı.`,
       detail:`Fikstür: ${allFixtures.length}; oran sayfasından eşleşen: ${dateOdds.size}; form/statistik için incelenen: ${fixturesToAnalyze.length}; aday: ${candidates.length}; elenme: oran=${rejected.noOdds}, form=${rejected.noForm}, canlı-istatistik=${rejected.noStats}, piyasa-sinyali=${rejected.noSignal}, API-hatası=${rejected.apiErrors}, tekrar=${rejected.duplicate}. ${errors.slice(0,2).join(" | ")}`};
   }
-  // internalOdd / score iç skorlama; canlı kupon Telegram'da olasılık + form + dk/skor gösterilsin.
+  // internalOdd / score iç skorlama; oran değerleri arayüzde gösterilmez.
   const publicPicks = chosen.map(({ internalOdd, score, ...p }) => p);
   const draftId = `coupon-${Date.now()}`;
   const coupon = {draftId,date,type:mode,isLive:isLiveMode,status:"READY",picks:publicPicks,autoGenerated:Boolean(options.automatic),
-    message:mode==="live" ? "Tek canlı tercih: yalnızca maç önü oranı kullanıldı; dakika/skor + son 5 maç formu + canlı şut/korner baskısı değerlendirildi." :
+    message:mode==="live" ? "Tek canlı tercih: oran verisi + dakika/skor + canlı şut/korner istatistikleri değerlendirildi; takım formu kullanılmadı." :
       mode==="surprise" ? `Sürpriz kupon: ${publicPicks.length} maç (en fazla 10); yalnızca oran ve son 5 maç formu eşiğini geçen adaylar eklendi.` :
       "Maç önü kuponu: en az iki maç, maç önü son mevcut oran ve son 5 gerçek skor formu birlikte değerlendirildi."};
   const archiveCoupon = {date,type:mode,picks:publicPicks,createdAt:new Date().toISOString()};
