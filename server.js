@@ -31,7 +31,7 @@ const archives = { analyses: [], coupons: [] };
 // Maç önü skor tahminleri maç boyunca sabit tutulur. Bellek içi yedek + PostgreSQL kalıcılığı.
 const lockedScorePredictions = new Map();
 // Skor motoru sürümü: önceki sürümün genellenmiş/eski kayıtları yeni analizde kullanılmaz.
-const SCORE_ENGINE_VERSION = "SCORE_ENGINE_V2";
+const SCORE_ENGINE_VERSION = "SCORE_ENGINE_V3";
 const { Pool } = pg;
 const databasePool = process.env.DATABASE_URL
   ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL) ? false : { rejectUnauthorized: false } })
@@ -59,7 +59,7 @@ if (databasePool) {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`);
-      const lockedRows = await databasePool.query("SELECT fixture_id, halftime_score, fulltime_score, score_basis, score_probability FROM winscope_score_predictions WHERE score_basis LIKE 'SCORE_ENGINE_V2:%'");
+      const lockedRows = await databasePool.query("SELECT fixture_id, halftime_score, fulltime_score, score_basis, score_probability FROM winscope_score_predictions WHERE score_basis LIKE 'SCORE_ENGINE_V3:%'");
       for (const row of lockedRows.rows) lockedScorePredictions.set(Number(row.fixture_id), { halfTimeScore: row.halftime_score, fullTimeScore: row.fulltime_score, scoreBasis: row.score_basis, scoreProbability: row.score_probability == null ? null : Number(row.score_probability), locked: true });
       // Telegram tekrar engeli tercih bazındadır: aynı maç + aynı tercih bir kez gönderilir.
       await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_telegram_pick_sent (
@@ -641,7 +641,7 @@ async function getOrCreateLockedScorePrediction(fixture, homeForm, awayForm, pre
            score_basis = EXCLUDED.score_basis,
            score_probability = EXCLUDED.score_probability,
            updated_at = NOW()
-         WHERE winscope_score_predictions.score_basis NOT LIKE 'SCORE_ENGINE_V2:%'
+         WHERE winscope_score_predictions.score_basis NOT LIKE 'SCORE_ENGINE_V3:%'
          RETURNING fixture_id, halftime_score, fulltime_score, score_basis, score_probability`, 
         [fixtureId, String(fixture.home || fixture.homeTeam || ""), String(fixture.away || fixture.awayTeam || ""), String(prediction.halfTimeScore || ""), String(prediction.fullTimeScore || ""), String(prediction.scoreBasis || ""), prediction.scoreProbability ?? null]
       );
