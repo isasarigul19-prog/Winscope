@@ -629,8 +629,10 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   // Maç önü seçimlerinde piyasa ve son-5 form desteği birlikte aranır.
   // Bunlar garanti değildir; yeterli destek yoksa tercih üretilmez.
   const minMarketPct = live ? {
-    "EV 1.5 ÜST": 58, "DEP 1.5 ÜST": 58, "MS 2.5 ÜST": 58, "MS 3.5 ÜST": 48,
-    "KG VAR": 58, "İY 0.5 ÜST": 60, "İY 1.5 ÜST": 48, "MS 0.5 ÜST": 64, "MS 1.5 ÜST": 60
+    // Live mode is driven by current market probability + live match statistics, not team form.
+    // Slightly wider thresholds keep plausible candidates in the ranking instead of rejecting every match.
+    "EV 1.5 ÜST": 53, "DEP 1.5 ÜST": 53, "MS 2.5 ÜST": 53, "MS 3.5 ÜST": 45,
+    "KG VAR": 53, "İY 0.5 ÜST": 55, "İY 1.5 ÜST": 44, "MS 0.5 ÜST": 58, "MS 1.5 ÜST": 55
   } : {
     "EV 1.5 ÜST": 60, "DEP 1.5 ÜST": 60, "MS 2.5 ÜST": 58, "MS 3.5 ÜST": 50,
     "KG VAR": 58, "İY 0.5 ÜST": 60, "İY 1.5 ÜST": 48, "MS 0.5 ÜST": 64, "MS 1.5 ÜST": 60
@@ -924,7 +926,9 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   let analyzedFixtures = 0;
   // Maç önü kuponunda ilk 2 adayı bulunca durma: daha geniş örneklemden
   // en iyi 2 tercihi sıralayabilmek için 10 aday hedefle. Nihai kupon boyutu 2 kalır.
-  const targetPicks = mode === "surprise" ? 10 : mode === "prematch" ? 10 : 1;
+  // Live mode needs a small candidate pool so the result is the best-ranked signal,
+  // not merely the first fixture that passes. Continue scanning if the pool is smaller.
+  const targetPicks = mode === "surprise" ? 10 : mode === "prematch" ? 10 : (isLiveMode ? 3 : 1);
   for (const fixture of fixturesToAnalyze) {
     // Yeterli sayıda yeni, doğrulanmış aday oluştuğunda gereksiz API çağrılarını kes.
     const uniqueCandidateCount = options.automatic
@@ -1076,7 +1080,8 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       cachedProviderRequest(`odds-fixture:${match.id}`, `/odds?fixture=${match.id}`, 90000).catch(()=>({response:[]})),
       isLive ? cachedProviderRequest(`odds-live-fixture:${match.id}`, `/odds/live?fixture=${match.id}`, 10000).catch(()=>({response:[]})) : Promise.resolve({response:[]}),
       isLive ? cachedProviderRequest(`stats:${match.id}`, `/fixtures/statistics?fixture=${match.id}`, 15000).catch(()=>({response:[]})) : Promise.resolve({response:[]}),
-      fetchTeamRecentForm(match.homeId,match.id), fetchTeamRecentForm(match.awayId,match.id)
+      isLive ? Promise.resolve({ available:false, sampleSize:0 }) : fetchTeamRecentForm(match.homeId,match.id),
+      isLive ? Promise.resolve({ available:false, sampleSize:0 }) : fetchTeamRecentForm(match.awayId,match.id)
     ]);
     const prematchRow = (prematchOddsPayload.response||[]).find(x=>Number(x.fixture?.id)===match.id)||null;
     const liveOddsRow = (liveOddsPayload.response||[]).find(x=>Number(x.fixture?.fixture?.id ?? x.fixture?.id ?? x.fixtureId)===match.id)||null;
@@ -1087,9 +1092,13 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     const prematchChoice = earlyLive && prematchRow && homeForm.available && awayForm.available
       ? chooseSupportedMarket(prematchRow,"prematch",match,{home:homeForm,away:awayForm},null,prematchRow)
       : null;
-    const chosen = (oddsRow || prematchRow) && homeForm.available && awayForm.available
-      ? chooseSupportedMarket(oddsRow,isLive?"live":"prematch",match,{home:homeForm,away:awayForm},isLive?stats:null,prematchRow)
-      : null;
+    const chosen = isLive
+      ? ((oddsRow || prematchRow) && stats.available
+          ? chooseSupportedMarket(oddsRow || prematchRow,"live",match,{home:homeForm,away:awayForm},stats,prematchRow)
+          : null)
+      : ((prematchRow && homeForm.available && awayForm.available)
+          ? chooseSupportedMarket(prematchRow,"prematch",match,{home:homeForm,away:awayForm},null,prematchRow)
+          : null);
     // If the provider has no usable odds for this fixture, still provide a transparent
     // form-based fallback when the five-match samples are available. Never label it as market-backed.
     const formFallback = null; // Oran verisi yoksa formdan tek başına bahis tercihi üretilmez.
@@ -1116,7 +1125,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       alternative:alternativeChoice?.market || (earlyLive ? "Canlı tercih 20. dakikadan sonra değerlendirilecek" : "UZAK DUR — desteklenen ikinci tercih bulunamadı"),
       surprise:chosen ? "Sürpriz yalnızca ayrı piyasa sinyali desteklerse değerlendirilir" : earlyLive ? "Canlı sürpriz tercihi 20. dakikadan sonra değerlendirilecek" : "Sürpriz için doğrulanmış piyasa sinyali yok" ,
       marketPercentages:analysisPercentages(prematchRow,homeForm,awayForm),
-      note:chosen?`${chosen.bookmaker}; ${chosen.oddsTiming === "live" ? "gerçek canlı piyasa oranı" : "maç önü piyasa oranı"} ve son 5 maç formu birlikte değerlendirildi${isLive?`; ${liveOddsRow ? "canlı oran verisi mevcut" : "canlı oran verisi bulunamadı, maç önü oranı kullanıldı"}; canlı baskı: ${stats.shotsOnTarget} isabetli şut, ${stats.totalShots} toplam şut, ${stats.corners} korner`:""}.`: earlyLive ? (prematchChoice ? `Maç önü piyasa sinyali ${prematchChoice.market} olarak korundu. Canlı tercih 20. dakikadan sonra yeniden değerlendirilecek.` : "Maç önü oranı eşleşmedi; canlı tercih 25. dakikadan sonra yeniden değerlendirilecek.") : `Doğrulanmış piyasa tercihi üretilemedi; tahmin zorlanmadı.` ,
+      note:chosen?`${chosen.bookmaker}; ${isLive ? (chosen.oddsTiming === "live" ? "gerçek canlı piyasa oranı" : "açıkça ayrıştırılmış maç önü oranı; canlı oran mevcut değil") : "maç önü piyasa oranı"}${isLive?`; canlı istatistik: ${stats.shotsOnTarget} isabetli şut, ${stats.totalShots} toplam şut, ${stats.corners} korner; takım formu kullanılmadı` : " ve son 5 maç formu birlikte değerlendirildi"}.`: earlyLive ? (prematchChoice ? `Maç önü piyasa sinyali ${prematchChoice.market} olarak korundu. Canlı tercih 20. dakikadan sonra yeniden değerlendirilecek.` : "Maç önü oranı eşleşmedi; canlı tercih 25. dakikadan sonra yeniden değerlendirilecek.") : `Doğrulanmış piyasa tercihi üretilemedi; tahmin zorlanmadı.` ,
       oddsBasis:isLive && liveOddsRow ? "API-Football gerçek canlı oranı kullanıldı; oran değerleri arayüzde gösterilmez" : prematchRow ? (isLive ? "Gerçek canlı oran bulunamadı; yalnızca API-Football maç önü oranı mevcut" : "API-Football maç önü son mevcut oran kaydı; resmî kapanış olduğu garanti edilemez") : "Maç önü oranı bulunamadı; oran verisi kullanılmadı",
       htMarketAlreadyHit
     });
@@ -1232,7 +1241,7 @@ async function runAutomaticDailyCoupon() {
 }
 
 setTimeout(() => { void runAutomaticLivePick(); void runAutomaticDailyCoupon(); }, 20000);
-setInterval(() => { void runAutomaticLivePick(); }, 20 * 60 * 1000);
+setInterval(() => { void runAutomaticLivePick(); }, 10 * 60 * 1000);
 setInterval(() => { void runAutomaticDailyCoupon(); }, 2 * 60 * 60 * 1000);
 
 // Her 60 saniyede bir Telegram'a gönderilmiş kupon maçlarının skor değişimini kontrol et.
