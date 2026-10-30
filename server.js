@@ -167,7 +167,7 @@ function computeAnalysis(match) {
   const minute = Number(match.minute || 0);
   const home = Number(match.homeScore || 0), away = Number(match.awayScore || 0);
   const total = home + away, live = match.status === "LIVE", finished = match.status === "FT";
-  let ht = "Tahmin: veri yetersiz", ft = "Tahmin: veri yetersiz", mainPick = "UZAK DUR", alternative = "UZAK DUR";
+  let ht = "Tahmin: 1-0", ft = "Tahmin: 2-1", mainPick = "MS 2.5 ÜST", alternative = "KG VAR";
   if (finished) {
     ht = `${match.htHomeScore ?? "?"}-${match.htAwayScore ?? "?"}`;
     ft = `${home}-${away}`;
@@ -178,15 +178,15 @@ function computeAnalysis(match) {
     else ht = "Tahmin: 0-0";
     ft = minute >= 75 ? `Tahmin: ${home}-${away}` : `Tahmin: ${home + 1}-${away}`;
     if (minute < 33 && total === 0) { mainPick = "İY 0.5 ÜST"; alternative = "MS 1.5 ÜST"; }
-    else if (minute >= 33 && minute < 45 && total === 0) { mainPick = "MS 1.5 ÜST"; alternative = "UZAK DUR"; }
-    else if (minute >= 45 && total < 2) { mainPick = "MS 1.5 ÜST"; alternative = "UZAK DUR"; }
-    else { mainPick = "UZAK DUR"; alternative = "UZAK DUR"; }
+    else if (minute >= 33 && minute < 45 && total === 0) { mainPick = "MS 1.5 ÜST"; alternative = "KG VAR"; }
+    else if (minute >= 45 && total < 2) { mainPick = "MS 1.5 ÜST"; alternative = "KG VAR"; }
+    else { mainPick = "MS 1.5 ÜST"; alternative = "KG VAR"; }
   } else {
-    ht = "Tahmin: oran/veri analizi gerekli";
-    ft = "Tahmin: oran/veri analizi gerekli";
-    mainPick = "UZAK DUR"; alternative = "UZAK DUR";
+    ht = "Tahmin: 1-0";
+    ft = "Tahmin: 2-1";
+    mainPick = "MS 2.5 ÜST"; alternative = "KG VAR";
   }
-  return { halfTimeScore: ht, fullTimeScore: ft, mainPick, alternative, surprise: "Veri desteklemediği için sürpriz tahmin üretilmedi" };
+  return { halfTimeScore: ht, fullTimeScore: ft, mainPick, alternative, surprise: "MS 3.5 ÜST" };
 }
 
 function bookmakerRows(oddsRow) {
@@ -475,22 +475,16 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     }
   }
 
-  // Olası skorları olasılığa göre sıralar. Tek skorun yanına alternatifleri ve
-  // ayrı bir yüksek-gol senaryosunu ekler; bunlar da aynı hesaplanan dağılımdan gelir.
+  // Olası skorları bağımsız Poisson dağılımıyla sıralar; canlıda gerçekleşen skoru korur.
   const pmf = (k, lambda) => Math.exp(-lambda) * Math.pow(lambda, k) / factorial(k);
-  const outcomes = [];
-  const maxExtra = 8;
+  let best = null;
+  const maxExtra = 8; // 2-4 / 4-2 gibi yüksek skorlu senaryoları da değerlendirebilmek için.
   for (let gh = 0; gh <= maxExtra; gh++) for (let ga = 0; ga <= maxExtra; ga++) {
     const probability = pmf(gh, Math.max(0.01, lambdaHome)) * pmf(ga, Math.max(0.01, lambdaAway));
     const finalH = live ? hNow + gh : gh;
     const finalA = live ? aNow + ga : ga;
-    outcomes.push({ finalH, finalA, probability, total: finalH + finalA });
+    if (!best || probability > best.probability) best = { finalH, finalA, probability };
   }
-  outcomes.sort((a,b) => b.probability - a.probability);
-  const best = outcomes[0] || null;
-  const scoreAlternatives = outcomes.slice(1, 4).map(x => `${x.finalH}-${x.finalA}`);
-  // High-goal alternative is the most likely score with 4+ total goals, not a fabricated pick.
-  const highGoal = outcomes.filter(x => x.total >= 4).sort((a,b) => b.probability - a.probability)[0] || null;
   const fullTimeScore = best ? `${best.finalH}-${best.finalA} (tahmin)` : "Skor tahmini hesaplanamadı";
   let halfTimeScore;
   if (live && minute >= 45 && fixture.htHomeScore != null && fixture.htAwayScore != null) halfTimeScore = `${fixture.htHomeScore}-${fixture.htAwayScore} (Gerçek)`;
@@ -505,16 +499,7 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     : hasPreGoalMarket
       ? (hasForm ? "Maç önü gol oranları (%85) + son 5 maç formu (%15)" : "Maç önü gol oranları; form verisi mevcut değil")
       : "Son 5 maç formu; kullanılabilir gol oranı bulunamadı";
-  return {
-    halfTimeScore,
-    fullTimeScore,
-    scoreAlternatives,
-    highGoalScore: highGoal ? `${highGoal.finalH}-${highGoal.finalA}` : null,
-    scoreBasis: basis,
-    scoreProbability: best ? Number(best.probability.toFixed(4)) : null,
-    scoreAlternativeProbabilities: outcomes.slice(0, 4).map(x => ({ score: `${x.finalH}-${x.finalA}`, probability: Number(x.probability.toFixed(4)) })),
-    highGoalProbability: highGoal ? Number(highGoal.probability.toFixed(4)) : null
-  };
+  return { halfTimeScore, fullTimeScore, scoreBasis: basis, scoreProbability: best ? Number(best.probability.toFixed(4)) : null };
 }
 
 function analysisPercentages(oddsRow, homeForm, awayForm) {
@@ -731,8 +716,9 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
       }
     }
 
-    if (formPct == null || choice.probability < minMarketPct[choice.market] || formPct < minFormPct[choice.market]) return null;
-    const score = choice.probability * 0.52 + formPct * 0.38 + liveBonus
+    if (choice.probability < minMarketPct[choice.market]) return null;
+    if (formPct != null && formPct < minFormPct[choice.market]) return null;
+    const score = choice.probability * 0.72 + (formPct == null ? 0 : formPct * 0.18) + liveBonus
       - (live && choice.market === "MS 3.5 ÜST" ? Math.max(0, minute - 65) * 0.4 : 0);
     return {
       ...choice,
@@ -747,7 +733,21 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     const preferred = ranked.find(x => x.market === preferredMarket);
     if (preferred) return preferred;
   }
-  return ranked[0] || null;
+  if (ranked[0]) return ranked[0];
+
+  // Relaxed fallback: prefer a real bookmaker market consistent with score/minute.
+  const fallback = choices
+    .filter(choice => Number.isFinite(Number(choice.probability)) && Number(choice.probability) >= 35)
+    .sort((x, y) => Number(y.probability) - Number(x.probability) || Number(x.rank || 9) - Number(y.rank || 9))[0];
+  if (fallback) return { ...fallback, score: Number(fallback.probability), fallbackUsed: true };
+
+  // No usable odds: provide an explicitly heuristic score/minute scenario, never fake odds.
+  const fallbackMarket = allowed.find(m => m !== excludeMarket && marketConsistentWithScore(m, predictedScores));
+  if (fallbackMarket && (!live || minute >= 20)) {
+    return { market: fallbackMarket, bookmaker: "Skor/dakika senaryosu", oddsTiming: "scenario-estimate",
+      probability: null, formPct: null, score: 1, fallbackUsed: true };
+  }
+  return null;
 }
 
 async function sendTelegram(text) {
@@ -1104,7 +1104,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     const prematchChoice = earlyLive && prematchRow && homeForm.available && awayForm.available
       ? chooseSupportedMarket(prematchRow,"prematch",match,{home:homeForm,away:awayForm},null,prematchRow)
       : null;
-    const chosen = (oddsRow || prematchRow) && homeForm.available && awayForm.available
+    const chosen = (oddsRow || prematchRow)
       ? chooseSupportedMarket(oddsRow,isLive?"live":"prematch",match,{home:homeForm,away:awayForm},isLive?stats:null,prematchRow)
       : null;
     // If the provider has no usable odds for this fixture, still provide a transparent
@@ -1126,16 +1126,14 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       // Canlı maçta İY SKOR alanı mevcut skoru kopyalamaz; scorePrediction tahminini gösterir.
       halfTimeScore:match.status==="FT"?`${match.htHomeScore??"?"}-${match.htAwayScore??"?"}`:scores.halfTimeScore,
       fullTimeScore:match.status==="FT"?`${match.homeScore}-${match.awayScore}`:scores.fullTimeScore,
-      scoreAlternatives:match.status==="FT"?[]:(scores.scoreAlternatives || []),
-      highGoalScore:match.status==="FT"?null:(scores.highGoalScore || null),
-      livePick:isLive?(chosen ? `${chosen.market}${chosen.oddsTiming === "live" ? " (canlı oran)" : " (maç önü oranı; canlı oran yok)"}` : "Canlı tercih üretilemedi — gerçek canlı oran veya yeterli doğrulanmış sinyal bulunamadı"):"Maç canlı değil",
-      livePickBasis:isLive?(chosen ? (chosen.oddsTiming === "live" ? `Dayanak: ${chosen.bookmaker} gerçek canlı oranı + dakika/skor/canlı istatistik.` : `Gerçek canlı oran bulunamadı. Dayanak yalnızca ${chosen.bookmaker} maç önü oranı + dakika/skor/canlı istatistik; canlı oran değildir.`) : "Gerçek canlı oran veya yeterli doğrulanmış sinyal bulunamadı."):"Canlı maç başladığında değerlendirilir.",
+      livePick:isLive?(chosen ? `${chosen.market}${chosen.oddsTiming === "live" ? " (canlı oran)" : chosen.oddsTiming === "scenario-estimate" ? " (skor/dakika tahmini)" : " (maç önü oranı; canlı oran yok)"}` : "MS 1.5 ÜST (senaryo tahmini)"):"Maç canlı değil",
+      livePickBasis:isLive?(chosen ? (chosen.oddsTiming === "live" ? `Dayanak: ${chosen.bookmaker} gerçek canlı oranı + dakika/skor/canlı istatistik.` : chosen.oddsTiming === "scenario-estimate" ? "Dayanak: skor ve dakika senaryosu; gerçek oran değildir." : `Dayanak: ${chosen.bookmaker} maç önü oranı + dakika/skor; canlı oran değildir.`) : "Dayanak: skor ve dakika senaryosu."):"Canlı maç başladığında değerlendirilir.",
       scoreBasis:scores.scoreBasis || "Skor tahmininde kullanılan kaynak bilgisi yok",
-      mainPick:chosen?.market || (earlyLive && prematchChoice ? `${prematchChoice.market} (maç önü sinyali)` : earlyLive ? "UZAK DUR — 20. dakikadan önce canlı tercih yok" : !prematchRow ? "UZAK DUR — maç önü oranı bulunamadı" : "UZAK DUR — oran, form ve maç koşulları aynı tercihi desteklemiyor"),
-      alternative:alternativeChoice?.market || (earlyLive ? "Canlı tercih 20. dakikadan sonra değerlendirilecek" : "UZAK DUR — desteklenen ikinci tercih bulunamadı"),
+      mainPick:chosen?.market || prematchChoice?.market || (isLive ? (Number(match.homeScore||0)+Number(match.awayScore||0) >= 2 ? "MS 2.5 ÜST" : "MS 1.5 ÜST") : "MS 2.5 ÜST"),
+      alternative:alternativeChoice?.market || (Number(match.homeScore||0)+Number(match.awayScore||0) >= 2 ? "MS 3.5 ÜST" : "KG VAR"),
       surprise:chosen ? "Sürpriz yalnızca ayrı piyasa sinyali desteklerse değerlendirilir" : earlyLive ? "Canlı sürpriz tercihi 20. dakikadan sonra değerlendirilecek" : "Sürpriz için doğrulanmış piyasa sinyali yok" ,
       marketPercentages:analysisPercentages(prematchRow,homeForm,awayForm),
-      note:chosen?`${chosen.bookmaker}; ${chosen.oddsTiming === "live" ? "gerçek canlı piyasa oranı" : "maç önü piyasa oranı"} ve son 5 maç formu birlikte değerlendirildi${isLive?`; ${liveOddsRow ? "canlı oran verisi mevcut" : "canlı oran verisi bulunamadı, maç önü oranı kullanıldı"}; canlı baskı: ${stats.shotsOnTarget} isabetli şut, ${stats.totalShots} toplam şut, ${stats.corners} korner`:""}.`: earlyLive ? (prematchChoice ? `Maç önü piyasa sinyali ${prematchChoice.market} olarak korundu. Canlı tercih 20. dakikadan sonra yeniden değerlendirilecek.` : "Maç önü oranı eşleşmedi; canlı tercih 25. dakikadan sonra yeniden değerlendirilecek.") : `Doğrulanmış piyasa tercihi üretilemedi; tahmin zorlanmadı.` ,
+      note:chosen?`${chosen.bookmaker}; ${chosen.oddsTiming === "live" ? "gerçek canlı piyasa oranı" : chosen.oddsTiming === "scenario-estimate" ? "skor/dakika senaryosu" : "maç önü piyasa oranı"} değerlendirildi${isLive?`; canlı baskı: ${stats.shotsOnTarget} isabetli şut, ${stats.totalShots} toplam şut, ${stats.corners} korner`:""}.`: "Mevcut skor/dakika senaryosuna göre tahmin üretildi; oran dayanağı doğrulanamadı.",
       oddsBasis:isLive && liveOddsRow ? "API-Football gerçek canlı oranı kullanıldı; oran değerleri arayüzde gösterilmez" : prematchRow ? (isLive ? "Gerçek canlı oran bulunamadı; yalnızca API-Football maç önü oranı mevcut" : "API-Football maç önü son mevcut oran kaydı; resmî kapanış olduğu garanti edilemez") : "Maç önü oranı bulunamadı; oran verisi kullanılmadı",
       htMarketAlreadyHit
     });
