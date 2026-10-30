@@ -43,21 +43,48 @@ if (databasePool) {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`);
       await databasePool.query("CREATE INDEX IF NOT EXISTS winscope_archive_category_id_idx ON winscope_archive(category, id DESC)");
+      // Telegram tekrar engeli tercih bazındadır: aynı maç + aynı tercih bir kez gönderilir.
+      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_telegram_pick_sent (
+        fixture_id BIGINT NOT NULL,
+        pick_key TEXT NOT NULL,
+        match_date DATE,
+        coupon_type TEXT,
+        sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (fixture_id, pick_key)
+      )`);
+      // Eski sürüm tablosu varsa uyumluluk için bırakılır; artık maç bazlı global engel olarak kullanılmaz.
       await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_telegram_fixture_sent (
         fixture_id BIGINT PRIMARY KEY,
         match_date DATE,
         coupon_type TEXT,
         sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`);
-      const [analysisRows, couponRows, sentRows] = await Promise.all([
+      // Gol takibi kalıcıdır: Render yeniden başlasa bile son bilinen skor kaybolmaz.
+      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_goal_tracking (
+        fixture_id BIGINT PRIMARY KEY,
+        home_team TEXT NOT NULL DEFAULT '',
+        away_team TEXT NOT NULL DEFAULT '',
+        league_name TEXT NOT NULL DEFAULT '',
+        source_label TEXT NOT NULL DEFAULT 'Telegram maç takibi',
+        last_score TEXT NOT NULL DEFAULT '0-0',
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`);
+      const [analysisRows, couponRows, sentPickRows, trackingRows] = await Promise.all([
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'analysis' ORDER BY id DESC LIMIT 100"),
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'coupon' ORDER BY id DESC LIMIT 50"),
-        databasePool.query("SELECT fixture_id FROM winscope_telegram_fixture_sent")
+        databasePool.query("SELECT fixture_id, pick_key FROM winscope_telegram_pick_sent"),
+        databasePool.query("SELECT fixture_id, home_team, away_team, league_name, source_label, last_score, active FROM winscope_goal_tracking WHERE active = TRUE")
       ]);
       archives.analyses = analysisRows.rows.map(row => row.payload);
       archives.coupons = couponRows.rows.map(row => row.payload);
-      for (const row of sentRows.rows) telegramSentFixtureIds.add(Number(row.fixture_id));
-      console.log(`[Archive] PostgreSQL arşivi yüklendi: analyses=${archives.analyses.length}, coupons=${archives.coupons.length}`);
+      for (const row of sentPickRows.rows) telegramSentPickKeys.add(`${Number(row.fixture_id)}|${row.pick_key}`);
+      for (const row of trackingRows.rows) {
+        const id = Number(row.fixture_id);
+        goalTrackedFixtures.set(id, { home: row.home_team, away: row.away_team, league: row.league_name, sourceLabel: row.source_label, baselineScore: row.last_score });
+        goalScoreCache.set(id, row.last_score);
+      }
+      console.log(`[Archive] PostgreSQL arşivi yüklendi: analyses=${archives.analyses.length}, coupons=${archives.coupons.length}, golTakibi=${trackingRows.rows.length}`);
     } catch (error) {
       console.error(`[Archive] PostgreSQL başlatılamadı; servis bellek içi arşivle devam edecek: ${error.message}`);
     }
@@ -81,8 +108,16 @@ async function saveArchiveItem(category, payload) {
 const telegramDeliveryCache = new Map();
 // Otomatik gönderimde aynı gün aynı maçı tekrar seçmemek için takip edilir.
 const autoSentFixtureKeys = new Set();
-// Fixture ID bazında tekrar engeli; PostgreSQL varsa sunucu yeniden başlasa da korunur.
+// Aynı maç + aynı tercih için tekrar engeli; PostgreSQL varsa yeniden başlatmalarda da korunur.
+const telegramSentPickKeys = new Set();
+// Eski kodla uyumluluk için tutulur; Telegram tercih tekrar kontrolünde kullanılmaz.
 const telegramSentFixtureIds = new Set();
+function telegramPickLabel(p) {
+  return String(p.market || p.pick || p.selection || p.choice || p.tip || "Tercih belirtilmedi").trim();
+}
+function telegramPickKey(p) {
+  return `${Number(p.fixtureId)}|${telegramPickLabel(p).toLocaleLowerCase("tr-TR").replace(/\s+/g, " ")}`;
+}
 let autoLiveTaskInFlight = false;
 let autoPrematchTaskInFlight = false;
 // Telegram'a gönderilmiş kuponlardaki maçlar için gol/skor değişimi takibi.
@@ -844,22 +879,33 @@ function rankSingleMatchChoices(choices, mode = "prematch") {
 async function sendCouponAutomatically(coupon, chosen) {
   await archiveDatabaseReady;
   const originalPicks = coupon.picks || [];
-  const alreadySent = new Set(telegramSentFixtureIds);
+  const alreadySent = new Set(telegramSentPickKeys);
   if (databasePool && originalPicks.length) {
     try {
       const ids = originalPicks.map(p => Number(p.fixtureId)).filter(Boolean);
       if (ids.length) {
-        const rows = await databasePool.query("SELECT fixture_id FROM winscope_telegram_fixture_sent WHERE fixture_id = ANY($1::bigint[])", [ids]);
-        for (const row of rows.rows) alreadySent.add(Number(row.fixture_id));
+        const rows = await databasePool.query(
+          "SELECT fixture_id, pick_key FROM winscope_telegram_pick_sent WHERE fixture_id = ANY($1::bigint[])",
+          [ids]
+        );
+        for (const row of rows.rows) alreadySent.add(`${Number(row.fixture_id)}|${row.pick_key}`);
       }
-    } catch (error) { console.warn(`[Telegram] Tekrar kontrolü DB'de yapılamadı: ${error.message}`); }
+    } catch (error) { console.warn(`[Telegram] Tercih tekrar kontrolü DB'de yapılamadı: ${error.message}`); }
   }
-  const remainingPicks = originalPicks.filter(p => !Number(p.fixtureId) || !alreadySent.has(Number(p.fixtureId)));
-  if (!remainingPicks.length) return { sent: true, duplicateSuppressed: true, message: "Bu maçlar daha önce Telegram'a gönderildi; tekrar gönderilmedi." };
-  const remainingIds = new Set(remainingPicks.map(p => Number(p.fixtureId)).filter(Boolean));
+  const seenInThisCoupon = new Set();
+  const remainingPicks = originalPicks.filter(p => {
+    const fixtureId = Number(p.fixtureId);
+    if (!fixtureId) return true;
+    const key = telegramPickKey(p);
+    if (alreadySent.has(key) || seenInThisCoupon.has(key)) return false;
+    seenInThisCoupon.add(key);
+    return true;
+  });
+  if (!remainingPicks.length) return { sent: true, duplicateSuppressed: true, message: "Bu maç ve tercih daha önce Telegram'a gönderildi; tekrar gönderilmedi." };
+  const remainingPickKeys = new Set(remainingPicks.filter(p => Number(p.fixtureId)).map(telegramPickKey));
   coupon = { ...coupon, picks: remainingPicks };
-  chosen = (chosen || []).filter(p => !Number(p.fixtureId) || remainingIds.has(Number(p.fixtureId)));
-  const signature = `${coupon.date}|${coupon.type}|${chosen.map(p => `${p.fixtureId}:${p.market}`).sort().join(",")}`;
+  chosen = (chosen || []).filter(p => !Number(p.fixtureId) || remainingPickKeys.has(telegramPickKey(p)));
+  const signature = `${coupon.date}|${coupon.type}|${remainingPicks.map(p => Number(p.fixtureId) ? telegramPickKey(p) : `${p.home || ""}-${p.away || ""}:${telegramPickLabel(p)}`).sort().join(",")}`;
   const now = Date.now();
   for (const [key, at] of telegramDeliveryCache) if (now - at > 24 * 60 * 60 * 1000) telegramDeliveryCache.delete(key);
   if (telegramDeliveryCache.has(signature)) {
@@ -878,24 +924,35 @@ async function sendCouponAutomatically(coupon, chosen) {
       for (const p of (coupon.picks || [])) {
         const fixtureId = Number(p.fixtureId);
         if (!fixtureId) continue;
-        telegramSentFixtureIds.add(fixtureId);
+        const pickKey = telegramPickLabel(p).toLocaleLowerCase("tr-TR").replace(/\s+/g, " ");
+        const fullKey = `${fixtureId}|${pickKey}`;
+        telegramSentPickKeys.add(fullKey);
         if (databasePool) {
           try {
             await databasePool.query(
-              "INSERT INTO winscope_telegram_fixture_sent(fixture_id, match_date, coupon_type) VALUES ($1, $2::date, $3) ON CONFLICT (fixture_id) DO NOTHING",
-              [fixtureId, /^\d{4}-\d{2}-\d{2}$/.test(String(coupon.date || "")) ? coupon.date : null, coupon.type]
+              "INSERT INTO winscope_telegram_pick_sent(fixture_id, pick_key, match_date, coupon_type) VALUES ($1, $2, $3::date, $4) ON CONFLICT (fixture_id, pick_key) DO NOTHING",
+              [fixtureId, pickKey, /^\d{4}-\d{2}-\d{2}$/.test(String(coupon.date || "")) ? coupon.date : null, coupon.type]
             );
-          } catch (error) { console.warn(`[Telegram] Tekrar kaydı saklanamadı fixture=${fixtureId}: ${error.message}`); }
+          } catch (error) { console.warn(`[Telegram] Tercih tekrar kaydı saklanamadı fixture=${fixtureId}: ${error.message}`); }
         }
       }
-      const sourceLabel = coupon.type === "live" ? "Canlı en güvenilir tek tercih" : coupon.type === "surprise" ? "Maç önü sürpriz kuponu" : "Günün kuponu";
+      const sourceLabel = coupon.type === "live" ? "Telegram canlı maç tercihi" : coupon.type === "surprise" ? "Maç önü sürpriz kuponu" : "Maç önü kuponu";
       for (const p of (coupon.picks || [])) {
         const fixtureId = Number(p.fixtureId);
         if (!fixtureId) continue;
-        const score = String(p.currentScore || "0-0");
-        goalTrackedFixtures.set(fixtureId, { home: p.home, away: p.away, league: p.league, sourceLabel, baselineScore: score });
-        // Kupon üretilirken bilinen skor başlangıç kabul edilir.
+        const score = String(p.currentScore || "0-0").replace(/\s/g, "");
+        const tracked = { home: p.home || "Ev sahibi", away: p.away || "Deplasman", league: p.league || "Lig", sourceLabel, baselineScore: score };
+        goalTrackedFixtures.set(fixtureId, tracked);
         if (!goalScoreCache.has(fixtureId)) goalScoreCache.set(fixtureId, score);
+        if (databasePool) {
+          try {
+            await databasePool.query(`INSERT INTO winscope_goal_tracking (fixture_id, home_team, away_team, league_name, source_label, last_score, active)
+              VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+              ON CONFLICT (fixture_id) DO UPDATE SET home_team = EXCLUDED.home_team, away_team = EXCLUDED.away_team,
+              league_name = EXCLUDED.league_name, source_label = EXCLUDED.source_label, active = TRUE, updated_at = NOW()`,
+              [fixtureId, tracked.home, tracked.away, tracked.league, tracked.sourceLabel, goalScoreCache.get(fixtureId) || score]);
+          } catch (error) { console.warn(`[GOOOOL] Takip DB'ye yazılamadı fixture=${fixtureId}: ${error.message}`); }
+        }
       }
     }
     return result;
@@ -1278,28 +1335,40 @@ setTimeout(() => { void runAutomaticLivePick(); void runAutomaticDailyCoupon(); 
 setInterval(() => { void runAutomaticLivePick(); }, 20 * 60 * 1000);
 setInterval(() => { void runAutomaticDailyCoupon(); }, 2 * 60 * 60 * 1000);
 
-// Her 60 saniyede bir Telegram'a gönderilmiş kupon maçlarının skor değişimini kontrol et.
-// Böylece gol alarmı yalnızca kupon mesajı atmakla kalmaz, maçtaki skor değişimini de bildirir.
+// Her 30 saniyede Telegram'a gönderilmiş kupon/canlı tercih maçlarının skorunu kontrol et.
+// Başarılı bildirimden sonra skor DB'ye yazılır; Telegram hatasında eski skor korunur ve tekrar denenir.
 setInterval(async () => {
   if (goalScanInFlight || goalTrackedFixtures.size === 0) return;
   goalScanInFlight = true;
   try {
-    const payload = await cachedProviderRequest("goalAlertLiveList", "/fixtures?live=all", 15000);
+    const payload = await cachedProviderRequest("goalAlertLiveList", "/fixtures?live=all", 5000);
     const liveMatches = (payload.response || []).map(normalizeProviderMatch);
     const liveById = new Map(liveMatches.map(m => [Number(m.id), m]));
     for (const [fixtureId, tracked] of goalTrackedFixtures.entries()) {
       const match = liveById.get(fixtureId);
-      if (!match || match.status !== "LIVE") continue;
+      if (!match) continue;
+      if (match.status === "FT") {
+        if (databasePool) databasePool.query("UPDATE winscope_goal_tracking SET active = FALSE, updated_at = NOW() WHERE fixture_id = $1", [fixtureId]).catch(e => console.warn(`[GOOOOL] Takip kapatılamadı ${fixtureId}: ${e.message}`));
+        goalTrackedFixtures.delete(fixtureId);
+        goalScoreCache.delete(fixtureId);
+        continue;
+      }
+      if (match.status !== "LIVE") continue;
       const score = `${match.homeScore}-${match.awayScore}`;
       const previous = goalScoreCache.get(fixtureId) ?? tracked.baselineScore ?? score;
       if (score === previous) continue;
-      const message = `⚽ WINSCOPE GOOOOOL!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Skor değişti: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}'\n🎯 Takip nedeni: ${tracked.sourceLabel}`;
+      const message = `⚽ WINSCOPE GOOOOOL!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Skor: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}\n🎯 Takip: ${tracked.sourceLabel || "Telegram maç takibi"}`;
       try {
         const sent = await sendTelegram(message);
-        if (sent.sent) {
+        if (sent?.sent) {
           goalScoreCache.set(fixtureId, score);
           tracked.baselineScore = score;
+          if (databasePool) {
+            await databasePool.query("UPDATE winscope_goal_tracking SET last_score = $2, updated_at = NOW() WHERE fixture_id = $1", [fixtureId, score]);
+          }
           console.log(`[GOOOOL Alert OK] ${fixtureId} ${previous} -> ${score}`);
+        } else {
+          console.error(`[GOOOOL Alert Retry] ${fixtureId}: Telegram mesajı gönderilemedi; sonraki kontrolde tekrar denenecek.`);
         }
       } catch (error) {
         console.error(`[GOOOOL Alert Error] ${fixtureId}: ${error.message}`);
@@ -1310,7 +1379,7 @@ setInterval(async () => {
   } finally {
     goalScanInFlight = false;
   }
-}, 60_000);
+}, 30_000);
 
 app.use("/api", (_req, res) => res.status(404).json({ error: "API uç noktası bulunamadı." }));
 app.listen(PORT, () => console.log(`WinScope server running on port ${PORT}`));
