@@ -861,19 +861,9 @@ function couponMessage(coupon) {
     lines.push(`Lig: ${p.league}`);
     if (coupon.type === "live" || p.isLive) {
       if (p.minute != null) lines.push(`Dakika: ${p.minute}' | Skor: ${p.currentScore || "—"}`);
-      if (p.source) lines.push(`Kaynak: ${p.source}`);
-      if (p.oddsBasis) lines.push(`Oran dayanağı: ${p.oddsBasis}`);
-      if (Array.isArray(p.statsSummary) && p.statsSummary.length) {
-        lines.push(`Canlı istatistik: ${p.statsSummary.join(" · ")}`);
-      }
-      if (p.marketProbability != null) lines.push(`Piyasa olasılığı: %${Number(p.marketProbability).toFixed(1)}`);
-      if (p.formSupport != null) lines.push(`Form desteği: %${Number(p.formSupport).toFixed(0)}`);
     }
     lines.push("");
   });
-  if (coupon.type === "live") {
-    lines.push("Dayanak: yalnızca maç önü oranı kullanıldı; canlı oran kullanılmadı. Son 5 maç formu + canlı şut/korner baskısı + dakika/skor penceresi ayrıca değerlendirildi.");
-  }
   return lines.join("\n");
 }
 
@@ -1374,20 +1364,7 @@ setInterval(async () => {
       const score = `${match.homeScore}-${match.awayScore}`;
       const previous = goalScoreCache.get(fixtureId) ?? tracked.baselineScore ?? score;
       if (score === previous) continue;
-      // Skor artışı gol, toplam gol sayısı azalışı ise gol iptali/skor düzeltmesi olarak bildirilir.
-      const parseScore = (value) => {
-        const parts = String(value || "").match(/^(\d+)\s*-\s*(\d+)$/);
-        return parts ? [Number(parts[1]), Number(parts[2])] : null;
-      };
-      const oldScore = parseScore(previous);
-      const newScore = parseScore(score);
-      const oldTotal = oldScore ? oldScore[0] + oldScore[1] : null;
-      const newTotal = newScore ? newScore[0] + newScore[1] : null;
-      const isCancellation = oldScore && newScore && (
-        newTotal < oldTotal || newScore[0] < oldScore[0] || newScore[1] < oldScore[1]
-      );
-      const heading = isCancellation ? "🚫 WINSCOPE GOL İPTAL EDİLDİ!" : "⚽ WINSCOPE GOOOOL!";
-      const message = `${heading}\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Skor: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}\n🎯 Takip: ${tracked.sourceLabel || "Telegram maç takibi"}`;
+      const message = `⚽ WINSCOPE GOL BİLDİRİMİ!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Skor: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}\n🎯 Takip: ${tracked.sourceLabel || "Telegram maç takibi"}`;
       try {
         const sent = await sendTelegram(message);
         if (sent?.sent) {
