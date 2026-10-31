@@ -35,6 +35,7 @@ button{cursor:pointer}.primary,.active{background:var(--pink);border-color:var(-
     <button class="primary" id="refresh">↻ Canlı maçlar</button>
     <input id="date" type="date">
     <button id="bulletin">Bülten</button>
+    <button id="showTracking">Tahmin Takibi</button>
     <select id="filter"><option value="all">Tüm maçlar</option><option value="live">Canlı</option></select>
   </div>
   <section class="panel" id="matchSearchPanel">
@@ -51,6 +52,7 @@ button{cursor:pointer}.primary,.active{background:var(--pink);border-color:var(-
     <div id="couponResult" class="small" style="margin-top:12px"></div>
   </section>
   <div id="msg" class="small"></div>
+  <section class="panel hidden" id="trackingPanel"><div class="head"><b>📊 Tahmin Sonuç Takibi</b><button id="hideTracking">Kapat</button></div><div id="trackingResults" class="small">Sonuçlar yükleniyor…</div></section>
   <section id="matches"><div class="empty">Maçlar yükleniyor…</div></section>
 </main>
 <script>
@@ -93,6 +95,7 @@ async function analyze(id){
  const box=$('a'+id);box.innerHTML='<div class="empty">Maç önü oranları ve takım formu değerlendiriliyor…</div>';
  try{
   const r=await fetch(`/api/match/${id}/analyze`),j=await r.json();if(!r.ok)throw Error(j.error||'Analiz alınamadı');
+  window.analysisPayloads=window.analysisPayloads||{};window.analysisPayloads[id]=j;
   box.innerHTML=`<table class="table">
    <tr><td>Analiz türü</td><td>Maç önü oranları (canlı oran yok)</td></tr>
    <tr><td>İY SKOR TAHMİNİ</td><td>${esc(j.halfTimeScore)}</td></tr>
@@ -101,16 +104,36 @@ async function analyze(id){
    <tr><td>ANA TERCİH</td><td>${esc(j.mainPick)}</td></tr>
    <tr><td>ALTERNATİF</td><td>${esc(j.alternative)}</td></tr>
    <tr><td>CANLI TERCİH</td><td>Devre dışı</td></tr>
-  </table><div class="small" style="margin-top:8px">${esc(j.scoreBasis||'')} · ${esc(j.note||'')}</div>`;
+  </table><div class="small" style="margin-top:8px">${esc(j.scoreBasis||'')} · ${esc(j.note||'')}</div><div class="toolbar"><button onclick="approveAnalysis(${Number(id)})" class="primary">Analizi Onayla ve Sonuç Takibine Al</button></div>`;
  }catch(e){box.innerHTML=`<div class="small err">${esc(e.message)}</div>`}
 }
+
+async function approveAnalysis(id){
+ const analysis=(window.analysisPayloads||{})[id];
+ const match=[...matches,...bulletinMatches].find(m=>Number(m.id)===Number(id));
+ if(!match){$('msg').textContent='Maç bilgisi bulunamadı; önce bülteni veya canlı listeyi yenile.';return}
+ try{
+  const r=await fetch('/api/analyses/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fixtureId:Number(id),home:match.home,away:match.away,matchDate:match.fixtureDate||'',analysis})});
+  const j=await r.json();if(!r.ok||!j.success)throw Error(j.error||'Analiz kaydedilemedi');
+  $('msg').textContent='Analiz kaydedildi ve maç sonucu takibine alındı.';
+ }catch(e){$('msg').textContent='Kayıt hatası: '+e.message}
+}
+async function showTracking(){
+ const panel=$('trackingPanel');panel.classList.remove('hidden');$('trackingResults').textContent='Tahmin sonuçları yükleniyor…';
+ try{const r=await fetch('/api/predictions/summary');const j=await r.json();
+  const pct=v=>v==null?'—':v+'%';
+  $('trackingResults').innerHTML=`<div class="statteam"><b>Onaylanan analiz</b><div class="statline"><span>Toplam</span><b>${esc(j.total)}</b></div><div class="statline"><span>Sonuçlanan</span><b>${esc(j.settled)}</b></div><div class="statline"><span>Bekleyen</span><b>${esc(j.pending)}</b></div><div class="statline"><span>Tam MS skor isabeti</span><b>${esc(pct(j.exactFullTimeRate))} (${esc(j.exactFullTime)})</b></div><div class="statline"><span>Tam İY skor isabeti</span><b>${esc(pct(j.exactHalfTimeRate))} (${esc(j.exactHalfTime)})</b></div></div>`+
+  (j.results||[]).map(x=>`<div class="statteam"><b>${esc(x.home)} VS ${esc(x.away)}</b><div class="statline"><span>İY tahmini / gerçek</span><b>${esc(x.predictedHT||'—')} / ${esc(x.actualHT||'—')}</b></div><div class="statline"><span>MS tahmini / gerçek</span><b>${esc(x.predictedFT||'—')} / ${esc(x.actualFT||'—')}</b></div></div>`).join('');
+ }catch(e){$('trackingResults').textContent='Takip bilgisi alınamadı: '+e.message}
+}
+
 function renderCoupon(d){
  const box=$('couponResult');
  if(d.status==='ERROR'||d.error){box.innerHTML=`<div class="err"><b>${esc(d.error||'Kupon oluşturulamadı.')}</b></div>`;return}
  if(!d.picks||!d.picks.length){box.innerHTML='<div class="err">Uygun maç/tercih bulunamadı.</div>';return}
  box.innerHTML=`<div class="head"><span>Kupon: <b>${esc(String(d.type||'maç önü').toUpperCase())}</b></span></div><div style="margin:10px 0">${d.picks.map(p=>`<div style="padding:7px;border-bottom:1px solid var(--line)"><b>${esc(p.home)} VS ${esc(p.away)}</b><br>Tercih: <u>${esc(p.market)}</u></div>`).join('')}</div>`;
 }
-$('refresh').onclick=live;$('bulletin').onclick=bulletin;$('searchMatch').onclick=searchMatch;
+$('refresh').onclick=live;$('bulletin').onclick=bulletin;$('searchMatch').onclick=searchMatch;$('showTracking').onclick=showTracking;$('hideTracking').onclick=()=> $('trackingPanel').classList.add('hidden');
 $('matchSearch').addEventListener('keydown',e=>{if(e.key==='Enter')searchMatch()});
 $('clearMatchSearch').onclick=()=>{$('matchSearch').value='';$('matchSearchResult').textContent='Aramak için takım adını yaz.'};
 $('makeCoupon').onclick=async()=>{try{const r=await fetch('/api/coupon/best?date='+encodeURIComponent($('date').value));renderCoupon(await r.json())}catch(e){$('couponResult').textContent=e.message}};

@@ -28,6 +28,7 @@ app.use(express.static(path.join(ROOT, "public")));
 const providerCache = new Map();
 const providerInFlight = new Map();
 const archives = { analyses: [], coupons: [] };
+const predictionTracking = [];
 const { Pool } = pg;
 const databasePool = process.env.DATABASE_URL
   ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL) ? false : { rejectUnauthorized: false } })
@@ -43,19 +44,32 @@ if (databasePool) {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`);
       await databasePool.query("CREATE INDEX IF NOT EXISTS winscope_archive_category_id_idx ON winscope_archive(category, id DESC)");
+      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_predictions (
+        fixture_id BIGINT PRIMARY KEY, home_team TEXT NOT NULL, away_team TEXT NOT NULL,
+        predicted_ht TEXT, predicted_ft TEXT, alternative_ft TEXT,
+        actual_ht TEXT, actual_ft TEXT, exact_ft BOOLEAN, exact_ht BOOLEAN,
+        match_date TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), settled_at TIMESTAMPTZ
+      )`);
       await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_telegram_fixture_sent (
         fixture_id BIGINT PRIMARY KEY,
         match_date DATE,
         coupon_type TEXT,
         sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`);
-      const [analysisRows, couponRows, sentRows] = await Promise.all([
+      const [analysisRows, couponRows, sentRows, predictionRows] = await Promise.all([
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'analysis' ORDER BY id DESC LIMIT 100"),
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'coupon' ORDER BY id DESC LIMIT 50"),
-        databasePool.query("SELECT fixture_id FROM winscope_telegram_fixture_sent")
+        databasePool.query("SELECT fixture_id FROM winscope_telegram_fixture_sent"),
+        databasePool.query("SELECT * FROM winscope_predictions ORDER BY created_at DESC LIMIT 500")
       ]);
       archives.analyses = analysisRows.rows.map(row => row.payload);
       archives.coupons = couponRows.rows.map(row => row.payload);
+      predictionTracking.push(...predictionRows.rows.map(row => ({
+        fixtureId:Number(row.fixture_id), home:row.home_team, away:row.away_team,
+        predictedHT:row.predicted_ht, predictedFT:row.predicted_ft, alternativeFT:row.alternative_ft,
+        actualHT:row.actual_ht, actualFT:row.actual_ft, exactFT:row.exact_ft, exactHT:row.exact_ht,
+        matchDate:row.match_date, settled:Boolean(row.settled_at), createdAt:row.created_at
+      })));
       for (const row of sentRows.rows) telegramSentFixtureIds.add(Number(row.fixture_id));
       console.log(`[Archive] PostgreSQL arşivi yüklendi: analyses=${archives.analyses.length}, coupons=${archives.coupons.length}`);
     } catch (error) {
@@ -246,7 +260,7 @@ function oddsForFixture(oddsRow) {
         if (isHomeTeam && Number(line) === 1.5) key = "EV 1.5 ÜST";
         else if (isAwayTeam && Number(line) === 1.5) key = "DEP 1.5 ÜST";
         else if (isHalf && [0.5, 1.5, 2.5].includes(Number(line))) key = `İY ${line} ÜST`;
-        else if (isTotal && [0.5, 1.5, 2.5, 3.5].includes(Number(line))) key = `MS ${line} ÜST`;
+        else if (isTotal && [0.5, 1.5, 2.5, 3.5, 5.5].includes(Number(line))) key = `MS ${line} ÜST`;
         if (key) add(book, key, side, odd);
       }
     }
@@ -254,18 +268,20 @@ function oddsForFixture(oddsRow) {
   const candidates = [];
   for (const item of markets.values()) {
     let pct = null;
+    let outcomeProbabilities = null;
     if (item.over && item.under) pct = 100 * (1 / item.over) / ((1 / item.over) + (1 / item.under));
     else if (item.yes && item.no) pct = 100 * (1 / item.yes) / ((1 / item.yes) + (1 / item.no));
     else if (item.home && item.draw && item.away) {
       const inv = [1 / item.home, 1 / item.draw, 1 / item.away], sum = inv.reduce((a,b)=>a+b,0);
-      pct = 100 * inv[0] / sum;
+      outcomeProbabilities = { home: 100 * inv[0] / sum, draw: 100 * inv[1] / sum, away: 100 * inv[2] / sum };
+      pct = outcomeProbabilities.home;
     }
     const odd = item.over || item.yes || item.home;
     if (pct == null || !Number.isFinite(pct)) continue;
-    const ranks = { "EV 1.5 ÜST": 1, "DEP 1.5 ÜST": 1, "İY 0.5 ÜST": 2, "MS 0.5 ÜST": 2, "İY 1.5 ÜST": 3, "MS 1.5 ÜST": 3, "MS 2.5 ÜST": 4, "KG VAR": 5, "MS 3.5 ÜST": 6 };
+    const ranks = { "EV 1.5 ÜST": 1, "DEP 1.5 ÜST": 1, "İY 0.5 ÜST": 2, "MS 0.5 ÜST": 2, "İY 1.5 ÜST": 3, "MS 1.5 ÜST": 3, "MS 2.5 ÜST": 4, "KG VAR": 5, "MS 3.5 ÜST": 6, "MS 5.5 ÜST": 8 };
     candidates.push({ market: item.market, odd, probability: pct, rank: ranks[item.market] ?? 9, bookmaker: item.bookmaker,
       homeOdd: item.market === "MS 1" ? item.home : null, drawOdd: item.market === "MS 1" ? item.draw : null,
-      awayOdd: item.market === "MS 1" ? item.away : null });
+      awayOdd: item.market === "MS 1" ? item.away : null, outcomeProbabilities });
   }
   // If API-Football has multiple bookmakers, keep each book's pair intact and prefer Bet365 only as a tie-break.
   return candidates.sort((a,b) => (/bet365/i.test(b.bookmaker)-/bet365/i.test(a.bookmaker)) || b.probability-a.probability || a.rank-b.rank);
@@ -387,124 +403,81 @@ function marketProbabilitiesByName(oddsRow) {
   return result;
 }
 function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, prematchOddsRow = null) {
-  const hNow = Number(fixture.homeScore || 0), aNow = Number(fixture.awayScore || 0);
-  const live = fixture.status === "LIVE";
-  if (fixture.status === "FT") return { halfTimeScore: `${fixture.htHomeScore ?? "?"}-${fixture.htAwayScore ?? "?"}`, fullTimeScore: `${hNow}-${aNow}`, alternativeFullTimeScore: "—", scoreBasis: "Gerçekleşen skor" };
-
-  // Oran verisi, form verisi eksik olsa bile skor tahmininde kullanılabilir.
-  // Piyasa ana kaynak; son 5 maç formu yalnızca destekleyici ağırlık alır.
-  const homeFormAvailable = Boolean(homeForm?.available);
-  const awayFormAvailable = Boolean(awayForm?.available);
-  const hasForm = homeFormAvailable && awayFormAvailable;
+  // Maç önü skor motoru: canlı maç kartta görünse bile mevcut skor/dakika kullanılmaz.
+  const hasForm = Boolean(homeForm?.available && awayForm?.available);
   const pre = marketProbabilitiesByName(prematchOddsRow);
-  const liveMarkets = live ? marketProbabilitiesByName(liveOddsRow) : {};
-  const hasLiveMarket = live && Object.keys(liveMarkets).length > 0;
-  const hasPreGoalMarket = ["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST"]
-    .some(key => Number.isFinite(pre[key]));
-  const hasLiveGoalMarket = hasLiveMarket && ["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST"]
-    .some(key => Number.isFinite(liveMarkets[key]));
-  const currentTotal = hNow + aNow;
-  const minute = Math.max(0, Math.min(90, Number(fixture.minute || 0)));
-  const remainingFraction = live ? Math.max(0.03, (90 - minute) / 90) : 1;
+  const rows = oddsForFixture(prematchOddsRow);
+  const outcomeRows = rows.filter(x => x.market === "MS 1" && x.outcomeProbabilities);
+  const outcomeRow = outcomeRows.find(x => /bet365/i.test(String(x.bookmaker || ""))) || outcomeRows[0];
+  const outcome = outcomeRow?.outcomeProbabilities || null;
 
-  const preHomeMarket = lambdaFromMarketProbability(pre["EV 1.5 ÜST"], 2, 0);
-  const preAwayMarket = lambdaFromMarketProbability(pre["DEP 1.5 ÜST"], 2, 0);
-  const preTotalCandidates = [
-    lambdaFromMarketProbability(pre["MS 1.5 ÜST"], 2, 0),
-    lambdaFromMarketProbability(pre["MS 2.5 ÜST"], 3, 0),
-    lambdaFromMarketProbability(pre["MS 3.5 ÜST"], 4, 0)
-  ].filter(Number.isFinite);
-  const preTotal = preTotalCandidates.length ? preTotalCandidates.reduce((a,b)=>a+b,0) / preTotalCandidates.length : null;
+  const totalLines = [["MS 1.5 ÜST",2],["MS 2.5 ÜST",3],["MS 3.5 ÜST",4],["MS 5.5 ÜST",6]];
+  const totalLambdas = totalLines.map(([market,threshold]) => lambdaFromMarketProbability(pre[market],threshold,0)).filter(Number.isFinite).sort((a,b)=>a-b);
+  const marketTotalLambda = totalLambdas.length ? totalLambdas[Math.floor((totalLambdas.length-1)/2)] : null;
+  const marketHomeLambda = lambdaFromMarketProbability(pre["EV 1.5 ÜST"],2,0);
+  const marketAwayLambda = lambdaFromMarketProbability(pre["DEP 1.5 ÜST"],2,0);
+  const formHome = hasForm ? Math.max(0.08,0.58*Number(homeForm.avgGoalsFor||0)+0.42*Number(awayForm.avgGoalsAgainst||0)) : null;
+  const formAway = hasForm ? Math.max(0.08,0.58*Number(awayForm.avgGoalsFor||0)+0.42*Number(homeForm.avgGoalsAgainst||0)) : null;
 
-  let homeMarketLambda = hasLiveGoalMarket ? lambdaFromMarketProbability(liveMarkets["EV 1.5 ÜST"], 2, hNow) : null;
-  let awayMarketLambda = hasLiveGoalMarket ? lambdaFromMarketProbability(liveMarkets["DEP 1.5 ÜST"], 2, aNow) : null;
-  const liveTotalCandidates = hasLiveGoalMarket ? [
-    lambdaFromMarketProbability(liveMarkets["MS 1.5 ÜST"], 2, currentTotal),
-    lambdaFromMarketProbability(liveMarkets["MS 2.5 ÜST"], 3, currentTotal),
-    lambdaFromMarketProbability(liveMarkets["MS 3.5 ÜST"], 4, currentTotal)
-  ].filter(Number.isFinite) : [];
-  let totalRemainingMarket = liveTotalCandidates.length ? liveTotalCandidates.reduce((a,b)=>a+b,0) / liveTotalCandidates.length : null;
+  // Team-goal markets set the split first. If absent, use 1X2 implied home/away
+  // strength (draw excluded); form is the next fallback, never a fabricated score.
+  let homeShare = null;
+  if (marketHomeLambda != null && marketAwayLambda != null && marketHomeLambda+marketAwayLambda>0.05) homeShare=marketHomeLambda/(marketHomeLambda+marketAwayLambda);
+  else if (outcome && outcome.home+outcome.away>0) homeShare=outcome.home/(outcome.home+outcome.away);
+  else if (formHome != null && formAway != null && formHome+formAway>0) homeShare=formHome/(formHome+formAway);
+  else if (marketHomeLambda != null) homeShare=0.58;
+  else if (marketAwayLambda != null) homeShare=0.42;
 
-  const formHomeFull = hasForm ? Math.max(0.05, 0.58 * Number(homeForm.avgGoalsFor || 0) + 0.42 * Number(awayForm.avgGoalsAgainst || 0)) : null;
-  const formAwayFull = hasForm ? Math.max(0.05, 0.58 * Number(awayForm.avgGoalsFor || 0) + 0.42 * Number(homeForm.avgGoalsAgainst || 0)) : null;
-  let lambdaHome = null, lambdaAway = null;
-
-  if (live) {
-    const formHomeRemaining = formHomeFull == null ? null : formHomeFull * remainingFraction;
-    const formAwayRemaining = formAwayFull == null ? null : formAwayFull * remainingFraction;
-    if (homeMarketLambda == null && preHomeMarket != null) homeMarketLambda = preHomeMarket * remainingFraction;
-    if (awayMarketLambda == null && preAwayMarket != null) awayMarketLambda = preAwayMarket * remainingFraction;
-    if (homeMarketLambda == null && totalRemainingMarket != null && awayMarketLambda != null) homeMarketLambda = Math.max(0.01, totalRemainingMarket - awayMarketLambda);
-    if (awayMarketLambda == null && totalRemainingMarket != null && homeMarketLambda != null) awayMarketLambda = Math.max(0.01, totalRemainingMarket - homeMarketLambda);
-    // Yalnızca toplam gol pazarı varsa taraflara form oranında, form yoksa eşit bölüştür.
-    if (totalRemainingMarket != null && homeMarketLambda == null && awayMarketLambda == null) {
-      const ratio = formHomeRemaining != null && formAwayRemaining != null
-        ? formHomeRemaining / Math.max(0.01, formHomeRemaining + formAwayRemaining) : 0.5;
-      homeMarketLambda = totalRemainingMarket * ratio;
-      awayMarketLambda = totalRemainingMarket - homeMarketLambda;
-    }
-    if (homeMarketLambda == null) homeMarketLambda = formHomeRemaining;
-    if (awayMarketLambda == null) awayMarketLambda = formAwayRemaining;
-    if (homeMarketLambda == null || awayMarketLambda == null) {
-      return { halfTimeScore: minute < 45 ? `${hNow}-${aNow} (canlı skor; devre tahmini hesaplanamadı)` : `${fixture.htHomeScore ?? "?"}-${fixture.htAwayScore ?? "?"} (devre skoru)`, fullTimeScore: `${hNow}-${aNow} (mevcut skor; tahmin için kullanılabilir gol pazarı/form yok)`, scoreBasis: "Skor tahmini için kullanılabilir gol oranı ve yeterli form verisi bulunamadı" };
-    }
-    if (totalRemainingMarket != null && homeMarketLambda + awayMarketLambda > 0) {
-      const scale = totalRemainingMarket / (homeMarketLambda + awayMarketLambda);
-      homeMarketLambda *= scale; awayMarketLambda *= scale;
-    }
-    // Piyasa varsa %85 piyasa / %15 form; canlı piyasa yoksa maç önü oranı öncelikli.
-    lambdaHome = formHomeRemaining == null ? homeMarketLambda : (hasLiveGoalMarket ? 0.85 * homeMarketLambda + 0.15 * formHomeRemaining : 0.85 * homeMarketLambda + 0.15 * formHomeRemaining);
-    lambdaAway = formAwayRemaining == null ? awayMarketLambda : (hasLiveGoalMarket ? 0.85 * awayMarketLambda + 0.15 * formAwayRemaining : 0.85 * awayMarketLambda + 0.15 * formAwayRemaining);
-  } else {
-    let h = preHomeMarket, a = preAwayMarket;
-    if (h == null && a == null && preTotal != null) {
-      const sum = formHomeFull != null && formAwayFull != null ? formHomeFull + formAwayFull : 0;
-      const ratio = sum > 0 ? formHomeFull / sum : 0.5;
-      h = preTotal * ratio; a = preTotal - h;
-    } else if (h == null && preTotal != null && a != null) h = Math.max(0.01, preTotal - a);
-    else if (a == null && preTotal != null && h != null) a = Math.max(0.01, preTotal - h);
-    lambdaHome = h == null ? formHomeFull : (formHomeFull == null ? h : 0.85 * h + 0.15 * formHomeFull);
-    lambdaAway = a == null ? formAwayFull : (formAwayFull == null ? a : 0.85 * a + 0.15 * formAwayFull);
-    if (preTotal != null && lambdaHome != null && lambdaAway != null && lambdaHome + lambdaAway > 0) {
-      const target = preHomeMarket != null || preAwayMarket != null ? 0.85 * preTotal + 0.15 * (lambdaHome + lambdaAway) : preTotal;
-      const scale = target / (lambdaHome + lambdaAway);
-      lambdaHome *= scale; lambdaAway *= scale;
-    }
-    if (lambdaHome == null || lambdaAway == null) {
-      return { halfTimeScore: "Skor tahmini hesaplanamadı: kullanılabilir gol pazarı/form yok", fullTimeScore: "Skor tahmini hesaplanamadı: kullanılabilir gol pazarı/form yok", scoreBasis: "Doğrulanabilir skor girdisi yok" };
-    }
+  let lambdaHome=marketHomeLambda, lambdaAway=marketAwayLambda;
+  if (lambdaHome==null || lambdaAway==null) {
+    if (marketTotalLambda!=null && homeShare!=null) {
+      if (lambdaHome==null) lambdaHome=marketTotalLambda*homeShare;
+      if (lambdaAway==null) lambdaAway=marketTotalLambda*(1-homeShare);
+    } else if (marketTotalLambda!=null) { lambdaHome=marketTotalLambda*0.5; lambdaAway=marketTotalLambda*0.5; }
   }
-
-  // Olası skorları bağımsız Poisson dağılımıyla sıralar; canlıda gerçekleşen skoru korur.
-  const pmf = (k, lambda) => Math.exp(-lambda) * Math.pow(lambda, k) / factorial(k);
-  const scoreCandidates = [];
-  const maxExtra = 8; // 2-4 / 4-2 gibi yüksek skorlu senaryoları da değerlendirebilmek için.
-  for (let gh = 0; gh <= maxExtra; gh++) for (let ga = 0; ga <= maxExtra; ga++) {
-    const probability = pmf(gh, Math.max(0.01, lambdaHome)) * pmf(ga, Math.max(0.01, lambdaAway));
-    const finalH = live ? hNow + gh : gh;
-    const finalA = live ? aNow + ga : ga;
-    scoreCandidates.push({ finalH, finalA, probability });
+  if (lambdaHome!=null && formHome!=null) lambdaHome=0.85*lambdaHome+0.15*formHome;
+  else if (lambdaHome==null) lambdaHome=formHome;
+  if (lambdaAway!=null && formAway!=null) lambdaAway=0.85*lambdaAway+0.15*formAway;
+  else if (lambdaAway==null) lambdaAway=formAway;
+  if (marketTotalLambda!=null && lambdaHome!=null && lambdaAway!=null && lambdaHome+lambdaAway>0.05) {
+    const target=0.85*marketTotalLambda+0.15*(lambdaHome+lambdaAway);
+    const scale=target/(lambdaHome+lambdaAway); lambdaHome*=scale; lambdaAway*=scale;
   }
-  scoreCandidates.sort((a, b) => b.probability - a.probability);
-  const best = scoreCandidates[0] || null;
-  // Alternatif skor, en yüksek olasılıklı skordan farklı olan ikinci olasılık senaryosudur.
-  const alternativeBest = scoreCandidates.find(x => best && (x.finalH !== best.finalH || x.finalA !== best.finalA)) || null;
-  const fullTimeScore = best ? `${best.finalH}-${best.finalA} (tahmin)` : "Skor tahmini hesaplanamadı";
-  const alternativeFullTimeScore = alternativeBest ? `${alternativeBest.finalH}-${alternativeBest.finalA} (alternatif tahmin)` : "Alternatif skor hesaplanamadı";
-  let halfTimeScore;
-  if (live && minute >= 45 && fixture.htHomeScore != null && fixture.htAwayScore != null) halfTimeScore = `${fixture.htHomeScore}-${fixture.htAwayScore} (Gerçek)`;
-  else if (live && minute < 45) {
-    const firstHalfRemainingFraction = Math.max(0, Math.min(1, (45 - minute) / Math.max(1, 90 - minute)));
-    const htHome = hNow + Math.round(lambdaHome * firstHalfRemainingFraction);
-    const htAway = aNow + Math.round(lambdaAway * firstHalfRemainingFraction);
-    halfTimeScore = `${htHome}-${htAway} (İY tahmini)`;
-  } else halfTimeScore = `${Math.max(0, Math.round(lambdaHome * 0.46))}-${Math.max(0, Math.round(lambdaAway * 0.46))} (tahmin)`;
-  const basis = hasLiveGoalMarket
-    ? (hasForm ? "Canlı gol oranları (%85) + son 5 maç formu (%15)" : "Canlı gol oranları; form verisi mevcut değil")
-    : hasPreGoalMarket
-      ? (hasForm ? "Maç önü gol oranları (%85) + son 5 maç formu (%15)" : "Maç önü gol oranları; form verisi mevcut değil")
-      : "Son 5 maç formu; kullanılabilir gol oranı bulunamadı";
-  return { halfTimeScore, fullTimeScore, alternativeFullTimeScore, scoreBasis: basis, scoreProbability: best ? Number(best.probability.toFixed(4)) : null, alternativeScoreProbability: alternativeBest ? Number(alternativeBest.probability.toFixed(4)) : null };
+  if (!Number.isFinite(lambdaHome) || !Number.isFinite(lambdaAway)) return {
+    halfTimeScore:"Tahmin üretilemedi", fullTimeScore:"Tahmin üretilemedi", alternativeFullTimeScore:"Tahmin üretilemedi",
+    scoreBasis:"Maç önü gol oranı ve iki takım için yeterli son 5 maç verisi bulunamadı"
+  };
+  lambdaHome=Math.max(0.08,Math.min(4.5,lambdaHome)); lambdaAway=Math.max(0.08,Math.min(4.5,lambdaAway));
+  const pmf=(k,l)=>Math.exp(-l)*Math.pow(l,k)/factorial(k);
+  const scores=[];
+  for(let h=0;h<=8;h++) for(let a=0;a<=8;a++) scores.push({home:h,away:a,probability:pmf(h,lambdaHome)*pmf(a,lambdaAway)});
+  scores.sort((a,b)=>b.probability-a.probability||(a.home+a.away)-(b.home+b.away)||b.home-a.home);
+  const best=scores[0];
+  const alternative=scores.find(x=>x.home!==best.home||x.away!==best.away);
+
+  const ht05=lambdaFromMarketProbability(pre["İY 0.5 ÜST"],1,0);
+  const ht15=lambdaFromMarketProbability(pre["İY 1.5 ÜST"],2,0);
+  const htLines=[ht05,ht15].filter(Number.isFinite);
+  const htTotal=htLines.length?htLines.reduce((sum,x)=>sum+x,0)/htLines.length:0.45*(lambdaHome+lambdaAway);
+  const fullTotal=lambdaHome+lambdaAway;
+  const htHome=fullTotal>0?htTotal*lambdaHome/fullTotal:htTotal/2;
+  const htAway=fullTotal>0?htTotal*lambdaAway/fullTotal:htTotal/2;
+  const htScores=[];
+  for(let h=0;h<=5;h++) for(let a=0;a<=5;a++) htScores.push({home:h,away:a,p:pmf(h,htHome)*pmf(a,htAway)});
+  htScores.sort((a,b)=>b.p-a.p||(a.home+a.away)-(b.home+b.away)||b.home-a.home);
+  const basis=[];
+  if(marketHomeLambda!=null||marketAwayLambda!=null||marketTotalLambda!=null) basis.push("Maç önü gol oranları (%85 ağırlık)");
+  if(outcome) basis.push("MS 1X2 ev/deplasman dengesi");
+  if(hasForm) basis.push("son 5 maç formu (%15 destek)");
+  return {
+    halfTimeScore:`${htScores[0].home}-${htScores[0].away} (tahmin)`,
+    fullTimeScore:`${best.home}-${best.away} (tahmin)`,
+    alternativeFullTimeScore:`${alternative.home}-${alternative.away} (alternatif tahmin)`,
+    scoreBasis:basis.join(" + ")||"Maç önü oranları ve erişilebilen takım formu",
+    expectedGoals:{home:Number(lambdaHome.toFixed(2)),away:Number(lambdaAway.toFixed(2))},
+    scoreProbability:Number(best.probability.toFixed(4)),
+    alternativeScoreProbability:Number(alternative.probability.toFixed(4))
+  };
 }
 
 function analysisPercentages(oddsRow, homeForm, awayForm) {
@@ -1219,7 +1192,46 @@ app.post("/api/analyses/approve", async (req, res) => {
   archives.analyses.unshift(approved);
   archives.analyses = archives.analyses.slice(0, 100);
   const storage = await saveArchiveItem("analysis", approved);
-  res.json({ success: true, persisted: storage.persisted, storageReason: storage.reason || storage.error || null });
+  const parseScore = value => {
+    const match = String(value || "").match(/(\d+)\s*[-:]\s*(\d+)/);
+    return match ? `${Number(match[1])}-${Number(match[2])}` : null;
+  };
+  const tracking = {
+    fixtureId:Number(body.fixtureId), home:String(body.home), away:String(body.away),
+    predictedHT:parseScore(approved.analysis.halfTimeScore),
+    predictedFT:parseScore(approved.analysis.fullTimeScore),
+    alternativeFT:parseScore(approved.analysis.alternativeFullTimeScore),
+    actualHT:null, actualFT:null, exactFT:null, exactHT:null,
+    matchDate:String(body.matchDate || ""), settled:false, createdAt:new Date().toISOString()
+  };
+  const existing = predictionTracking.findIndex(x => x.fixtureId === tracking.fixtureId);
+  if (existing >= 0) predictionTracking[existing] = tracking; else predictionTracking.unshift(tracking);
+  let trackingPersisted = false;
+  if (databasePool) {
+    try {
+      await archiveDatabaseReady;
+      await databasePool.query(`INSERT INTO winscope_predictions(fixture_id,home_team,away_team,predicted_ht,predicted_ft,alternative_ft,match_date)
+        VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(fixture_id) DO UPDATE SET home_team=EXCLUDED.home_team,away_team=EXCLUDED.away_team,
+        predicted_ht=EXCLUDED.predicted_ht,predicted_ft=EXCLUDED.predicted_ft,alternative_ft=EXCLUDED.alternative_ft,match_date=EXCLUDED.match_date,
+        actual_ht=NULL,actual_ft=NULL,exact_ft=NULL,exact_ht=NULL,settled_at=NULL`,
+        [tracking.fixtureId,tracking.home,tracking.away,tracking.predictedHT,tracking.predictedFT,tracking.alternativeFT,tracking.matchDate]);
+      trackingPersisted = true;
+    } catch (error) { console.error(`[Prediction tracking] ${error.message}`); }
+  }
+  res.json({ success: true, persisted: storage.persisted, trackingPersisted, storageReason: storage.reason || storage.error || null });
+});
+
+app.get("/api/predictions/summary", async (_req, res) => {
+  await archiveDatabaseReady;
+  const rows = predictionTracking;
+  const settled = rows.filter(x => x.settled && x.actualFT);
+  const exactFT = settled.filter(x => x.exactFT === true).length;
+  const exactHTRows = settled.filter(x => x.exactHT !== null);
+  res.json({ total:rows.length, settled:settled.length, pending:rows.length-settled.length,
+    exactFullTime:exactFT, exactFullTimeRate:settled.length?Math.round(100*exactFT/settled.length):null,
+    exactHalfTime:exactHTRows.filter(x=>x.exactHT===true).length,
+    exactHalfTimeRate:exactHTRows.length?Math.round(100*exactHTRows.filter(x=>x.exactHT===true).length/exactHTRows.length):null,
+    results:settled.slice(0,100), note:"Yalnızca kullanıcı tarafından onaylanıp takip kaydına alınan analizler ölçülür." });
 });
 
 app.get("/api/archives", async (_req, res) => {
@@ -1243,6 +1255,8 @@ function turkeyDateString() {
 }
 
 async function runAutomaticLivePick() {
+  // Live analysis/notifications are disabled during pre-match-only testing.
+  return;
   if (autoLiveTaskInFlight) return;
   autoLiveTaskInFlight = true;
   try {
@@ -1317,4 +1331,26 @@ setInterval(async () => {
 }, 60_000);
 
 app.use("/api", (_req, res) => res.status(404).json({ error: "API uç noktası bulunamadı." }));
+async function settleApprovedPredictions() {
+  if (!predictionTracking.some(x => !x.settled)) return;
+  for (const item of predictionTracking.filter(x => !x.settled).slice(0, 20)) {
+    try {
+      const payload = await cachedProviderRequest(`settle-fixture:${item.fixtureId}`, `/fixtures?id=${item.fixtureId}`, 5 * 60 * 1000);
+      const row = payload.response?.[0];
+      const status = String(row?.fixture?.status?.short || "").toUpperCase();
+      if (!row || !["FT","AET","PEN"].includes(status) || row.goals?.home == null || row.goals?.away == null) continue;
+      const actualFT = `${Number(row.goals.home)}-${Number(row.goals.away)}`;
+      const ht = row.score?.halftime;
+      const actualHT = ht?.home == null || ht?.away == null ? null : `${Number(ht.home)}-${Number(ht.away)}`;
+      item.actualFT = actualFT; item.actualHT = actualHT;
+      item.exactFT = item.predictedFT ? item.predictedFT === actualFT : null;
+      item.exactHT = item.predictedHT && actualHT ? item.predictedHT === actualHT : null;
+      item.settled = true; item.settledAt = new Date().toISOString();
+      if (databasePool) await databasePool.query(`UPDATE winscope_predictions SET actual_ht=$2,actual_ft=$3,exact_ft=$4,exact_ht=$5,settled_at=NOW() WHERE fixture_id=$1`,
+        [item.fixtureId,actualHT,actualFT,item.exactFT,item.exactHT]);
+    } catch (error) { console.warn(`[Prediction settlement] fixture=${item.fixtureId}: ${error.message}`); }
+  }
+}
+setInterval(() => { void settleApprovedPredictions(); }, 15 * 60 * 1000);
+
 app.listen(PORT, () => console.log(`WinScope server running on port ${PORT}`));
