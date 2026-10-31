@@ -103,6 +103,7 @@ let autoPrematchTaskInFlight = false;
 // Not: Bu izleme durumu bellektedir; süreç yeniden başlarsa kupon yeniden gönderilince takip tekrar kurulur.
 const goalTrackedFixtures = new Map();
 const goalScoreCache = new Map();
+const goalEventCache = new Map();
 const automaticGoalSignalCache = new Map();
 const automaticLiveAlerts = [];
 let goalScanInFlight = false;
@@ -1196,6 +1197,33 @@ app.get("/api/live-goal-alerts", (_req, res) => {
   res.json({ alerts: automaticLiveAlerts.slice(0, 25), updatedAt: new Date().toISOString() });
 });
 
+// Kullanıcı yalnızca açıkça takibe aldığı canlı maçı izler.
+app.get("/api/live-tracked", (_req, res) => {
+  res.json({ tracked: [...goalTrackedFixtures.entries()].map(([fixtureId, m]) => ({ fixtureId:Number(fixtureId), ...m })) });
+});
+app.post("/api/live-track", async (req, res) => {
+  try {
+    const fixtureId = Number(req.body?.fixtureId);
+    if (!Number.isSafeInteger(fixtureId) || fixtureId <= 0) return res.status(400).json({ error:"Geçerli maç ID'si gerekli." });
+    const payload = await cachedProviderRequest(`track-fixture:${fixtureId}`, `/fixtures?id=${fixtureId}`, 5000);
+    const match = (payload.response || []).map(normalizeProviderMatch).find(m => Number(m.id) === fixtureId);
+    if (!match || match.status !== "LIVE") return res.status(400).json({ error:"Yalnızca şu anda canlı olan maç takibe alınabilir." });
+    if (goalTrackedFixtures.has(fixtureId)) {
+      goalTrackedFixtures.delete(fixtureId); goalScoreCache.delete(fixtureId); goalEventCache.delete(fixtureId);
+      return res.json({ success:true, tracked:false, fixtureId });
+    }
+    const score = `${match.homeScore}-${match.awayScore}`;
+    goalTrackedFixtures.set(fixtureId, { home:match.home, away:match.away, league:match.league, sourceLabel:"Kullanıcının takip ettiği maç", baselineScore:score, startedAt:new Date().toISOString() });
+    goalScoreCache.set(fixtureId, score);
+    // Mevcut gol olaylarını başlangıç olarak kaydet; eski goller için bildirim gönderilmesin.
+    try {
+      const events = await cachedProviderRequest(`track-events:${fixtureId}`, `/fixtures/events?fixture=${fixtureId}`, 5000);
+      goalEventCache.set(fixtureId, new Set((events.response || []).map(goalEventSignature)));
+    } catch { goalEventCache.set(fixtureId, new Set()); }
+    return res.json({ success:true, tracked:true, fixtureId, home:match.home, away:match.away, currentScore:score });
+  } catch (e) { return res.status(502).json({ error:"Maç takibe alınamadı.", detail:e.message }); }
+});
+
 app.get("/api/fixtures", async (req, res) => {
   const date = String(req.query.date || "");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "Tarih YYYY-MM-DD biçiminde olmalı." });
@@ -1387,46 +1415,83 @@ setTimeout(() => { void runAutomaticDailyCoupon(); }, 20000);
 // Otomatik canlı analiz devre dışı: yalnızca maç önü analizleri çalışır.
 setInterval(() => { void runAutomaticDailyCoupon(); }, 2 * 60 * 60 * 1000);
 
-// Her 60 saniyede canlı maç skorları kontrol edilir. İlk görülmede başlangıç skoru kaydedilir;
-// sonraki değişiklikler gerçek gol bildirimi olarak WinScope ve Telegram'a iletilir.
+// Sadece kullanıcı tarafından takibe alınmış maçlar taranır. Skor değişimi ve VAR iptali ayrı bildirilir.
+function goalEventSignature(e) {
+  return [e?.time?.elapsed ?? "", e?.team?.id ?? "", e?.player?.id ?? e?.player?.name ?? "", e?.type ?? "", e?.detail ?? "", e?.comments ?? ""].join("|");
+}
+function isCancelledGoalEvent(e) {
+  const t = `${e?.type || ""} ${e?.detail || ""} ${e?.comments || ""}`.toLowerCase();
+  return (t.includes("var") || t.includes("goal")) && /(cancel|disallow|annul|overturn|iptal|geçersiz)/i.test(t);
+}
 setInterval(async () => {
-  if (goalScanInFlight) return;
+  if (goalScanInFlight || goalTrackedFixtures.size === 0) return;
   goalScanInFlight = true;
   try {
-    const payload = await cachedProviderRequest("goalAlertLiveList", "/fixtures?live=all", 12000);
-    const liveMatches = (payload.response || []).map(normalizeProviderMatch);
-    const liveIds = new Set(liveMatches.map(m => Number(m.id)));
-    for (const match of liveMatches) {
-      const fixtureId = Number(match.id);
-      if (!fixtureId) continue;
-      const score = `${match.homeScore}-${match.awayScore}`;
-      if (!goalScoreCache.has(fixtureId)) {
-        goalScoreCache.set(fixtureId, score);
-        continue;
-      }
-      const previous = goalScoreCache.get(fixtureId);
-      if (score === previous) continue;
-      const alert = {
-        type: "goal", fixtureId, home: match.home, away: match.away, league: match.league,
-        minute: match.minute, previousScore: previous, currentScore: score,
-        title: "⚽ GOL OLDU", message: `${match.home} - ${match.away}: ${previous} → ${score}`
-      };
-      rememberLiveAlert(alert);
+    const trackedIds = [...goalTrackedFixtures.keys()].map(Number);
+    for (const fixtureId of trackedIds) {
       try {
-        await sendTelegram(`⚽ WINSCOPE GOL BİLDİRİMİ\n🏆 ${match.league || "Lig"}\n⚽ ${match.home} - ${match.away}\n📣 Skor: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}'`);
-        console.log(`[GOOOOL Alert OK] ${fixtureId} ${previous} -> ${score}`);
-      } catch (error) { console.error(`[GOOOOL Alert Error] ${fixtureId}: ${error.message}`); }
-      goalScoreCache.set(fixtureId, score);
-      const tracked = goalTrackedFixtures.get(fixtureId);
-      if (tracked) tracked.baselineScore = score;
+        const payload = await cachedProviderRequest(`tracked-live-fixture:${fixtureId}`, `/fixtures?id=${fixtureId}`, 8000);
+        const match = (payload.response || []).map(normalizeProviderMatch).find(m => Number(m.id) === fixtureId);
+        if (!match || !["LIVE", "HT", "ET", "P", "BREAK"].includes(String(match.status || "").toUpperCase())) {
+          // Takipteki maç canlı değilse otomatik bildirimleri durdur.
+          goalTrackedFixtures.delete(fixtureId); goalScoreCache.delete(fixtureId); goalEventCache.delete(fixtureId);
+          continue;
+        }
+        const previous = goalScoreCache.get(fixtureId) ?? `${match.homeScore}-${match.awayScore}`;
+        const current = `${match.homeScore}-${match.awayScore}`;
+        let cancellationAlreadyReported = false;
+        if (current !== previous) {
+          const [ph, pa] = previous.split("-").map(Number), [ch, ca] = current.split("-").map(Number);
+          const cancelledByScore = ch < ph || ca < pa;
+          cancellationAlreadyReported = cancelledByScore;
+          const alert = {
+            type: cancelledByScore ? "cancelled" : "goal", fixtureId, home:match.home, away:match.away, league:match.league,
+            minute:match.minute, previousScore:previous, currentScore:current,
+            title:cancelledByScore ? "GOL İPTAL EDİLDİ" : "Gooooool!",
+            message:cancelledByScore ? `${match.home} - ${match.away}: gol iptali, skor ${current}` : `Gooooool! ${match.home} ${current} ${match.away}`
+          };
+          rememberLiveAlert(alert);
+          const msg = cancelledByScore
+            ? `🚫 GOL İPTAL EDİLDİ
+🏆 ${match.league || "Lig"}
+⚽ ${match.home} - ${match.away}
+📣 Güncel skor: ${current}
+⏱️ Dakika: ${match.minute ?? "?"}'`
+            : `🎉 Gooooool! GOOOOOOL!
+🏆 ${match.league || "Lig"}
+⚽ ${match.home} ${current} ${match.away}
+⏱️ Dakika: ${match.minute ?? "?"}'`;
+          try { await sendTelegram(msg); console.log(`[TRACKED ${cancelledByScore ? "GOAL CANCELLED" : "GOOOOOL"}] ${fixtureId} ${previous} -> ${current}`); }
+          catch (error) { console.error(`[TRACKED GOAL Telegram Error] ${fixtureId}: ${error.message}`); }
+          goalScoreCache.set(fixtureId, current);
+          const tracked = goalTrackedFixtures.get(fixtureId); if (tracked) tracked.baselineScore = current;
+        }
+        // Olay akışından da VAR ile iptal edilen golü yakala; yalnızca yeni olaylar bildirilir.
+        try {
+          const ep = await cachedProviderRequest(`tracked-events:${fixtureId}`, `/fixtures/events?fixture=${fixtureId}`, 8000);
+          const events = ep.response || [];
+          const known = goalEventCache.get(fixtureId) || new Set();
+          for (const event of events) {
+            const sig = goalEventSignature(event);
+            if (known.has(sig)) continue;
+            known.add(sig);
+            if (isCancelledGoalEvent(event) && !cancellationAlreadyReported) {
+              const alert = { type:"cancelled", fixtureId, home:match.home, away:match.away, league:match.league, minute:event.time?.elapsed ?? match.minute, currentScore:current, title:"GOL İPTAL EDİLDİ", message:`${match.home} - ${match.away}: gol iptal edildi` };
+              rememberLiveAlert(alert);
+              try { await sendTelegram(`🚫 GOL İPTAL EDİLDİ
+🏆 ${match.league || "Lig"}
+⚽ ${match.home} - ${match.away}
+📣 Skor: ${current}
+⏱️ Dakika: ${event.time?.elapsed ?? match.minute ?? "?"}'`); }
+              catch (error) { console.error(`[GOAL CANCELLED Telegram Error] ${fixtureId}: ${error.message}`); }
+            }
+          }
+          goalEventCache.set(fixtureId, known);
+        } catch (error) { console.warn(`[TRACKED EVENTS] fixture=${fixtureId}: ${error.message}`); }
+      } catch (error) { console.warn(`[TRACKED GOAL SCAN] fixture=${fixtureId}: ${error.message}`); }
     }
-    // Maç bittiyse bellekten skor izlemesini temizle.
-    for (const fixtureId of goalScoreCache.keys()) {
-      if (!liveIds.has(Number(fixtureId))) goalScoreCache.delete(fixtureId);
-    }
-  } catch (error) {
-    console.error(`[GOOOOL Scan Error] ${error.message}`);
-  } finally { goalScanInFlight = false; }
+  } catch (error) { console.error(`[TRACKED GOAL SCAN ERROR] ${error.message}`); }
+  finally { goalScanInFlight = false; }
 }, 60_000);
 
 // Otomatik gol fırsatı taraması: her turda en fazla 6 canlı maçı inceler; böylece API kotası korunur.
@@ -1436,8 +1501,9 @@ async function runAutomaticLiveGoalAnalysis() {
   autoGoalAnalysisInFlight = true;
   try {
     const payload = await cachedProviderRequest("autoLiveGoalList", "/fixtures?live=all", 12000);
+    const trackedIds = new Set([...goalTrackedFixtures.keys()].map(Number));
     const liveMatches = (payload.response || []).map(normalizeProviderMatch)
-      .filter(m => m.id && m.status === "LIVE" && Number(m.minute) >= 10 && Number(m.minute) <= 85);
+      .filter(m => trackedIds.has(Number(m.id)) && m.id && m.status === "LIVE" && Number(m.minute) >= 10 && Number(m.minute) <= 85);
     if (!liveMatches.length) return;
     const batchSize = Math.min(6, liveMatches.length);
     const selected = [];
