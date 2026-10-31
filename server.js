@@ -891,14 +891,8 @@ async function sendCouponAutomatically(coupon, chosen) {
           } catch (error) { console.warn(`[Telegram] Tekrar kaydı saklanamadı fixture=${fixtureId}: ${error.message}`); }
         }
       }
-      const sourceLabel = coupon.type === "live" ? "Canlı en güvenilir tek tercih" : coupon.type === "surprise" ? "Maç önü sürpriz kuponu" : "Günün kuponu";
-      for (const p of (coupon.picks || [])) {
-        const fixtureId = Number(p.fixtureId);
-        if (!fixtureId) continue;
-        const score = String(p.currentScore || "0-0");
-        goalTrackedFixtures.set(fixtureId, { home: p.home, away: p.away, league: p.league, sourceLabel, baselineScore: score });
-        // Skorun başlangıç değeri otomatik canlı taramanın ilk yanıtında alınır; böylece maç önü kuponu geçmiş golleri yanlışlıkla bildirmez.
-      }
+      // Kuponda yer alan maçlar otomatik olarak gol bildirimi takibine alınmaz.
+      // Gol/skor bildirimi yalnızca kullanıcı /api/live-track üzerinden açıkça takip başlatırsa çalışır.
     }
     return result;
   } catch (error) {
