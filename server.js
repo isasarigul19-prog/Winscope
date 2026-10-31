@@ -861,9 +861,19 @@ function couponMessage(coupon) {
     lines.push(`Lig: ${p.league}`);
     if (coupon.type === "live" || p.isLive) {
       if (p.minute != null) lines.push(`Dakika: ${p.minute}' | Skor: ${p.currentScore || "—"}`);
+      if (p.source) lines.push(`Kaynak: ${p.source}`);
+      if (p.oddsBasis) lines.push(`Oran dayanağı: ${p.oddsBasis}`);
+      if (Array.isArray(p.statsSummary) && p.statsSummary.length) {
+        lines.push(`Canlı istatistik: ${p.statsSummary.join(" · ")}`);
+      }
+      if (p.marketProbability != null) lines.push(`Piyasa olasılığı: %${Number(p.marketProbability).toFixed(1)}`);
+      if (p.formSupport != null) lines.push(`Form desteği: %${Number(p.formSupport).toFixed(0)}`);
     }
     lines.push("");
   });
+  if (coupon.type === "live") {
+    lines.push("Dayanak: yalnızca maç önü oranı kullanıldı; canlı oran kullanılmadı. Son 5 maç formu + canlı şut/korner baskısı + dakika/skor penceresi ayrıca değerlendirildi.");
+  }
   return lines.join("\n");
 }
 
@@ -1364,7 +1374,14 @@ setInterval(async () => {
       const score = `${match.homeScore}-${match.awayScore}`;
       const previous = goalScoreCache.get(fixtureId) ?? tracked.baselineScore ?? score;
       if (score === previous) continue;
-      const message = `⚽ WINSCOPE GOL BİLDİRİMİ!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Skor: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}\n🎯 Takip: ${tracked.sourceLabel || "Telegram maç takibi"}`;
+      const [previousHome, previousAway] = previous.split("-").map(Number);
+      const [currentHome, currentAway] = score.split("-").map(Number);
+      // Skor düşüyorsa bu yeni gol değil, iptal edilen/geri alınan goldür.
+      const goalCancelled = currentHome < previousHome || currentAway < previousAway;
+      const alertTitle = goalCancelled
+        ? "🚫 WINSCOPE GOL İPTAL EDİLDİ!"
+        : "⚽ WINSCOPE GOOOOL!";
+      const message = `${alertTitle}\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Skor: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}\n🎯 Takip: ${tracked.sourceLabel || "Telegram canlı maç tercihi"}`;
       try {
         const sent = await sendTelegram(message);
         if (sent?.sent) {
