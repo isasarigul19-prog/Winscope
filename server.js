@@ -891,8 +891,8 @@ async function sendCouponAutomatically(coupon, chosen) {
           } catch (error) { console.warn(`[Telegram] Tekrar kaydı saklanamadı fixture=${fixtureId}: ${error.message}`); }
         }
       }
-      // Kuponda yer alan maçlar otomatik olarak gol bildirimi takibine alınmaz.
-      // Gol/skor bildirimi yalnızca kullanıcı /api/live-track üzerinden açıkça takip başlatırsa çalışır.
+      // Kuponlara giren maçlar gol bildirimi takibine otomatik eklenmez.
+      // Gol/skor/VAR bildirimi yalnızca kullanıcı /api/live-track ile açıkça takip ettiği maçlara gider.
     }
     return result;
   } catch (error) {
@@ -1409,7 +1409,7 @@ setTimeout(() => { void runAutomaticDailyCoupon(); }, 20000);
 // Otomatik canlı analiz devre dışı: yalnızca maç önü analizleri çalışır.
 setInterval(() => { void runAutomaticDailyCoupon(); }, 2 * 60 * 60 * 1000);
 
-// Sadece kullanıcı tarafından takibe alınmış maçlar taranır. Skor değişimi ve VAR iptali ayrı bildirilir.
+// Gol/skor/VAR olay bildirimi yalnızca kullanıcı tarafından takibe alınmış maçlarda çalışır. Canlı tercih taraması tüm canlı maçları tarar.
 function goalEventSignature(e) {
   return [e?.time?.elapsed ?? "", e?.team?.id ?? "", e?.player?.id ?? e?.player?.name ?? "", e?.type ?? "", e?.detail ?? "", e?.comments ?? ""].join("|");
 }
@@ -1488,16 +1488,16 @@ setInterval(async () => {
   finally { goalScanInFlight = false; }
 }, 60_000);
 
-// Otomatik gol fırsatı taraması: her turda en fazla 6 canlı maçı inceler; böylece API kotası korunur.
+// Otomatik gol fırsatı taraması: tüm canlı maç havuzunu sırayla tarar; tur başına en fazla 6 maçı inceler.
+// Gol fırsatı seçimi tüm canlı maçlar içindir; skor/gol/VAR bildirimi ise yalnızca ayrıca takip edilen maçlara gider.
 // Sinyal yalnızca gerçek oran + canlı istatistik + son 5 maç formu mevcutsa ve yeterince güçlüyse gönderilir.
 async function runAutomaticLiveGoalAnalysis() {
   if (autoGoalAnalysisInFlight) return;
   autoGoalAnalysisInFlight = true;
   try {
     const payload = await cachedProviderRequest("autoLiveGoalList", "/fixtures?live=all", 12000);
-    const trackedIds = new Set([...goalTrackedFixtures.keys()].map(Number));
     const liveMatches = (payload.response || []).map(normalizeProviderMatch)
-      .filter(m => trackedIds.has(Number(m.id)) && m.id && m.status === "LIVE" && Number(m.minute) >= 10 && Number(m.minute) <= 85);
+      .filter(m => m.id && m.status === "LIVE" && Number(m.minute) >= 10 && Number(m.minute) <= 85);
     if (!liveMatches.length) return;
     const batchSize = Math.min(6, liveMatches.length);
     const selected = [];
