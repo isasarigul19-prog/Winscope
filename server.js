@@ -1,4 +1,5 @@
 import express from "express";
+import pg from "pg";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -9,6 +10,8 @@ const API_KEY = process.env.API_FOOTBALL_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const BASE_URL = "https://v3.football.api-sports.io";
+const { Pool } = pg;
+const trackingPool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL) ? false : { rejectUnauthorized: false } }) : null;
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
 app.use(express.json({ limit: "500kb" }));
@@ -27,7 +30,7 @@ app.use(express.static(path.join(ROOT, "public")));
 const providerCache = new Map();
 const providerInFlight = new Map();
 const archives = { analyses: [], coupons: [] };
-// Otomatik canlı tercihler için sonuç takibi (bellek tabanlı; kalıcı DB henüz bağlı değil).
+// Otomatik canlı tercihler için sonuç takibi (DB varsa kalıcı, yoksa geçici bellek).
 const livePredictionRecords = new Map();
 // Aynı kuponun art arda tıklama/yenilemelerde tekrar Telegram'a gitmesini önler.
 const telegramDeliveryCache = new Map();
@@ -36,10 +39,57 @@ const autoSentFixtureKeys = new Set();
 let autoLiveTaskInFlight = false;
 let autoPrematchTaskInFlight = false;
 // Telegram'a gönderilmiş kuponlardaki maçlar için gol/skor değişimi takibi.
-// Not: Bu izleme durumu bellektedir; süreç yeniden başlarsa kupon yeniden gönderilince takip tekrar kurulur.
+// DB etkinse takip edilen maçlar sunucu yeniden başlatıldığında geri yüklenir.
 const goalTrackedFixtures = new Map();
 const goalScoreCache = new Map();
 let goalScanInFlight = false;
+
+async function persistTracking(kind, key, payload) {
+  if (!trackingPool) return false;
+  try {
+    await trackingPool.query(
+      `INSERT INTO winscope_tracking_state(kind, record_key, payload, updated_at)
+       VALUES($1,$2,$3::jsonb,NOW())
+       ON CONFLICT(kind,record_key) DO UPDATE SET payload=EXCLUDED.payload, updated_at=NOW()`,
+      [kind, String(key), JSON.stringify(payload)]
+    );
+    return true;
+  } catch (error) {
+    console.error(`[TRACKING DB SAVE] ${kind}/${key}: ${error.message}`);
+    return false;
+  }
+}
+
+async function initTrackingStorage() {
+  if (!trackingPool) {
+    console.warn('[TRACKING DB] DATABASE_URL yok; canlı takip kayıtları geçici bellekte kalacak.');
+    return;
+  }
+  try {
+    await trackingPool.query(`CREATE TABLE IF NOT EXISTS winscope_tracking_state (
+      kind TEXT NOT NULL,
+      record_key TEXT NOT NULL,
+      payload JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY(kind, record_key)
+    )`);
+    const saved = await trackingPool.query('SELECT kind, record_key, payload FROM winscope_tracking_state');
+    for (const row of saved.rows) {
+      const payload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload;
+      if (row.kind === 'goal') {
+        const fixtureId = Number(row.record_key);
+        goalTrackedFixtures.set(fixtureId, payload);
+        if (payload.baselineScore) goalScoreCache.set(fixtureId, payload.baselineScore);
+      } else if (row.kind === 'prediction') {
+        livePredictionRecords.set(row.record_key, payload);
+      }
+    }
+    console.log(`[TRACKING DB] Kalıcı kayıtlar yüklendi: takipli maç=${goalTrackedFixtures.size}, tercih=${livePredictionRecords.size}`);
+  } catch (error) {
+    console.error(`[TRACKING DB INIT] ${error.message}`);
+  }
+}
+void initTrackingStorage();
 // API-Football plan limitine takılmamak için istekleri tek kuyruktan geçir.
 // 260 ms aralık yaklaşık 231 istek/dk ile 300/dk sınırının altında kalır.
 let providerQueue = Promise.resolve();
@@ -699,7 +749,9 @@ async function sendCouponAutomatically(coupon, chosen) {
         const fixtureId = Number(p.fixtureId);
         if (!fixtureId) continue;
         const score = String(p.currentScore || "0-0");
-        goalTrackedFixtures.set(fixtureId, { home: p.home, away: p.away, league: p.league, sourceLabel, baselineScore: score });
+        const trackedRecord = { home: p.home, away: p.away, league: p.league, sourceLabel, baselineScore: score };
+        goalTrackedFixtures.set(fixtureId, trackedRecord);
+        void persistTracking('goal', fixtureId, trackedRecord);
         // Kupon üretilirken bilinen skor başlangıç kabul edilir.
         if (!goalScoreCache.has(fixtureId)) goalScoreCache.set(fixtureId, score);
       }
@@ -1021,6 +1073,8 @@ app.get("/api/live-predictions/summary", async (_req, res) => {
           record.status = won ? "won" : "lost";
           record.actualScore = `${h}-${a}`;
           record.finishedAt = new Date().toISOString();
+          const recordKey = [...livePredictionRecords.entries()].find(([, value]) => value === record)?.[0];
+          if (recordKey) void persistTracking('prediction', recordKey, record);
         }
       } catch (error) {
         console.warn(`[PREDICTION RESULT] ${record.fixtureId}: ${error.message}`);
@@ -1034,7 +1088,7 @@ app.get("/api/live-predictions/summary", async (_req, res) => {
     res.json({ total: results.length, pending, won, lost,
       winRate: settled ? Math.round(won / settled * 1000) / 10 : null,
       lossRate: settled ? Math.round(lost / settled * 1000) / 10 : null,
-      persistentStorage: false, results: results.slice(0, 100) });
+      persistentStorage: Boolean(trackingPool), results: results.slice(0, 100) });
   } catch (error) {
     res.status(500).json({ error: `Canlı tercih sonuçları okunamadı: ${error.message}` });
   }
@@ -1065,11 +1119,15 @@ async function runAutomaticLivePick() {
       const p = result.picks?.[0];
       if (p?.fixtureId && p?.market) {
         const key = `${Number(p.fixtureId)}:${p.market}:${p.minute ?? ""}:${p.currentScore ?? ""}`;
-        if (!livePredictionRecords.has(key)) livePredictionRecords.set(key, {
-          fixtureId: Number(p.fixtureId), home: p.home, away: p.away, league: p.league,
-          market: p.market, scoreAtSignal: p.currentScore || "0-0", minute: p.minute ?? null,
-          status: "pending", actualScore: null, createdAt: new Date().toISOString()
-        });
+        if (!livePredictionRecords.has(key)) {
+          const record = {
+            fixtureId: Number(p.fixtureId), home: p.home, away: p.away, league: p.league,
+            market: p.market, scoreAtSignal: p.currentScore || "0-0", minute: p.minute ?? null,
+            status: "pending", actualScore: null, createdAt: new Date().toISOString()
+          };
+          livePredictionRecords.set(key, record);
+          void persistTracking('prediction', key, record);
+        }
       }
       console.log(`[AUTO LIVE] Telegram'a tek canlı tercih gönderildi: ${p?.home} - ${p?.away}`);
     } else {
@@ -1125,6 +1183,7 @@ setInterval(async () => {
         if (sent.sent) {
           goalScoreCache.set(fixtureId, score);
           tracked.baselineScore = score;
+          void persistTracking('goal', fixtureId, tracked);
           console.log(`[GOOOOL Alert OK] ${fixtureId} ${previous} -> ${score}`);
         }
       } catch (error) {
@@ -1138,4 +1197,4 @@ setInterval(async () => {
   }
 }, 60_000);
 
-app.listen(PORT, () => console.log(`WinScope server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`WinScope server running on port ${PORT}; tracking DB=${trackingPool ? "enabled" : "missing DATABASE_URL"}`));
