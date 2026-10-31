@@ -389,7 +389,7 @@ function marketProbabilitiesByName(oddsRow) {
 function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, prematchOddsRow = null) {
   const hNow = Number(fixture.homeScore || 0), aNow = Number(fixture.awayScore || 0);
   const live = fixture.status === "LIVE";
-  if (fixture.status === "FT") return { halfTimeScore: `${fixture.htHomeScore ?? "?"}-${fixture.htAwayScore ?? "?"}`, fullTimeScore: `${hNow}-${aNow}`, scoreBasis: "Gerçekleşen skor" };
+  if (fixture.status === "FT") return { halfTimeScore: `${fixture.htHomeScore ?? "?"}-${fixture.htAwayScore ?? "?"}`, fullTimeScore: `${hNow}-${aNow}`, alternativeFullTimeScore: "—", scoreBasis: "Gerçekleşen skor" };
 
   // Oran verisi, form verisi eksik olsa bile skor tahmininde kullanılabilir.
   // Piyasa ana kaynak; son 5 maç formu yalnızca destekleyici ağırlık alır.
@@ -477,15 +477,20 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
 
   // Olası skorları bağımsız Poisson dağılımıyla sıralar; canlıda gerçekleşen skoru korur.
   const pmf = (k, lambda) => Math.exp(-lambda) * Math.pow(lambda, k) / factorial(k);
-  let best = null;
+  const scoreCandidates = [];
   const maxExtra = 8; // 2-4 / 4-2 gibi yüksek skorlu senaryoları da değerlendirebilmek için.
   for (let gh = 0; gh <= maxExtra; gh++) for (let ga = 0; ga <= maxExtra; ga++) {
     const probability = pmf(gh, Math.max(0.01, lambdaHome)) * pmf(ga, Math.max(0.01, lambdaAway));
     const finalH = live ? hNow + gh : gh;
     const finalA = live ? aNow + ga : ga;
-    if (!best || probability > best.probability) best = { finalH, finalA, probability };
+    scoreCandidates.push({ finalH, finalA, probability });
   }
+  scoreCandidates.sort((a, b) => b.probability - a.probability);
+  const best = scoreCandidates[0] || null;
+  // Alternatif skor, en yüksek olasılıklı skordan farklı olan ikinci olasılık senaryosudur.
+  const alternativeBest = scoreCandidates.find(x => best && (x.finalH !== best.finalH || x.finalA !== best.finalA)) || null;
   const fullTimeScore = best ? `${best.finalH}-${best.finalA} (tahmin)` : "Skor tahmini hesaplanamadı";
+  const alternativeFullTimeScore = alternativeBest ? `${alternativeBest.finalH}-${alternativeBest.finalA} (alternatif tahmin)` : "Alternatif skor hesaplanamadı";
   let halfTimeScore;
   if (live && minute >= 45 && fixture.htHomeScore != null && fixture.htAwayScore != null) halfTimeScore = `${fixture.htHomeScore}-${fixture.htAwayScore} (Gerçek)`;
   else if (live && minute < 45) {
@@ -499,7 +504,7 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     : hasPreGoalMarket
       ? (hasForm ? "Maç önü gol oranları (%85) + son 5 maç formu (%15)" : "Maç önü gol oranları; form verisi mevcut değil")
       : "Son 5 maç formu; kullanılabilir gol oranı bulunamadı";
-  return { halfTimeScore, fullTimeScore, scoreBasis: basis, scoreProbability: best ? Number(best.probability.toFixed(4)) : null };
+  return { halfTimeScore, fullTimeScore, alternativeFullTimeScore, scoreBasis: basis, scoreProbability: best ? Number(best.probability.toFixed(4)) : null, alternativeScoreProbability: alternativeBest ? Number(alternativeBest.probability.toFixed(4)) : null };
 }
 
 function analysisPercentages(oddsRow, homeForm, awayForm) {
@@ -1129,6 +1134,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       analysisMode: "PREMATCH_ONLY",
       halfTimeScore: scores.halfTimeScore,
       fullTimeScore: scores.fullTimeScore,
+      alternativeFullTimeScore: scores.alternativeFullTimeScore || "Alternatif skor hesaplanamadı",
       scoreBasis: scores.scoreBasis || "Maç önü oranları ve erişilebilen son 5 maç formu",
       mainPick: chosen?.market || "Maç önü oranlarından doğrulanmış tercih bulunamadı",
       alternative: alternative?.market || "Doğrulanmış alternatif bulunamadı",

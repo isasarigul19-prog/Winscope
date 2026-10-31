@@ -97,6 +97,7 @@ async function analyze(id){
    <tr><td>Analiz türü</td><td>Maç önü oranları (canlı oran yok)</td></tr>
    <tr><td>İY SKOR TAHMİNİ</td><td>${esc(j.halfTimeScore)}</td></tr>
    <tr><td>MS SKOR TAHMİNİ</td><td>${esc(j.fullTimeScore)}</td></tr>
+   <tr><td>ALTERNATİF SKOR</td><td>${esc(j.alternativeFullTimeScore||'Alternatif skor hesaplanamadı')}</td></tr>
    <tr><td>ANA TERCİH</td><td>${esc(j.mainPick)}</td></tr>
    <tr><td>ALTERNATİF</td><td>${esc(j.alternative)}</td></tr>
    <tr><td>CANLI TERCİH</td><td>Devre dışı</td></tr>
