@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WinScope Live</title>
 <style>
-:root{--bg:#04191e;--p:#08272d;--p2:#0c343b;--line:#15505a;--t:#f1fbfc;--m:#9bb9bf;--pink:#ff2f63;--green:#42e6a0;--amber:#ffd04a;--gray:#7f9da3}
+:root{--bg:#04191e;--p:#08272d;--p2:#0c343b;--line:#15505a;--t:#f1fbfc;--m:#9bb9bf;--pink:#ff2f63;--green:#42e6a0}
 *{box-sizing:border-box}body{margin:0;background:linear-gradient(155deg,#031419,#073038 65%,#04191e);color:var(--t);font:14px system-ui,sans-serif}
 header{padding:16px;max-width:1050px;margin:auto;display:flex;justify-content:space-between;border-bottom:1px solid var(--line)}
 .logo{font-weight:950;letter-spacing:.08em;font-size:25px}.logo span{font-size:13px;color:var(--pink);margin-left:4px;font-weight:700}
@@ -22,6 +22,7 @@ button{cursor:pointer}.primary,.active{background:var(--pink);border-color:var(-
 .table td:first-child{border-left:1px solid var(--line);border-radius:9px 0 0 9px;color:var(--m)}
 .table td:last-child{border-right:1px solid var(--line);border-radius:0 9px 9px 0;font-weight:800}
 .hidden{display:none!important}.empty{padding:18px;text-align:center;color:var(--m)}.err{color:#ff9baa}
+#matchSearch{flex:1;min-width:180px}
 </style>
 </head>
 <body>
@@ -40,13 +41,24 @@ button{cursor:pointer}.primary,.active{background:var(--pink);border-color:var(-
     <select id="filter"><option value="all">Tüm maçlar</option><option value="live">Canlı</option></select>
   </div>
 
+  <!-- MAÇ ARAMA PANELİ -->
+  <section class="panel" id="matchSearchPanel">
+    <h3 style="margin:2px 0 8px">🔎 1’e 1 MAÇ ARA</h3>
+    <div class="toolbar" style="margin:0">
+      <input id="matchSearch" type="search" placeholder="Takım adı: Fenerbahçe, Barcelona…">
+      <button id="searchMatch" class="primary">Maç Ara</button>
+      <button id="clearMatchSearch">Temizle</button>
+    </div>
+    <div id="matchSearchResult" class="small" style="margin-top:8px">Aramak için takım adını yaz.</div>
+  </section>
+
   <!-- KUPON PANELİ -->
   <section class="panel" id="couponPanel">
     <h3 style="margin:2px 0 10px">🎯 WINSCOPE KUPONLARI</h3>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <button id="makeCoupon" class="primary">⚽ Maç Önü Kuponu (En az 2 maç)</button>
-      <button id="makeSurpriseCoupon">🎲 10 Maçlık Kupon</button>
-      <button id="makeLiveBest" style="background:#42e6a0;color:#04191e;font-weight:900;border:none">⚡ Canlı En Güvenilir Tek Tercih</button>
+      <button id="makeCoupon" class="primary">⚽ Maç Önü Kuponu</button>
+      <button id="makeSurpriseCoupon">🎲 10 Maçlık Sürpriz</button>
+      <button id="makeLiveBest" style="background:#42e6a0;color:#04191e;font-weight:900;border:none">⚡ Canlı Tek Tercih</button>
     </div>
     <div id="couponResult" class="small" style="margin-top:12px"></div>
   </section>
@@ -56,8 +68,7 @@ button{cursor:pointer}.primary,.active{background:var(--pink);border-color:var(-
 </main>
 <script>
 const $=x=>document.getElementById(x);
-let matches=[];
-
+let matches=[],bulletinMatches=[];
 function esc(x){return String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 
 function card(m){
@@ -75,7 +86,7 @@ async function live(){
     matches=j.matches||[];
     $('conn').textContent='SUNUCU BAĞLI';
     $('matches').innerHTML=matches.length?matches.map(card).join(''):'<div class="empty">Canlı maç yok.</div>';
-  }catch(e){$('conn').textContent='HATA';}
+  }catch{ $('conn').textContent='HATA'; }
 }
 
 async function bulletin(){
@@ -83,14 +94,34 @@ async function bulletin(){
   if(!d)return;
   try{
     let r=await fetch('/api/fixtures?date='+encodeURIComponent(d)),j=await r.json();
-    matches=j.matches||[];
-    $('matches').innerHTML=matches.length?matches.map(card).join(''):'<div class="empty">Maç bulunamadı.</div>';
-  }catch(e){$('matches').innerHTML='<div class="empty err">Bülten yüklenemedi.</div>';}
+    bulletinMatches=j.matches||[];
+    $('matches').innerHTML=bulletinMatches.length?bulletinMatches.map(card).join(''):'<div class="empty">Maç bulunamadı.</div>';
+  }catch{ $('matches').innerHTML='<div class="empty err">Bülten yüklenemedi.</div>'; }
+}
+
+async function searchMatch(){
+  const q=$('matchSearch').value.trim().toLocaleLowerCase('tr-TR');
+  const out=$('matchSearchResult');
+  if(!q){out.innerHTML='<span class="err">Önce takım adı yaz.</span>';return;}
+  const d=$('date').value;
+  if(!d){out.innerHTML='<span class="err">Önce tarih seç.</span>';return;}
+  out.textContent='Aranıyor…';
+  try{
+    if(!bulletinMatches.length){
+      let r=await fetch('/api/fixtures?date='+encodeURIComponent(d));
+      let j=await r.json();
+      bulletinMatches=j.matches||[];
+    }
+    const found=bulletinMatches.filter(m=>`${m.home||''} ${m.away||''}`.toLocaleLowerCase('tr-TR').includes(q));
+    if(!found.length){out.textContent='Eşleşen maç bulunamadı.';return;}
+    $('matches').innerHTML=found.map(card).join('');
+    out.textContent=`${found.length} maç bulundu.`;
+  }catch(e){out.innerHTML=`<span class="err">${esc(e.message)}</span>`;}
 }
 
 async function analyze(id){
   let box=$('a'+id);
-  box.innerHTML='<div class="empty">Analiz çıkartılıyor…</div>';
+  box.innerHTML='<div class="empty">Bet365 / Oranlar taranıyor…</div>';
   try{
     let r=await fetch(`/api/match/${id}/analyze`),j=await r.json();
     box.innerHTML=`<table class="table">
@@ -115,38 +146,20 @@ async function analyze(id){
 
 function renderCoupon(d){
   const box=$('couponResult');
-  if(d.status==='ERROR'||d.error){box.innerHTML=`<div class="err"><b>${esc(d.error||'Kupon oluşturulamadı.')}</b></div>`;return;}
-  if(!d.picks||!d.picks.length){box.innerHTML=`<div class="err"><b>Yeterli maç bulunamadı.</b></div>`;return;}
-  box.innerHTML=`<div class="head"><span>Kupon Türü: <b>${esc(d.type.toUpperCase())}</b></span><span><b>TELEGRAM GÖNDERİLDİ</b></span></div>
+  if(d.status==='ERROR'||d.error){box.innerHTML=`<div class="err"><b>Kupon oluşturulamadı.</b></div>`;return;}
+  if(!d.picks||!d.picks.length){box.innerHTML=`<div class="err"><b>Yeterli maç yok.</b></div>`;return;}
+  box.innerHTML=`<div class="head"><span>Kupon: <b>${esc(d.type.toUpperCase())}</b></span><span><b>GÖNDERİLDİ</b></span></div>
   <div style="margin:10px 0">${d.picks.map(p=>`<div style="padding:6px;border-bottom:1px solid var(--line)"><b>${esc(p.home)} vs ${esc(p.away)}</b> — Tercih: <u>${esc(p.market)}</u></div>`).join('')}</div>`;
-}
-
-async function makeCoupon(){
-  try{
-    let r=await fetch('/api/coupon/best?date='+encodeURIComponent($('date').value));
-    renderCoupon(await r.json());
-  }catch(e){$('couponResult').innerHTML=`<span class="err">${esc(e.message)}</span>`;}
-}
-
-async function makeSurpriseCoupon(){
-  try{
-    let r=await fetch('/api/coupon/surprise?date='+encodeURIComponent($('date').value));
-    renderCoupon(await r.json());
-  }catch(e){$('couponResult').innerHTML=`<span class="err">${esc(e.message)}</span>`;}
-}
-
-async function makeLiveBest(){
-  try{
-    let r=await fetch('/api/coupon/live-best');
-    renderCoupon(await r.json());
-  }catch(e){$('couponResult').innerHTML=`<span class="err">${esc(e.message)}</span>`;}
 }
 
 $('refresh').onclick=live;
 $('bulletin').onclick=bulletin;
-$('makeCoupon').onclick=makeCoupon;
-$('makeSurpriseCoupon').onclick=makeSurpriseCoupon;
-$('makeLiveBest').onclick=makeLiveBest;
+$('searchMatch').onclick=searchMatch;
+$('matchSearch').addEventListener('keydown',e=>{if(e.key==='Enter')searchMatch();});
+$('clearMatchSearch').onclick=()=>{ $('matchSearch').value=''; $('matchSearchResult').textContent='Aramak için takım adını yaz.'; };
+$('makeCoupon').onclick=async()=>renderCoupon(await (await fetch('/api/coupon/best?date='+$('date').value)).json());
+$('makeSurpriseCoupon').onclick=async()=>renderCoupon(await (await fetch('/api/coupon/surprise?date='+$('date').value)).json());
+$('makeLiveBest').onclick=async()=>renderCoupon(await (await fetch('/api/coupon/live-best')).json());
 
 let d=new Date();
 $('date').value=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
