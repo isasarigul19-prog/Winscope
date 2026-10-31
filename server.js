@@ -449,6 +449,44 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   };
   lambdaHome=Math.max(0.08,Math.min(4.5,lambdaHome)); lambdaAway=Math.max(0.08,Math.min(4.5,lambdaAway));
   const pmf=(k,l)=>Math.exp(-l)*Math.pow(l,k)/factorial(k);
+
+  // Calibrate score lambdas against the full pre-match 1X2 market, including draw.
+  // Previously the draw probability was ignored when splitting home/away strength,
+  // which can systematically overproduce 1-1 for otherwise home-favoured fixtures.
+  // Search is deliberately bounded and keeps total-goal/team-goal markets as anchors.
+  if (outcome && [outcome.home, outcome.draw, outcome.away].every(Number.isFinite)) {
+    const target = { home: outcome.home / 100, draw: outcome.draw / 100, away: outcome.away / 100 };
+    const targetTotal = marketTotalLambda;
+    const poissonVector = (lambda, max = 10) => {
+      const v = Array(max + 1).fill(0);
+      for (let k = 0; k <= max; k++) v[k] = pmf(k, lambda);
+      return v;
+    };
+    const marketOutcome = (lh, la) => {
+      const hp = poissonVector(lh), ap = poissonVector(la);
+      let home = 0, draw = 0, away = 0;
+      for (let h = 0; h < hp.length; h++) for (let a = 0; a < ap.length; a++) {
+        const p = hp[h] * ap[a];
+        if (h > a) home += p; else if (h === a) draw += p; else away += p;
+      }
+      const sum = home + draw + away || 1;
+      return { home: home / sum, draw: draw / sum, away: away / sum };
+    };
+    const baseHome = lambdaHome, baseAway = lambdaAway;
+    let bestFit = Infinity, calibratedHome = lambdaHome, calibratedAway = lambdaAway;
+    for (let h = 0.1; h <= 4.5001; h += 0.1) for (let a = 0.1; a <= 4.5001; a += 0.1) {
+      const predicted = marketOutcome(h, a);
+      const outcomeError = (predicted.home-target.home)**2 + (predicted.draw-target.draw)**2 + (predicted.away-target.away)**2;
+      const totalError = targetTotal == null ? 0 : (h+a-targetTotal)**2;
+      const homeMarketError = marketHomeLambda == null ? 0 : (h-marketHomeLambda)**2;
+      const awayMarketError = marketAwayLambda == null ? 0 : (a-marketAwayLambda)**2;
+      const baselineError = (h-baseHome)**2 + (a-baseAway)**2;
+      const fit = 2.4*outcomeError + 0.16*totalError + 0.12*(homeMarketError+awayMarketError) + 0.08*baselineError;
+      if (fit < bestFit) { bestFit = fit; calibratedHome = h; calibratedAway = a; }
+    }
+    lambdaHome = calibratedHome;
+    lambdaAway = calibratedAway;
+  }
   const scores=[];
   for(let h=0;h<=8;h++) for(let a=0;a<=8;a++) scores.push({home:h,away:a,probability:pmf(h,lambdaHome)*pmf(a,lambdaAway)});
   scores.sort((a,b)=>b.probability-a.probability||(a.home+a.away)-(b.home+b.away)||b.home-a.home);
