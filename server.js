@@ -656,7 +656,33 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   const predictedScores = scorePrediction(fixture, h, a, useLiveOdds ? oddsRow : null, prematchOddsRow || (!live ? oddsRow : null) || null);
   const mergedMarketRows = (useLiveOdds ? liveMarketRows : preMarkets)
     .map(x => ({ ...x, oddsTiming: useLiveOdds ? "live" : "prematch" }));
-  const choices = mergedMarketRows.filter(x => allowed.includes(x.market) && x.market !== excludeMarket && marketConsistentWithScore(x.market, predictedScores));
+
+  // If the ideal minute/score market is absent from the live bookmaker feed,
+  // consider a narrow fallback set of REAL live markets instead of rejecting every match.
+  // Never use MS 0.5 as a generic fallback: it can be extremely short-priced and misleading.
+  let effectiveAllowed = allowed;
+  if (live && useLiveOdds) {
+    const available = new Set(mergedMarketRows.map(x => x.market));
+    const hasPrimaryMarket = allowed.some(m => available.has(m));
+    if (!hasPrimaryMarket) {
+      if (minute < 33 && total === 0) effectiveAllowed = ["MS 1.5 ÜST"];
+      else if (minute < 33 && total === 1) effectiveAllowed = ["MS 1.5 ÜST", "KG VAR"];
+      else if (minute < 45) effectiveAllowed = total <= 1 ? ["MS 1.5 ÜST", "KG VAR"] : ["MS 2.5 ÜST", "KG VAR"];
+      else if (total === 0) effectiveAllowed = ["MS 1.5 ÜST"];
+      else if (total === 1) effectiveAllowed = ["MS 1.5 ÜST", "KG VAR", "MS 2.5 ÜST"];
+      else effectiveAllowed = ["MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
+    }
+  }
+  const liveMarketStillOpen = market => {
+    if (!live) return true;
+    if (market.startsWith("İY ") && minute >= 45) return false;
+    if (market === "KG VAR" && Number(fixture.homeScore || 0) > 0 && Number(fixture.awayScore || 0) > 0) return false;
+    const line = Number(String(market).match(/(\d)[.,](\d)/)?.[0]?.replace(",", ".") || 0);
+    if (market.startsWith("MS ") && line > 0 && total >= Math.ceil(line)) return false;
+    return true;
+  };
+  const choices = mergedMarketRows.filter(x => effectiveAllowed.includes(x.market) && x.market !== excludeMarket &&
+    liveMarketStillOpen(x.market) && (live || marketConsistentWithScore(x.market, predictedScores)));
   const statsM = stats || { available: false, pressure: 0, home: {}, away: {} };
   const favorite = (() => {
     const winners = preMarkets.filter(x => x.market === "MS 1");
@@ -746,9 +772,14 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
         }
       }
 
-      // 0-0 / 1-0 senaryolarında erken-orta canlı: baskı eşiği.
+      // 0-0 / 1-0 senaryolarında erken-orta canlı: baskı ve fiyat eşiği.
       if (minute >= 55 && minute <= 65 && total === 0 && choice.market === "MS 0.5 ÜST" && statsM.pressure < 5.5) return null;
       if (minute >= 20 && minute < 33 && total === 0 && choice.market === "İY 0.5 ÜST" && statsM.pressure < 4) return null;
+      // Fallback MS 1.5 at 0-0 is permitted only with live market support and meaningful pressure.
+      if (minute < 45 && total === 0 && choice.market === "MS 1.5 ÜST") {
+        if (Number(choice.odd || 0) < 1.50 || Number(choice.probability || 0) < 60 || Number(choice.probability || 0) > 82) return null;
+        if (Number(statsM.pressure || 0) < 8 || (Number(statsM.shotsOnTarget || 0) < 2 && Number(statsM.totalShots || 0) < 8)) return null;
+      }
 
       // Genel baskı bonusu (isabetli şut ağırlıklı).
       liveBonus += Math.min(16, statsM.pressure * 0.28);
