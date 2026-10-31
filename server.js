@@ -298,10 +298,20 @@ function scorePrediction(match, homeForm, awayForm, odds, liveStats) {
   }
   const over25 = marketProbability(odds, "MS 2.5");
   if (over25 !== null) {
-    const currentExpected = lambdaHome + lambdaAway;
-    const target = Math.max(1.0, Math.min(4.0, 1.0 + over25 * 3.0));
-    const scale = Math.max(0.75, Math.min(1.25, target / Math.max(0.5, currentExpected)));
-    lambdaHome *= scale; lambdaAway *= scale;
+    // Calibrate total expected goals against the market's no-vig O/U 2.5 probability.
+    // For a Poisson total, P(3+ goals) = 1 - e^-L * (1 + L + L^2/2).
+    const probabilityOver25 = totalLambda => 1 - Math.exp(-totalLambda) * (1 + totalLambda + (totalLambda * totalLambda) / 2);
+    let low = 0.2, high = 6.0;
+    for (let i = 0; i < 45; i++) {
+      const mid = (low + high) / 2;
+      if (probabilityOver25(mid) < over25) low = mid;
+      else high = mid;
+    }
+    const targetTotal = (low + high) / 2;
+    const currentTotal = Math.max(0.3, lambdaHome + lambdaAway);
+    const scale = Math.max(0.55, Math.min(1.8, targetTotal / currentTotal));
+    lambdaHome *= scale;
+    lambdaAway *= scale;
   }
   const btts = bttsProbability(odds);
   if (btts !== null) {
@@ -348,19 +358,29 @@ function scorePrediction(match, homeForm, awayForm, odds, liveStats) {
   }
 
   const total = ftH + ftA, both = ftH > 0 && ftA > 0;
+  const over15 = marketProbability(odds, "MS 1.5");
+  const over35 = marketProbability(odds, "MS 3.5");
+  const bttsMarket = bttsProbability(odds);
   let mainPick, alternative;
-  if (total >= 4) {
-    mainPick = "MS 2.5 ÜST";
-    alternative = both ? "KG VAR" : "MS 3.5 ÜST";
-  } else if (total === 3) {
-    mainPick = "MS 2.5 ÜST";
-    alternative = both ? "KG VAR" : "MS 3.5 ALT";
-  } else if (total === 2) {
-    mainPick = "MS 1.5 ÜST";
-    alternative = both ? "KG VAR" : "MS 2.5 ALT";
+
+  // Main/alternative picks use market-implied probabilities when both sides exist;
+  // scoreline is still the model's most likely exact score, not a forced pick label.
+  if (over25 !== null) {
+    mainPick = over25 >= 0.52 ? "MS 2.5 ÜST" : "MS 2.5 ALT";
+  } else if (over15 !== null) {
+    mainPick = over15 >= 0.62 ? "MS 1.5 ÜST" : "MS 1.5 ALT";
   } else {
-    mainPick = "MS 2.5 ALT";
-    alternative = total === 1 ? "MS 0.5 ÜST" : "MS 1.5 ALT";
+    mainPick = total >= 3 ? "MS 2.5 ÜST" : "MS 2.5 ALT";
+  }
+
+  if (bttsMarket !== null && Math.abs(bttsMarket - 0.5) >= 0.04) {
+    alternative = bttsMarket >= 0.54 ? "KG VAR" : "KG YOK";
+  } else if (over15 !== null && Math.abs(over15 - 0.5) >= 0.08) {
+    alternative = over15 >= 0.58 ? "MS 1.5 ÜST" : "MS 1.5 ALT";
+  } else if (over35 !== null && Math.abs(over35 - 0.5) >= 0.08) {
+    alternative = over35 >= 0.58 ? "MS 3.5 ÜST" : "MS 3.5 ALT";
+  } else {
+    alternative = both ? "KG VAR" : (total >= 2 ? "MS 2.5 ALT" : "MS 1.5 ALT");
   }
 
   let livePick = "Maç önü analizi";
