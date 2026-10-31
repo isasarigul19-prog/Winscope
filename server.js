@@ -238,15 +238,25 @@ function factorial(n) { let out = 1; for (let i = 2; i <= n; i++) out *= i; retu
 
 function scorePrediction(match, homeForm, awayForm) {
   const hNow = Number(match.homeScore || 0), aNow = Number(match.awayScore || 0);
+  const currentTotal = hNow + aNow;
   const live = match.status === "LIVE";
-  if (match.status === "FT") return { halfTimeScore: `${match.htHomeScore ?? "?"}-${match.htAwayScore ?? "?"}`, fullTimeScore: `${hNow}-${aNow}`, mainPick: "Maç Bitti", alternative: "Maç Bitti", livePick: "Maç Bitti" };
+  
+  if (match.status === "FT") {
+    return { 
+      halfTimeScore: `${match.htHomeScore ?? "?"}-${match.htAwayScore ?? "?"}`, 
+      fullTimeScore: `${hNow}-${aNow}`, 
+      mainPick: "Maç Bitti", 
+      alternative: "Maç Bitti", 
+      livePick: "Maç Bitti" 
+    };
+  }
 
   let lambdaHome = homeForm?.available ? (homeForm.avgGoalsFor + (awayForm?.avgGoalsAgainst || 1)) / 2 : 1.35;
   let lambdaAway = awayForm?.available ? (awayForm.avgGoalsFor + (homeForm?.avgGoalsAgainst || 1)) / 2 : 1.05;
 
   if (live) {
     const minute = Math.max(1, Math.min(90, Number(match.minute || 0)));
-    const remainRatio = Math.max(0.15, (90 - minute) / 90);
+    const remainRatio = Math.max(0.10, (90 - minute) / 90);
     lambdaHome *= remainRatio;
     lambdaAway *= remainRatio;
   }
@@ -260,33 +270,41 @@ function scorePrediction(match, homeForm, awayForm) {
     }
   }
 
-  const ftH = live ? hNow + bestH : bestH;
-  const ftA = live ? aNow + bestA : bestA;
+  const forecastAdditionalHome = bestH;
+  const forecastAdditionalAway = bestA;
+  const forecastAdditionalTotal = forecastAdditionalHome + forecastAdditionalAway;
+
+  const ftH = live ? hNow + forecastAdditionalHome : forecastAdditionalHome;
+  const ftA = live ? aNow + forecastAdditionalAway : forecastAdditionalAway;
+  const totalGoalsForecast = ftH + ftA;
+
   const htH = live && match.minute >= 45 ? (match.htHomeScore ?? hNow) : Math.min(ftH, Math.round(ftH * 0.45));
   const htA = live && match.minute >= 45 ? (match.htAwayScore ?? aNow) : Math.min(ftA, Math.round(ftA * 0.45));
 
-  const totalGoalsForecast = ftH + ftA;
   const isBtts = ftH > 0 && ftA > 0;
 
   let mainPick, alternative, livePick;
 
+  // %100 TAM UYUMLU TERCIH MOTORU
   if (totalGoalsForecast >= 3) {
     mainPick = "MS 2.5 ÜST";
     alternative = isBtts ? "KG VAR" : "MS 3.5 ÜST";
   } else if (totalGoalsForecast === 2) {
     mainPick = "MS 1.5 ÜST";
-    alternative = isBtts ? "KG VAR" : "MS 2.5 ÜST (Sınır)";
+    alternative = isBtts ? "KG VAR" : "MS 2.5 ALT";
+  } else if (totalGoalsForecast === 1) {
+    mainPick = "MS 0.5 ÜST";
+    alternative = "MS 1.5 ALT";
   } else {
-    mainPick = "MS 1.5 ÜST";
-    alternative = "MS 0.5 ÜST";
+    mainPick = "MS 1.5 ALT";
+    alternative = "MS 2.5 ALT";
   }
 
   if (live) {
-    const currentTotal = hNow + aNow;
-    if (totalGoalsForecast > currentTotal) {
-      livePick = `MS ${currentTotal + 1}.5 ÜST`;
+    if (forecastAdditionalTotal > 0) {
+      livePick = `MS ${currentTotal + 0.5} ÜST (Kalan Sürede Gol)`;
     } else {
-      livePick = currentTotal === 0 ? "İY 0.5 ÜST" : "MS " + currentTotal + ".5 ÜST";
+      livePick = `MS ${currentTotal + 0.5} ALT (Sessiz Bitiş)`;
     }
   } else {
     livePick = "Maç Önü Oran Analizi";
