@@ -234,9 +234,40 @@ async function fetchTeamRecentForm(teamId, fixtureId) {
   }
 }
 
+async function fetchLiveStatistics(fixtureId) {
+  if (!fixtureId) return null;
+  try {
+    const payload = await cachedProviderRequest(`stats:${fixtureId}`, `/fixtures/statistics?fixture=${fixtureId}`, 15000);
+    const stats = payload.response || [];
+    if (!stats.length) return null;
+    
+    const parseStat = (teamStats) => {
+      const getVal = (type) => {
+        const found = (teamStats.statistics || []).find(s => s.type.toLowerCase().includes(type.toLowerCase()));
+        return Number(found?.value ?? 0);
+      };
+      return {
+        shotsTotal: getVal("Total Shots"),
+        shotsOn: getVal("Shots on Goal"),
+        possession: Number(String(getVal("Ball Possession") || "50").replace('%','')),
+        fouls: getVal("Fouls"),
+        corners: getVal("Corner Kicks")
+      };
+    };
+
+    return {
+      home: parseStat(stats[0] || {}),
+      away: parseStat(stats[1] || {})
+    };
+  } catch {
+    return null;
+  }
+}
+
 function factorial(n) { let out = 1; for (let i = 2; i <= n; i++) out *= i; return out; }
 
-function scorePrediction(match, homeForm, awayForm) {
+// 🟢 KUSURSUZ SKOR VE KESİN UYUMLU TERCİH MOTORU
+function scorePrediction(match, homeForm, awayForm, liveStats) {
   const hNow = Number(match.homeScore || 0), aNow = Number(match.awayScore || 0);
   const live = match.status === "LIVE";
   if (match.status === "FT") return { halfTimeScore: `${match.htHomeScore ?? "?"}-${match.htAwayScore ?? "?"}`, fullTimeScore: `${hNow}-${aNow}`, mainPick: "Maç Bitti", alternative: "Maç Bitti", livePick: "Maç Bitti" };
@@ -249,6 +280,12 @@ function scorePrediction(match, homeForm, awayForm) {
     const remainRatio = Math.max(0.15, (90 - minute) / 90);
     lambdaHome *= remainRatio;
     lambdaAway *= remainRatio;
+
+    // Canlı istatistikler varsa modele baskı/şut etkisi ekle
+    if (liveStats) {
+      if (liveStats.home.shotsOn > liveStats.away.shotsOn) lambdaHome *= 1.15;
+      else if (liveStats.away.shotsOn > liveStats.home.shotsOn) lambdaAway *= 1.15;
+    }
   }
 
   const pmf = (k, l) => Math.exp(-l) * Math.pow(l, k) / factorial(k);
@@ -268,16 +305,19 @@ function scorePrediction(match, homeForm, awayForm) {
   const totalGoalsForecast = ftH + ftA;
   const isBtts = ftH > 0 && ftA > 0;
 
+  // 🟢 KESİN KURAL: Tahmin edilen skora göre tercihler matematiksel olarak kilitlenir!
   let mainPick, alternative, livePick;
 
   if (totalGoalsForecast >= 3) {
     mainPick = "MS 2.5 ÜST";
     alternative = isBtts ? "KG VAR" : "MS 3.5 ÜST";
   } else if (totalGoalsForecast === 2) {
+    // Örn: 1-1 veya 2-0 skoru için ASLA 2.5 üst verilmez!
     mainPick = "MS 1.5 ÜST";
-    alternative = isBtts ? "KG VAR" : "MS 2.5 ÜST (Sınır)";
+    alternative = isBtts ? "KG VAR" : "MS 2.5 ALT";
   } else {
-    mainPick = "MS 1.5 ÜST";
+    // 1 gol veya 0 gol bekleniyorsa
+    mainPick = "MS 1.5 ALT";
     alternative = "MS 0.5 ÜST";
   }
 
@@ -286,7 +326,7 @@ function scorePrediction(match, homeForm, awayForm) {
     if (totalGoalsForecast > currentTotal) {
       livePick = `MS ${currentTotal + 1}.5 ÜST`;
     } else {
-      livePick = currentTotal === 0 ? "İY 0.5 ÜST" : "MS " + currentTotal + ".5 ÜST";
+      livePick = currentTotal === 0 ? "İY 0.5 ÜST" : `MS ${currentTotal}.5 ALT (Sessiz Bitiş)`;
     }
   } else {
     livePick = "Maç Önü Oran Analizi";
@@ -325,11 +365,12 @@ async function createCouponByMode(date, mode = "prematch") {
   const picks = [];
   const limit = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
   for (const m of matches.slice(0, limit)) {
-    const [hForm, aForm] = await Promise.all([
+    const [hForm, aForm, liveStats] = await Promise.all([
       fetchTeamRecentForm(m.homeId, m.id),
-      fetchTeamRecentForm(m.awayId, m.id)
+      fetchTeamRecentForm(m.awayId, m.id),
+      m.status === "LIVE" ? fetchLiveStatistics(m.id) : null
     ]);
-    const dynamicScores = scorePrediction(m, hForm, aForm);
+    const dynamicScores = scorePrediction(m, hForm, aForm, liveStats);
     const chosenMarket = mode === "live" ? dynamicScores.livePick : dynamicScores.mainPick;
 
     picks.push({
@@ -361,15 +402,16 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     if (!row) return res.status(404).json({ error: "Maç verisi bulunamadı." });
     const match = normalizeProviderMatch(row);
 
-    const [prematchOddsPayload, homeForm, awayForm] = await Promise.all([
+    const [prematchOddsPayload, homeForm, awayForm, liveStats] = await Promise.all([
       cachedProviderRequest(`odds-fixture:${match.id}`, `/odds?fixture=${match.id}`, 90000).catch(() => ({ response: [] })),
       fetchTeamRecentForm(match.homeId, match.id),
-      fetchTeamRecentForm(match.awayId, match.id)
+      fetchTeamRecentForm(match.awayId, match.id),
+      match.status === "LIVE" ? fetchLiveStatistics(match.id) : null
     ]);
 
     const prematchRow = (prematchOddsPayload.response || []).find(x => Number(x.fixture?.id) === match.id) || null;
     const oddsList = oddsForFixture(prematchRow);
-    const scores = scorePrediction(match, homeForm, awayForm);
+    const scores = scorePrediction(match, homeForm, awayForm, liveStats);
 
     const getMarket = (key) => oddsList.find(o => o.market === key);
     const formatOdds = (item) => item ? `Oran: ${item.odd || '—'} (%${item.probability ? item.probability.toFixed(0) : '—'}) [${item.bookmaker}]` : "Veri Yok";
@@ -392,7 +434,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       mainPick: scores.mainPick,
       alternative: scores.alternative,
       livePick: scores.livePick,
-      note: `Bet365 / Bürolar taranmıştır. Form Ortalaması: Ev ${homeForm.avgGoalsFor?.toFixed(1) || 0} - Dep ${awayForm.avgGoalsFor?.toFixed(1) || 0}`
+      note: `Bet365 / Bürolar taranmıştır. Canlı İstatistikler & Form Entegre Edildi.`
     });
   } catch (e) {
     res.status(502).json({ error: "Analiz üretilemedi.", detail: e.message });
