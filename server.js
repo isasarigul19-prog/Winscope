@@ -13,14 +13,17 @@ const BASE_URL = "https://v3.football.api-sports.io";
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
 app.use(express.json({ limit: "500kb" }));
-app.use(express.static(path.join(ROOT, "public")));
-
+// WinScope arayüzü bu dosyaya gömülüdür; dağıtım için public/index.html gerekmez.
+const EMBEDDED_INDEX_HTML = Buffer.from("PCFkb2N0eXBlIGh0bWw+PGh0bWwgbGFuZz0idHIiPjxoZWFkPjxtZXRhIGNoYXJzZXQ9InV0Zi04Ij48bWV0YSBuYW1lPSJ2aWV3cG9ydCIgY29udGVudD0id2lkdGg9ZGV2aWNlLXdpZHRoLGluaXRpYWwtc2NhbGU9MSI+PHRpdGxlPldpblNjb3BlIExpdmU8L3RpdGxlPjxzdHlsZT4KOnJvb3R7LS1iZzojMDQxOTFlOy0tcDojMDgyNzJkOy0tcDI6IzBjMzQzYjstLWxpbmU6IzE1NTA1YTstLXQ6I2YxZmJmYzstLW06IzliYjliZjstLXBpbms6I2ZmMmY2MzstLWdyZWVuOiM0MmU2YTA7LS1hbWJlcjojZmZkMDRhOy0tZ3JheTojN2Y5ZGEzfSp7Ym94LXNpemluZzpib3JkZXItYm94fWJvZHl7bWFyZ2luOjA7YmFja2dyb3VuZDpsaW5lYXItZ3JhZGllbnQoMTU1ZGVnLCMwMzE0MTksIzA3MzAzOCA2NSUsIzA0MTkxZSk7Y29sb3I6dmFyKC0tdCk7Zm9udDoxNHB4IHN5c3RlbS11aSxzYW5zLXNlcmlmfWhlYWRlcntwYWRkaW5nOjE2cHg7bWF4LXdpZHRoOjEwNTBweDttYXJnaW46YXV0bztkaXNwbGF5OmZsZXg7anVzdGlmeS1jb250ZW50OnNwYWNlLWJldHdlZW47Ym9yZGVyLWJvdHRvbToxcHggc29saWQgdmFyKC0tbGluZSl9LmxvZ297Zm9udC13ZWlnaHQ6OTUwO2xldHRlci1zcGFjaW5nOi4wOGVtO2ZvbnQtc2l6ZToyNXB4fS5sb2dvIHNwYW57Zm9udC1zaXplOjEzcHg7Y29sb3I6dmFyKC0tcGluayk7bWFyZ2luLWxlZnQ6NHB4O2ZvbnQtd2VpZ2h0OjcwMH0uc21hbGwsLnN1Yntjb2xvcjp2YXIoLS1tKTtmb250LXNpemU6MTJweDtsaW5lLWhlaWdodDoxLjQ1fW1haW57bWF4LXdpZHRoOjEwNTBweDttYXJnaW46YXV0bztwYWRkaW5nOjEycHh9LnRvb2xiYXIsLmFjdGlvbnN7ZGlzcGxheTpmbGV4O2dhcDo4cHg7YWxpZ24taXRlbXM6Y2VudGVyO2ZsZXgtd3JhcDp3cmFwO21hcmdpbjoxMHB4IDB9YnV0dG9uLHNlbGVjdCxpbnB1dHtmb250OmluaGVyaXQ7Y29sb3I6dmFyKC0tdCk7YmFja2dyb3VuZDp2YXIoLS1wMik7Ym9yZGVyOjFweCBzb2xpZCB2YXIoLS1saW5lKTtib3JkZXItcmFkaXVzOjExcHg7cGFkZGluZzoxMHB4IDEycHh9YnV0dG9ue2N1cnNvcjpwb2ludGVyfS5wcmltYXJ5LC5hY3RpdmV7YmFja2dyb3VuZDp2YXIoLS1waW5rKTtib3JkZXItY29sb3I6dmFyKC0tcGluayk7Zm9udC13ZWlnaHQ6ODAwfS5wYW5lbCwuY2FyZHtib3JkZXI6MXB4IHNvbGlkIHZhcigtLWxpbmUpO2JvcmRlci1yYWRpdXM6MTZweDtiYWNrZ3JvdW5kOmxpbmVhci1ncmFkaWVudCgxNDVkZWcsdmFyKC0tcCksIzA2MjEyNik7cGFkZGluZzoxM3B4O21hcmdpbjoxMnB4IDB9LmhlYWR7ZGlzcGxheTpmbGV4O2p1c3RpZnktY29udGVudDpzcGFjZS1iZXR3ZWVuO2NvbG9yOnZhcigtLW0pO2ZvbnQtc2l6ZToxMnB4fS50ZWFtc3tkaXNwbGF5OmdyaWQ7Z3JpZC10ZW1wbGF0ZS1jb2x1bW5zOjFmciBhdXRvIDFmcjthbGlnbi1pdGVtczpjZW50ZXI7Z2FwOjhweDttYXJnaW46MTdweCAwfS50ZWFte2ZvbnQtd2VpZ2h0Ojg1MDtmb250LXNpemU6MTdweDtvdmVyZmxvdy13cmFwOmFueXdoZXJlfS50ZWFtOmxhc3QtY2hpbGR7dGV4dC1hbGlnbjpyaWdodH0uc2NvcmV7Zm9udC13ZWlnaHQ6OTUwO2ZvbnQtc2l6ZToyNnB4O3doaXRlLXNwYWNlOm5vd3JhcH0ubWV0YXt0ZXh0LWFsaWduOmNlbnRlcjtjb2xvcjp2YXIoLS1tKTtmb250LXNpemU6MTFweH0udGFic3tkaXNwbGF5OmdyaWQ7Z3JpZC10ZW1wbGF0ZS1jb2x1bW5zOjFmciAxZnI7Z2FwOjRweDtiYWNrZ3JvdW5kOiMwNjIxMjY7Ym9yZGVyOjFweCBzb2xpZCB2YXIoLS1saW5lKTtib3JkZXItcmFkaXVzOjEycHg7cGFkZGluZzozcHg7bWFyZ2luOjEycHggMH0udGFicyBidXR0b257Ym9yZGVyOjA7YmFja2dyb3VuZDp0cmFuc3BhcmVudH0udGFicyBidXR0b24uYWN0aXZle2JhY2tncm91bmQ6dmFyKC0tcGluayl9LmdyaWR7ZGlzcGxheTpncmlkO2dyaWQtdGVtcGxhdGUtY29sdW1uczoxZnIgMWZyO2dhcDoxMHB4fS50YWJsZXt3aWR0aDoxMDAlO2JvcmRlci1zcGFjaW5nOjAgNXB4fS50YWJsZSB0ZHtiYWNrZ3JvdW5kOiMwNjI0MmE7cGFkZGluZzoxMHB4O2JvcmRlci10b3A6MXB4IHNvbGlkIHZhcigtLWxpbmUpO2JvcmRlci1ib3R0b206MXB4IHNvbGlkIHZhcigtLWxpbmUpfS50YWJsZSB0ZDpmaXJzdC1jaGlsZHtib3JkZXItbGVmdDoxcHggc29saWQgdmFyKC0tbGluZSk7Ym9yZGVyLXJhZGl1czo5cHggMCAwIDlweDtjb2xvcjp2YXIoLS1tKX0udGFibGUgdGQ6bGFzdC1jaGlsZHtib3JkZXItcmlnaHQ6MXB4IHNvbGlkIHZhcigtLWxpbmUpO2JvcmRlci1yYWRpdXM6MCA5cHggOXB4IDA7Zm9udC13ZWlnaHQ6ODAwfS5ncm91cHtib3JkZXI6MXB4IHNvbGlkIHZhcigtLWxpbmUpO2JvcmRlci1yYWRpdXM6MTFweDtwYWRkaW5nOjhweH0uZ3R7Zm9udC1zaXplOjEycHg7Zm9udC13ZWlnaHQ6ODUwO21hcmdpbjo0cHggM3B4IDhweH0uYmFye2Rpc3BsYXk6Z3JpZDtncmlkLXRlbXBsYXRlLWNvbHVtbnM6NzVweCAxZnIgNDBweDtnYXA6N3B4O2FsaWduLWl0ZW1zOmNlbnRlcjtmb250LXNpemU6MTJweDtwYWRkaW5nOjVweCAwfS50cmFja3toZWlnaHQ6MTFweDtib3JkZXItcmFkaXVzOjIwcHg7YmFja2dyb3VuZDojMTkzZDQ0O292ZXJmbG93OmhpZGRlbn0uZmlsbHtoZWlnaHQ6MTAwJTtiYWNrZ3JvdW5kOnZhcigtLWdyZWVuKTtib3JkZXItcmFkaXVzOjIwcHh9LmZpbGwuYW1iZXJ7YmFja2dyb3VuZDp2YXIoLS1hbWJlcil9LmZpbGwuZ3JheXtiYWNrZ3JvdW5kOnZhcigtLWdyYXkpfS5vZGRze2Rpc3BsYXk6Z3JpZDtncmlkLXRlbXBsYXRlLWNvbHVtbnM6cmVwZWF0KDMsbWlubWF4KDAsMWZyKSk7Z2FwOjdweH0ub2Rke2JvcmRlcjoxcHggc29saWQgdmFyKC0tbGluZSk7YmFja2dyb3VuZDojMGEzMDM3O2JvcmRlci1yYWRpdXM6MTFweDtwYWRkaW5nOjlweDt0ZXh0LWFsaWduOmNlbnRlcjtvdmVyZmxvdy13cmFwOmFueXdoZXJlfS5vZGQgbGFiZWx7ZGlzcGxheTpibG9jaztjb2xvcjp2YXIoLS1tKTtmb250LXNpemU6MTFweH0ub2RkIHN0cm9uZ3tkaXNwbGF5OmJsb2NrO2ZvbnQtc2l6ZToxOHB4fS5oaWRkZW57ZGlzcGxheTpub25lIWltcG9ydGFudH0uZW1wdHl7cGFkZGluZzoxOHB4O3RleHQtYWxpZ246Y2VudGVyO2NvbG9yOnZhcigtLW0pfS5lcnJ7Y29sb3I6I2ZmOWJhYX0uc3RhdHRlYW17cGFkZGluZzoxMHB4O2JvcmRlcjoxcHggc29saWQgdmFyKC0tbGluZSk7Ym9yZGVyLXJhZGl1czoxMHB4O21hcmdpbjo4cHggMH0uc3RhdGxpbmV7ZGlzcGxheTpmbGV4O2p1c3RpZnktY29udGVudDpzcGFjZS1iZXR3ZWVuO3BhZGRpbmc6NXB4IDA7Ym9yZGVyLWJvdHRvbToxcHggc29saWQgIzEyM2E0MX1AbWVkaWEobWF4LXdpZHRoOjY1MHB4KXsuZ3JpZHtncmlkLXRlbXBsYXRlLWNvbHVtbnM6MWZyfS5vZGRze2dyaWQtdGVtcGxhdGUtY29sdW1uczpyZXBlYXQoMixtaW5tYXgoMCwxZnIpKX0udGVhbXtmb250LXNpemU6MTRweH0uc2NvcmV7Zm9udC1zaXplOjIzcHh9fQojbWF0Y2hTZWFyY2h7ZmxleDowIDEgMjIwcHghaW1wb3J0YW50O21pbi13aWR0aDoxMjBweCFpbXBvcnRhbnQ7bWF4LXdpZHRoOjI2MHB4fSNzZWFyY2hNYXRjaCwjY2xlYXJNYXRjaFNlYXJjaHtwYWRkaW5nOjhweCAxMHB4O2ZvbnQtc2l6ZToxMnB4fUBtZWRpYShtYXgtd2lkdGg6NjUwcHgpeyNtYXRjaFNlYXJjaFBhbmVsIC50b29sYmFye2dhcDo2cHh9I21hdGNoU2VhcmNoe21heC13aWR0aDpub25lO2ZsZXg6MSAxIDE1MHB4IWltcG9ydGFudH19Ci5oaWRkZW57ZGlzcGxheTpub25lIWltcG9ydGFudH0uYXJjaGl2ZS1saXN0e2Rpc3BsYXk6Z3JpZDtnYXA6OXB4fS5hcmNoaXZlLWl0ZW17Ym9yZGVyOjFweCBzb2xpZCB2YXIoLS1saW5lKTtib3JkZXItcmFkaXVzOjEycHg7cGFkZGluZzoxMXB4O2JhY2tncm91bmQ6IzA2MjQyYX0uYXJjaGl2ZS1pdGVtIC50aXRsZXtmb250LXdlaWdodDo4NTA7bWFyZ2luLWJvdHRvbTo3cHh9LmFyY2hpdmUtaXRlbSAucm93bGluZXtkaXNwbGF5OmZsZXg7anVzdGlmeS1jb250ZW50OnNwYWNlLWJldHdlZW47Z2FwOjhweDtwYWRkaW5nOjRweCAwfS5hcmNoaXZlLWl0ZW0gLnJvd2xpbmUgc3Bhbntjb2xvcjp2YXIoLS1tKX0uYXJjaGl2ZS1hY3Rpb25ze2Rpc3BsYXk6ZmxleDtnYXA6OHB4O21hcmdpbi10b3A6OXB4O2ZsZXgtd3JhcDp3cmFwfS5hcmNoaXZlLWFjdGlvbnMgYnV0dG9ue3BhZGRpbmc6N3B4IDEwcHh9PC9zdHlsZT48L2hlYWQ+PGJvZHk+PGhlYWRlcj48ZGl2PjxkaXYgY2xhc3M9ImxvZ28iPldJTlNDT1BFIDxzcGFuPkxJVkU8L3NwYW4+PC9kaXY+PGRpdiBjbGFzcz0ic3ViIj5DYW5sxLEgZnV0Ym9sIGFuYWxpeiB2ZSBhbGFybSBzaXN0ZW1pPC9kaXY+PC9kaXY+PGRpdiBjbGFzcz0ic21hbGwiIGlkPSJjb25uIj5CQcSeTEFOSVlPUjwvZGl2PjwvaGVhZGVyPjxtYWluPjxkaXYgY2xhc3M9InRvb2xiYXIiPjxidXR0b24gY2xhc3M9InByaW1hcnkiIGlkPSJyZWZyZXNoIj7ihrsgQ2FubMSxIG1hw6dsYXI8L2J1dHRvbj48aW5wdXQgaWQ9ImRhdGUiIHR5cGU9ImRhdGUiPjxidXR0b24gaWQ9ImJ1bGxldGluIj5Cw7xsdGVuPC9idXR0b24+PGJ1dHRvbiBpZD0ic2hvd0FuYWx5c2VzIj5Hw7xuw7xuIEFuYWxpemxlcmk8L2J1dHRvbj48YnV0dG9uIGlkPSJzaG93Q291cG9ucyI+R8O8bsO8biBLdXBvbmxhcsSxPC9idXR0b24+PHNlbGVjdCBpZD0iZmlsdGVyIj48b3B0aW9uIHZhbHVlPSJhbGwiPlTDvG0gbWHDp2xhcjwvb3B0aW9uPjxvcHRpb24gdmFsdWU9ImxpdmUiPkNhbmzEsTwvb3B0aW9uPjwvc2VsZWN0PjwvZGl2PjxzZWN0aW9uIGNsYXNzPSJwYW5lbCIgaWQ9Im1hdGNoU2VhcmNoUGFuZWwiPjxoMyBzdHlsZT0ibWFyZ2luOjJweCAwIDhweCI+8J+UjiAx4oCZZSAxIE1Bw4cgQVJBPC9oMz48ZGl2IGNsYXNzPSJ0b29sYmFyIiBzdHlsZT0ibWFyZ2luOjAiPjxpbnB1dCBpZD0ibWF0Y2hTZWFyY2giIHR5cGU9InNlYXJjaCIgcGxhY2Vob2xkZXI9IlRha8SxbSBhZMSxOiBGZW5lcmJhaMOnZSwgQmFyY2Vsb25h4oCmIiBzdHlsZT0iZmxleDoxO21pbi13aWR0aDoxODBweCI+PGJ1dHRvbiBpZD0ic2VhcmNoTWF0Y2giIGNsYXNzPSJwcmltYXJ5Ij5NYcOnIEFyYTwvYnV0dG9uPjxidXR0b24gaWQ9ImNsZWFyTWF0Y2hTZWFyY2giPlRlbWl6bGU8L2J1dHRvbj48L2Rpdj48ZGl2IGlkPSJtYXRjaFNlYXJjaFJlc3VsdCIgY2xhc3M9InNtYWxsIiBzdHlsZT0ibWFyZ2luLXRvcDo4cHgiPkFyYW1hayBpw6dpbiB0YWvEsW0gYWTEsW7EsSB5YXouPC9kaXY+PC9zZWN0aW9uPjxzZWN0aW9uIGNsYXNzPSJwYW5lbCIgaWQ9ImNvdXBvblBhbmVsIj48aDMgc3R5bGU9Im1hcmdpbjoycHggMCAxMHB4Ij7wn46vIFdJTlNDT1BFIEtVUE9OTEFSSTwvaDM+PGRpdiBzdHlsZT0iZGlzcGxheTpmbGV4O2dhcDo4cHg7ZmxleC13cmFwOndyYXAiPjxidXR0b24gaWQ9Im1ha2VDb3Vwb24iIGNsYXNzPSJwcmltYXJ5Ij7imr0gTWHDpyDDlm7DvCBLdXBvbnUgKEVuIGF6IDIgbWHDpyk8L2J1dHRvbj48YnV0dG9uIGlkPSJtYWtlU3VycHJpc2VDb3Vwb24iPvCfjrIgMTAgTWHDp2zEsWsgS3Vwb248L2J1dHRvbj48YnV0dG9uIGlkPSJtYWtlTGl2ZUJlc3QiIHN0eWxlPSJiYWNrZ3JvdW5kOiM0MmU2YTA7Y29sb3I6IzA0MTkxZTtmb250LXdlaWdodDo5MDA7Ym9yZGVyOm5vbmUiPuKaoSBDYW5sxLEgRW4gR8O8dmVuaWxpciBUZWsgVGVyY2loPC9idXR0b24+PC9kaXY+PGRpdiBpZD0iY291cG9uUmVzdWx0IiBjbGFzcz0ic21hbGwiIHN0eWxlPSJtYXJnaW4tdG9wOjEycHgiPjwvZGl2Pjwvc2VjdGlvbj48c2VjdGlvbiBjbGFzcz0icGFuZWwgaGlkZGVuIiBpZD0iYW5hbHlzZXNBcmNoaXZlIj48ZGl2IGNsYXNzPSJoZWFkIj48aDM+8J+TiyBHw7xuw7xuIEFuYWxpemxlcmk8L2gzPjxidXR0b24gb25jbGljaz0iY2xvc2VBcmNoaXZlcygpIj5LYXBhdDwvYnV0dG9uPjwvZGl2PjxkaXYgaWQ9ImFuYWx5c2VzQXJjaGl2ZUxpc3QiIGNsYXNzPSJhcmNoaXZlLWxpc3QiPlnDvGtsZW5peW9y4oCmPC9kaXY+PC9zZWN0aW9uPjxzZWN0aW9uIGNsYXNzPSJwYW5lbCBoaWRkZW4iIGlkPSJjb3Vwb25zQXJjaGl2ZSI+PGRpdiBjbGFzcz0iaGVhZCI+PGgzPvCfjp/vuI8gR8O8bsO8biBLdXBvbmxhcsSxPC9oMz48YnV0dG9uIG9uY2xpY2s9ImNsb3NlQXJjaGl2ZXMoKSI+S2FwYXQ8L2J1dHRvbj48L2Rpdj48ZGl2IGlkPSJjb3Vwb25zQXJjaGl2ZUxpc3QiIGNsYXNzPSJhcmNoaXZlLWxpc3QiPlnDvGtsZW5peW9y4oCmPC9kaXY+PC9zZWN0aW9uPjxkaXYgaWQ9Im1zZyIgY2xhc3M9InNtYWxsIj48L2Rpdj48c2VjdGlvbiBpZD0ibWF0Y2hlcyI+PGRpdiBjbGFzcz0iZW1wdHkiPk1hw6dsYXIgecO8a2xlbml5b3LigKY8L2Rpdj48L3NlY3Rpb24+PC9tYWluPjxzY3JpcHQ+CmNvbnN0ICQ9eD0+ZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoeCk7bGV0IG1hdGNoZXM9W10sYnVsbGV0aW5NYXRjaGVzPVtdO2NvbnN0IGVzYz14PT5TdHJpbmcoeD8/JycpLnJlcGxhY2UoL1smPD4iJ10vZyxjPT4oeycmJzonJmFtcDsnLCc8JzonJmx0OycsJz4nOicmZ3Q7JywnIic6JyZxdW90OycsIiciOicmIzM5Oyd9W2NdKSk7ZnVuY3Rpb24gYmFyKGxhYmVsLHYsY2xzPScnKXtpZih2PT1udWxsfHwhTnVtYmVyLmlzRmluaXRlKE51bWJlcih2KSkpcmV0dXJuIGA8ZGl2IGNsYXNzPSJiYXIiPjxzcGFuPiR7ZXNjKGxhYmVsKX08L3NwYW4+PGRpdiBjbGFzcz0idHJhY2siPjwvZGl2PjxiPuKAlDwvYj48L2Rpdj5gO3Y9TWF0aC5tYXgoMCxNYXRoLm1pbigxMDAsTnVtYmVyKHYpKSk7cmV0dXJuIGA8ZGl2IGNsYXNzPSJiYXIiPjxzcGFuPiR7ZXNjKGxhYmVsKX08L3NwYW4+PGRpdiBjbGFzcz0idHJhY2siPjxkaXYgY2xhc3M9ImZpbGwgJHtjbHN9IiBzdHlsZT0id2lkdGg6JHt2fSUiPjwvZGl2PjwvZGl2PjxiPiR7di50b0ZpeGVkKDEpfSU8L2I+PC9kaXY+YH0KZnVuY3Rpb24gY2FyZChtKXtyZXR1cm4gYDxhcnRpY2xlIGNsYXNzPSJjYXJkIiBpZD0ibSR7TnVtYmVyKG0uaWQpfSI+PGRpdiBjbGFzcz0iaGVhZCI+PHNwYW4+JHtlc2MobS5jb3VudHJ5fHwnJyl9IMK3ICR7ZXNjKG0ubGVhZ3VlfHwnJyl9PC9zcGFuPjxzcGFuPiR7ZXNjKG0uc3RhdHVzPT09J05TJz8nQkHFnkxBTUFESSc6KG0uc3RhdHVzPT09J0ZUJz8nTUHDhyBCxLBUVMSwJzptLnN0YXR1c3x8JycpKX0ke20ubWludXRlIT1udWxsJiYhWydOUycsJ0ZUJ10uaW5jbHVkZXMobS5zdGF0dXMpPycgwrcgJytlc2MobS5taW51dGUpKyInIjonJ308L3NwYW4+PC9kaXY+PGRpdiBjbGFzcz0idGVhbXMiPjxkaXYgY2xhc3M9InRlYW0iPiR7ZXNjKG0uaG9tZSl9PC9kaXY+PGRpdiBjbGFzcz0ic2NvcmUiPiR7ZXNjKG0uaG9tZVNjb3JlPz8n4oCTJyl9IDogJHtlc2MobS5hd2F5U2NvcmU/PyfigJMnKX08L2Rpdj48ZGl2IGNsYXNzPSJ0ZWFtIj4ke2VzYyhtLmF3YXkpfTwvZGl2PjwvZGl2PjxkaXYgY2xhc3M9Im1ldGEiPiR7bS5maXh0dXJlRGF0ZT9uZXcgRGF0ZShtLmZpeHR1cmVEYXRlKS50b0xvY2FsZVN0cmluZygndHItVFInKTonJ308L2Rpdj48ZGl2IGNsYXNzPSJ0YWJzIj48YnV0dG9uIGNsYXNzPSJhY3RpdmUiIG9uY2xpY2s9ImFuYWx5emUoJHtOdW1iZXIobS5pZCl9LCcke20uc3RhdHVzPT09J05TJz8ncHJlbWF0Y2gnOidsaXZlJ30nKSI+TUHDhyBBTkFMxLBaxLA8L2J1dHRvbj48YnV0dG9uIG9uY2xpY2s9InN0YXRzKCR7TnVtYmVyKG0uaWQpfSkiPsSwU1RBVMSwU1TEsEs8L2J1dHRvbj48L2Rpdj48ZGl2IGlkPSJhJHtOdW1iZXIobS5pZCl9Ij48ZGl2IGNsYXNzPSJlbXB0eSI+TWHDpyBhbmFsaXppIGnDp2luIGRva3VuLjwvZGl2PjwvZGl2PjxkaXYgaWQ9InMke051bWJlcihtLmlkKX0iIGNsYXNzPSJoaWRkZW4iPjwvZGl2PjwvYXJ0aWNsZT5gfWZ1bmN0aW9uIHJlbmRlcigpe2xldCBhPSQoJ2ZpbHRlcicpLnZhbHVlPT09J2xpdmUnP21hdGNoZXMuZmlsdGVyKG09PiFbJ0ZUJywnQUVUJywnUEVOJywnTlMnXS5pbmNsdWRlcyhtLnN0YXR1cykpOm1hdGNoZXM7JCgnbWF0Y2hlcycpLmlubmVySFRNTD1hLmxlbmd0aD9hLm1hcChjYXJkKS5qb2luKCcnKTonPGRpdiBjbGFzcz0iZW1wdHkiPkJ1IGxpc3RlZGUgbWHDpyBidWx1bmFtYWTEsS48L2Rpdj4nfWFzeW5jIGZ1bmN0aW9uIGxpdmUoKXsgJCgnbWF0Y2hlcycpLmlubmVySFRNTD0nPGRpdiBjbGFzcz0iZW1wdHkiPkNhbmzEsSBtYcOnbGFyIHnDvGtsZW5peW9y4oCmPC9kaXY+Jzt0cnl7bGV0IHI9YXdhaXQgZmV0Y2goJy9hcGkvbGl2ZScpLGo9YXdhaXQgci5qc29uKCk7aWYoIXIub2spdGhyb3cgRXJyb3Ioai5kZXRhaWx8fGouZXJyb3IpO21hdGNoZXM9ai5tYXRjaGVzfHxbXTskKCdjb25uJykudGV4dENvbnRlbnQ9J1NVTlVDVSBCQcSeTEknOyQoJ21zZycpLnRleHRDb250ZW50PWAke21hdGNoZXMubGVuZ3RofSBtYcOnIMK3ICR7bmV3IERhdGUoai5mZXRjaGVkQXR8fERhdGUubm93KCkpLnRvTG9jYWxlVGltZVN0cmluZygndHItVFInKX1gO3JlbmRlcigpfWNhdGNoKGUpeyQoJ2Nvbm4nKS50ZXh0Q29udGVudD0nSEFUQSc7JCgnbXNnJykuaW5uZXJIVE1MPWA8c3BhbiBjbGFzcz0iZXJyIj4ke2VzYyhlLm1lc3NhZ2UpfTwvc3Bhbj5gOyQoJ21hdGNoZXMnKS5pbm5lckhUTUw9JzxkaXYgY2xhc3M9ImVtcHR5Ij5NYcOnbGFyIGFsxLFuYW1hZMSxLjwvZGl2Pid9fWFzeW5jIGZ1bmN0aW9uIGJ1bGxldGluKCl7bGV0IGQ9JCgnZGF0ZScpLnZhbHVlO2lmKCFkKXJldHVybjt0cnl7bGV0IHI9YXdhaXQgZmV0Y2goJy9hcGkvZml4dHVyZXM/ZGF0ZT0nK2VuY29kZVVSSUNvbXBvbmVudChkKSksaj1hd2FpdCByLmpzb24oKTtpZighci5vayl0aHJvdyBFcnJvcihqLmRldGFpbHx8ai5lcnJvcik7YnVsbGV0aW5NYXRjaGVzPWoubWF0Y2hlc3x8W107JCgnbWF0Y2hlcycpLmlubmVySFRNTD1idWxsZXRpbk1hdGNoZXMubGVuZ3RoP2J1bGxldGluTWF0Y2hlcy5tYXAoY2FyZCkuam9pbignJyk6JzxkaXYgY2xhc3M9ImVtcHR5Ij5NYcOnIGJ1bHVuYW1hZMSxLjwvZGl2Pic7JCgnbXNnJykudGV4dENvbnRlbnQ9YCR7YnVsbGV0aW5NYXRjaGVzLmxlbmd0aH0gbWHDpyDCtyAke2R9YH1jYXRjaChlKXskKCdtc2cnKS5pbm5lckhUTUw9YDxzcGFuIGNsYXNzPSJlcnIiPiR7ZXNjKGUubWVzc2FnZSl9PC9zcGFuPmB9fWFzeW5jIGZ1bmN0aW9uIHNlYXJjaE1hdGNoKCl7Y29uc3QgcT0kKCdtYXRjaFNlYXJjaCcpLnZhbHVlLnRyaW0oKS50b0xvY2FsZUxvd2VyQ2FzZSgndHItVFInKTtjb25zdCBvdXQ9JCgnbWF0Y2hTZWFyY2hSZXN1bHQnKTtpZighcSl7b3V0LmlubmVySFRNTD0nPHNwYW4gY2xhc3M9ImVyciI+w5ZuY2UgYmlyIHRha8SxbSBhZMSxIHlheiBrcmFsLjwvc3Bhbj4nO3JldHVybn1jb25zdCBkPSQoJ2RhdGUnKS52YWx1ZTtpZighZCl7b3V0LmlubmVySFRNTD0nPHNwYW4gY2xhc3M9ImVyciI+w5ZuY2UgdGFyaWggc2XDpy48L3NwYW4+JztyZXR1cm59b3V0LnRleHRDb250ZW50PSdCw7xsdGVuZGVraSBtYcOnbGFyIGFyYW7EsXlvcuKApic7JCgnc2VhcmNoTWF0Y2gnKS5kaXNhYmxlZD10cnVlO3RyeXtsZXQgc291cmNlPWJ1bGxldGluTWF0Y2hlcztpZighc291cmNlLmxlbmd0aHx8IXNvdXJjZS5zb21lKG09PlN0cmluZyhtLmZpeHR1cmVEYXRlfHwnJykuc2xpY2UoMCwxMCk9PT1kKSl7Y29uc3Qgcj1hd2FpdCBmZXRjaCgnL2FwaS9maXh0dXJlcz9kYXRlPScrZW5jb2RlVVJJQ29tcG9uZW50KGQpLHtzaWduYWw6QWJvcnRTaWduYWwudGltZW91dCgyMDAwMCl9KTtjb25zdCBqPWF3YWl0IHIuanNvbigpO2lmKCFyLm9rKXRocm93IEVycm9yKGouZGV0YWlsfHxqLmVycm9yfHwnQsO8bHRlbiBhbMSxbmFtYWTEsScpO3NvdXJjZT1qLm1hdGNoZXN8fFtdO2J1bGxldGluTWF0Y2hlcz1zb3VyY2V9Y29uc3QgZm91bmQ9c291cmNlLmZpbHRlcihtPT5gJHttLmhvbWV8fCcnfSAke20uYXdheXx8Jyd9YC50b0xvY2FsZUxvd2VyQ2FzZSgndHItVFInKS5pbmNsdWRlcyhxKSk7aWYoIWZvdW5kLmxlbmd0aCl7b3V0LnRleHRDb250ZW50PWDigJwkeyQoJ21hdGNoU2VhcmNoJykudmFsdWUudHJpbSgpfeKAnSBpw6dpbiAke2R9IGLDvGx0ZW5pbmRlIG1hw6cgYnVsdW5hbWFkxLEuYDtyZXR1cm59bWF0Y2hlcz1zb3VyY2U7JCgnZmlsdGVyJykudmFsdWU9J2FsbCc7JCgnbWF0Y2hlcycpLmlubmVySFRNTD1mb3VuZC5tYXAoY2FyZCkuam9pbignJyk7b3V0LnRleHRDb250ZW50PWAke2ZvdW5kLmxlbmd0aH0gZcWfbGXFn2VuIG1hw6cgYnVsdW5kdSDCtyAke2R9LiBBbmFsaXogdmV5YSBpc3RhdGlzdGlrIGnDp2luIG1hw6dhIGRva3VuLmA7JCgnbXNnJykudGV4dENvbnRlbnQ9YEFyYW1hIHNvbnVjdTogJHtmb3VuZC5sZW5ndGh9IG1hw6cgwrcgJHtkfWA7JCgnbWF0Y2hlcycpLnNjcm9sbEludG9WaWV3KHtiZWhhdmlvcjonc21vb3RoJyxibG9jazonc3RhcnQnfSl9Y2F0Y2goZSl7b3V0LmlubmVySFRNTD1gPHNwYW4gY2xhc3M9ImVyciI+QXJhbWEgYmHFn2FyxLFzxLF6OiAke2VzYyhlLm1lc3NhZ2UpfTwvc3Bhbj5gfWZpbmFsbHl7JCgnc2VhcmNoTWF0Y2gnKS5kaXNhYmxlZD1mYWxzZX19ZnVuY3Rpb24gY2xlYXJNYXRjaFNlYXJjaCgpeyQoJ21hdGNoU2VhcmNoJykudmFsdWU9Jyc7JCgnbWF0Y2hTZWFyY2hSZXN1bHQnKS50ZXh0Q29udGVudD0nQXJhbWFrIGnDp2luIHRha8SxbSBhZMSxbsSxIHlhei4nO2J1bGxldGluTWF0Y2hlcz1bXX0KYXN5bmMgZnVuY3Rpb24gYW5hbHl6ZShpZCxtb2RlKXtsZXQgYm94PSQoJ2EnK2lkKTtib3guaW5uZXJIVE1MPSc8ZGl2IGNsYXNzPSJlbXB0eSI+QW5hbGl6IGVkaWxpeW9y4oCmPC9kaXY+Jzt0cnl7bGV0IHI9YXdhaXQgZmV0Y2goYC9hcGkvbWF0Y2gvJHtpZH0vYW5hbHl6ZT9tb2RlPSR7bW9kZX1gKSxqPWF3YWl0IHIuanNvbigpO2lmKCFyLm9rKXRocm93IEVycm9yKGouZGV0YWlsfHxqLmVycm9yKTtsZXQgcD1qLm1hcmtldFBlcmNlbnRhZ2VzfHx7fTtjb25zdCBwY3Q9KGtleSk9Pntjb25zdCB4PXBba2V5XTtyZXR1cm4geCYmeC5wZXJjZW50IT1udWxsJiZOdW1iZXIuaXNGaW5pdGUoTnVtYmVyKHgucGVyY2VudCkpP2AlJHtlc2MoeC5wZXJjZW50KX0gPHNwYW4gY2xhc3M9InNtYWxsIj4oJHtlc2MoeC5zb3VyY2V8fCdLYXluYWsgYmVsaXJ0aWxtZWRpJyl9IMK3IHNvbiA1IG1hw6cgw7ZybmVrbGVtaTogJHtlc2MoeC5zYW1wbGVTaXplfHwwKX0pPC9zcGFuPmA6J1ZlcmkgeW9rJ307Ym94LmlubmVySFRNTD1gPGRpdiBjbGFzcz0iZ3JpZCI+PGRpdj48dGFibGUgY2xhc3M9InRhYmxlIj48dHI+PHRkPkFOQSBURVJDxLBIPC90ZD48dGQ+JHtlc2Moai5tYWluUGlja3x8J+KAlCcpfTwvdGQ+PC90cj48dHI+PHRkPkFMVEVSTkFUxLBGPC90ZD48dGQ+JHtlc2Moai5hbHRlcm5hdGl2ZXx8J+KAlCcpfTwvdGQ+PC90cj48dHI+PHRkPsSwWSBTS09SPC90ZD48dGQ+JHtlc2Moai5oYWxmVGltZVNjb3JlfHwn4oCUJyl9PC90ZD48L3RyPjx0cj48dGQ+TVMgU0tPUjwvdGQ+PHRkPiR7ZXNjKGouZnVsbFRpbWVTY29yZXx8J+KAlCcpfTwvdGQ+PC90cj48dHI+PHRkPkNBTkxJIFRFUkPEsEg8L3RkPjx0ZD4ke2VzYyhqLmxpdmVQaWNrfHwn4oCUJyl9PC90ZD48L3RyPjx0cj48dGQ+xLBZIDAuNSDDnFNUPC90ZD48dGQ+JHtwY3QoJ2h0MDUnKX08L3RkPjwvdHI+PHRyPjx0ZD7EsFkgMS41IMOcU1Q8L3RkPjx0ZD4ke3BjdCgnaHQxNScpfTwvdGQ+PC90cj48dHI+PHRkPkVWIDEuNSDDnFNUPC90ZD48dGQ+JHtwY3QoJ2hvbWUxNScpfTwvdGQ+PC90cj48dHI+PHRkPkRFUCAxLjUgw5xTVDwvdGQ+PHRkPiR7cGN0KCdhd2F5MTUnKX08L3RkPjwvdHI+PHRyPjx0ZD5NUyAwLjUgw5xTVDwvdGQ+PHRkPiR7cGN0KCdtczA1Jyl9PC90ZD48L3RyPjx0cj48dGQ+TVMgMS41IMOcU1Q8L3RkPjx0ZD4ke3BjdCgnbXMxNScpfTwvdGQ+PC90cj48dHI+PHRkPk1TIDIuNSDDnFNUPC90ZD48dGQ+JHtwY3QoJ21zMjUnKX08L3RkPjwvdHI+PHRyPjx0ZD5NUyAzLjUgw5xTVDwvdGQ+PHRkPiR7cGN0KCdtczM1Jyl9PC90ZD48L3RyPjx0cj48dGQ+S0cgVkFSPC90ZD48dGQ+JHtwY3QoJ2J0dHMnKX08L3RkPjwvdHI+PHRyPjx0ZD5Zw5xaREUgVkVSxLBTxLA8L3RkPjx0ZD5BUEktRm9vdGJhbGwgZ2Vyw6dlayB0YW1hbWxhbm3EscWfIG1hw6dsYXIuPC90ZD48L3RyPjwvdGFibGU+PC9kaXY+PC9kaXY+PGRpdiBjbGFzcz0ic21hbGwiIHN0eWxlPSJtYXJnaW4tdG9wOjhweCI+JHtlc2Moai5ub3RlfHwnQW5hbGl6IG5vdHUgeW9rLicpfTwvZGl2PjxkaXYgY2xhc3M9InRvb2xiYXIiPjxidXR0b24gY2xhc3M9InByaW1hcnkiIG9uY2xpY2s9ImFwcHJvdmVBbmFseXNpcygke2lkfSwnJHttb2RlfScpIj5BbmFsaXppIE9uYXlsYSB2ZSBLYXlkZXQ8L2J1dHRvbj48L2Rpdj5gfWNhdGNoKGUpe2JveC5pbm5lckhUTUw9YDxkaXYgY2xhc3M9InNtYWxsIGVyciI+JHtlc2MoZS5tZXNzYWdlKX08L2Rpdj5gfX0KYXN5bmMgZnVuY3Rpb24gc3RhdHMoaWQpe2xldCBiPSQoJ3MnK2lkKTtiLmNsYXNzTGlzdC5yZW1vdmUoJ2hpZGRlbicpO2IuaW5uZXJIVE1MPSc8ZGl2IGNsYXNzPSJlbXB0eSI+xLBzdGF0aXN0aWsgecO8a2xlbml5b3LigKY8L2Rpdj4nO3RyeXtsZXQgcj1hd2FpdCBmZXRjaChgL2FwaS9tYXRjaC8ke2lkfS9zdGF0c2ApLGo9YXdhaXQgci5qc29uKCk7aWYoIXIub2spdGhyb3cgRXJyb3Ioai5lcnJvcnx8J8Swc3RhdGlzdGlrIGFsxLFuYW1hZMSxJyk7bGV0IGxpc3Q9ai5zdGF0c3x8W107aWYoIWxpc3QubGVuZ3RoKXtiLmlubmVySFRNTD0nPGRpdiBjbGFzcz0icGFuZWwiPsSwc3RhdGlzdGlrIHZlcmlzaSBidWx1bmFtYWTEsS48L2Rpdj4nO3JldHVybjt9Yi5pbm5lckhUTUw9YDxkaXYgY2xhc3M9InBhbmVsIj48aDM+xLBTVEFUxLBTVMSwSzwvaDM+JHtsaXN0Lm1hcCh0PT57bGV0IG5hbWU9dC50ZWFtPy5uYW1lfHx0LnRlYW18fCdUYWvEsW0nO2xldCBzdExpc3Q9QXJyYXkuaXNBcnJheSh0LnN0YXRpc3RpY3MpP3Quc3RhdGlzdGljczoodHlwZW9mIHQuc3RhdGlzdGljcz09PSdvYmplY3QnP09iamVjdC5lbnRyaWVzKHQuc3RhdGlzdGljcykubWFwKChbdHlwZSx2YWx1ZV0pPT4oe3R5cGUsdmFsdWV9KSk6W10pO3JldHVybiBgPGRpdiBjbGFzcz0ic3RhdHRlYW0iPjxiPiR7ZXNjKG5hbWUpfTwvYj4ke3N0TGlzdC5tYXAocz0+YDxkaXYgY2xhc3M9InN0YXRsaW5lIj48c3Bhbj4ke2VzYyhzLnR5cGV8fCcnKX08L3NwYW4+PGI+JHtlc2Mocy52YWx1ZT8/Jy0nKX08L2I+PC9kaXY+YCkuam9pbignJyl9PC9kaXY+YH0pLmpvaW4oJycpfTwvZGl2PmB9Y2F0Y2goZSl7Yi5pbm5lckhUTUw9YDxkaXYgY2xhc3M9InNtYWxsIGVyciI+JHtlc2MoZS5tZXNzYWdlKX08L2Rpdj5gfX0KZnVuY3Rpb24gcmVuZGVyQ291cG9uKGQpe2NvbnN0IGJveD0kKCdjb3Vwb25SZXN1bHQnKTtpZihkLnN0YXR1cz09PSdFUlJPUid8fGQuZXJyb3Ipe2JveC5pbm5lckhUTUw9YDxkaXYgY2xhc3M9ImVyciI+PGI+JHtlc2MoZC5lcnJvcnx8J0t1cG9uIG9sdcWfdHVydWxhbWFkxLEuJyl9PC9iPjxkaXY+JHtlc2MoZC5kZXRhaWx8fCcnKX08L2Rpdj48L2Rpdj5gO3JldHVybjt9aWYoZC5zdGF0dXM9PT0nTk9fTUFUQ0hFUyd8fCFkLnBpY2tzfHwhZC5waWNrcy5sZW5ndGgpe2JveC5pbm5lckhUTUw9YDxkaXYgY2xhc3M9ImVyciI+PGI+JHtlc2MoZC5tZXNzYWdlfHwnWWV0ZXJsaSBzYXnEsWRhIGRvxJ9ydWxhbmFiaWxpciBvcmFubMSxIG1hw6cgYnVsdW5hbWFkxLEuJyl9PC9iPjxkaXY+JHtlc2MoZC5kZXRhaWx8fCcnKX08L2Rpdj48L2Rpdj5gO3JldHVybjt9Y29uc3QgdGc9ZC50ZWxlZ3JhbXx8e307Y29uc3QgdGdMYWJlbD10Zy5zZW50Pyh0Zy5kdXBsaWNhdGVTdXBwcmVzc2VkPydUZWxlZ3JhbTogRGFoYSDDtm5jZSBnw7ZuZGVyaWxkaSwgdGVrcmFyIGVuZ2VsbGVuZGknOidUZWxlZ3JhbTogT3RvbWF0aWsgZ8O2bmRlcmlsZGknKToodGcuZXJyb3J8fHRnLnJlYXNvbj9gVGVsZWdyYW0gZ8O2bmRlcmlsZW1lZGk6ICR7dGcuZXJyb3J8fHRnLnJlYXNvbn1gOidUZWxlZ3JhbSBnw7ZuZGVyaW0gZHVydW11IGRvxJ9ydWxhbmFtYWTEsScpO2JveC5pbm5lckhUTUw9YDxkaXYgY2xhc3M9ImhlYWQiPjxzcGFuPiR7ZC50eXBlPT09J3N1cnByaXNlJyA/ICfwn46yIE1Bw4cgw5ZOw5wgU8OcUlBSxLBaIDEwIE1Bw4cnIDogZC50eXBlPT09J2xpdmUnID8gJ+KaoSBDQU5MSSBFTiBHw5xWRU7EsEzEsFIgVEVLIFRFUkPEsEgnIDogJ/Cfjq8gTUHDhyDDlk7DnCBLVVBPTlUnfSDCtyAke2VzYyhkLmRhdGUpfTwvc3Bhbj48c3Bhbj48Yj4ke3RnLnNlbnQ/J1RFTEVHUkFNIEfDlk5ERVLEsExExLAnOidHw5ZOREVSxLBNIEtPTlRST0zDnCd9PC9iPjwvc3Bhbj48L2Rpdj48ZGl2IHN0eWxlPSJtYXJnaW46MTBweCAwIj4ke2QucGlja3MubWFwKChwLGkpPT5gPGRpdiBjbGFzcz0ic3RhdHRlYW0iPjxkaXYgY2xhc3M9ImhlYWQiPjxzcGFuPiR7ZXNjKHAubGVhZ3VlKX08L3NwYW4+PHNwYW4+JHtwLm1pbnV0ZSE9bnVsbD9lc2MocC5taW51dGUpKyInIMK3IFNrb3I6ICIrZXNjKHAuY3VycmVudFNjb3JlfHwnMC0wJyk6J01hw6cgw7Zuw7wnfTwvc3Bhbj48L2Rpdj48ZGl2IHN0eWxlPSJmb250LXdlaWdodDo4NTA7bWFyZ2luOjhweCAwIj4ke2VzYyhwLmhvbWUpfSBWUyAke2VzYyhwLmF3YXkpfTwvZGl2PjxkaXYgY2xhc3M9InN0YXRsaW5lIj48c3Bhbj5UZXJjaWg8L3NwYW4+PGI+JHtlc2MocC5tYXJrZXQpfTwvYj48L2Rpdj48ZGl2IGNsYXNzPSJzbWFsbCI+T3JhbiBrYXluYcSfxLE6ICR7ZXNjKHAuc291cmNlfHwnQmVsaXJ0aWxtZWRpJyl9IMK3ICR7ZXNjKHAub2Rkc0Jhc2lzfHwnT3JhbiBrYXluYcSfxLEgZG/En3J1bGFubWFsxLEnKX08L2Rpdj4ke3Auc3RhdHNTdW1tYXJ5JiZwLnN0YXRzU3VtbWFyeS5sZW5ndGg/YDxkaXYgY2xhc3M9InNtYWxsIj5DYW5sxLEgaXN0YXRpc3RpazogJHtlc2MocC5zdGF0c1N1bW1hcnkuam9pbignIMK3ICcpKX08L2Rpdj5gOicnfTwvZGl2PmApLmpvaW4oJycpfTwvZGl2PjxkaXYgY2xhc3M9InNtYWxsIiBzdHlsZT0ibWFyZ2luLXRvcDo4cHgiPiR7ZXNjKHRnTGFiZWwpfS4gS3Vwb24gw7xyZXRpbGRpxJ9pbmRlIFRlbGVncmFtIGfDtm5kZXJpbWkgb3RvbWF0aWsgZGVuZW5pcjsgbWFudWVsIG9uYXkgZ2VyZWttZXouPC9kaXY+YH0KYXN5bmMgZnVuY3Rpb24gbWFrZUNvdXBvbigpe2NvbnN0IGI9JCgnbWFrZUNvdXBvbicpO2IuZGlzYWJsZWQ9dHJ1ZTt0cnl7aWYoISQoJ2RhdGUnKS52YWx1ZSl0aHJvdyBFcnJvcignw5ZuY2UgbWHDpyB0YXJpaGluaSBzZcOnLicpO2xldCByPWF3YWl0IGZldGNoKCcvYXBpL2NvdXBvbi9iZXN0P2RhdGU9JytlbmNvZGVVUklDb21wb25lbnQoJCgnZGF0ZScpLnZhbHVlKSk7bGV0IGQ9YXdhaXQgci5qc29uKCk7aWYoIXIub2smJiFkLmVycm9yKWQuZXJyb3I9J1RlayBtYcOnIHNlw6dpbGVtZWRpLic7cmVuZGVyQ291cG9uKGQpO2lmKGQubWVzc2FnZSYmZC5zdGF0dXM9PT0nUkVBRFknKSQoJ2NvdXBvblJlc3VsdCcpLmluc2VydEFkamFjZW50SFRNTCgnYmVmb3JlZW5kJyxgPGRpdiBjbGFzcz0ic21hbGwiIHN0eWxlPSJtYXJnaW4tdG9wOjhweCI+JHtlc2MoZC5tZXNzYWdlKX08L2Rpdj5gKTt9Y2F0Y2goZSl7JCgnY291cG9uUmVzdWx0JykuaW5uZXJIVE1MPWA8c3BhbiBjbGFzcz0iZXJyIj4ke2VzYyhlLm1lc3NhZ2UpfTwvc3Bhbj5gfWZpbmFsbHl7Yi5kaXNhYmxlZD1mYWxzZTt9fQphc3luYyBmdW5jdGlvbiBtYWtlU3VycHJpc2VDb3Vwb24oKXtjb25zdCBiPSQoJ21ha2VTdXJwcmlzZUNvdXBvbicpO2IuZGlzYWJsZWQ9dHJ1ZTt0cnl7aWYoISQoJ2RhdGUnKS52YWx1ZSl0aHJvdyBFcnJvcignw5ZuY2UgbWHDpyB0YXJpaGluaSBzZcOnLicpO2NvbnN0IHI9YXdhaXQgZmV0Y2goJy9hcGkvY291cG9uL3N1cnByaXNlP2RhdGU9JytlbmNvZGVVUklDb21wb25lbnQoJCgnZGF0ZScpLnZhbHVlKSk7Y29uc3QgZD1hd2FpdCByLmpzb24oKTtpZighci5vayYmIWQuZXJyb3IpZC5lcnJvcj0nMTAgbWHDp2zEsWsga3Vwb24gb2x1xZ90dXJ1bGFtYWTEsS4nO3JlbmRlckNvdXBvbihkKTt9Y2F0Y2goZSl7JCgnY291cG9uUmVzdWx0JykuaW5uZXJIVE1MPWA8c3BhbiBjbGFzcz0iZXJyIj4ke2VzYyhlLm1lc3NhZ2UpfTwvc3Bhbj5gfWZpbmFsbHl7Yi5kaXNhYmxlZD1mYWxzZTt9fQphc3luYyBmdW5jdGlvbiBtYWtlTGl2ZUJlc3QoKXtjb25zdCBiPSQoJ21ha2VMaXZlQmVzdCcpO2IuZGlzYWJsZWQ9dHJ1ZTt0cnl7bGV0IGRhdGU9JCgnZGF0ZScpLnZhbHVlfHxuZXcgRGF0ZSgpLnRvSVNPU3RyaW5nKCkuc2xpY2UoMCwxMCk7bGV0IHI9YXdhaXQgZmV0Y2goJy9hcGkvY291cG9uL2xpdmUtYmVzdD9kYXRlPScrZW5jb2RlVVJJQ29tcG9uZW50KGRhdGUpKTtsZXQgZD1hd2FpdCByLmpzb24oKTtpZighci5vayYmIWQuZXJyb3IpZC5lcnJvcj0nQ2FubMSxIHRlcmNpaCBidWx1bmFtYWTEsS4nO3JlbmRlckNvdXBvbihkKTtpZihkLm1lc3NhZ2UmJmQuc3RhdHVzPT09J1JFQURZJykkKCdjb3Vwb25SZXN1bHQnKS5pbnNlcnRBZGphY2VudEhUTUwoJ2JlZm9yZWVuZCcsYDxkaXYgY2xhc3M9InNtYWxsIiBzdHlsZT0ibWFyZ2luLXRvcDo4cHgiPiR7ZXNjKGQubWVzc2FnZSl9PC9kaXY+YCk7fWNhdGNoKGUpeyQoJ2NvdXBvblJlc3VsdCcpLmlubmVySFRNTD1gPHNwYW4gY2xhc3M9ImVyciI+JHtlc2MoZS5tZXNzYWdlKX08L3NwYW4+YH1maW5hbGx5e2IuZGlzYWJsZWQ9ZmFsc2U7fX0KYXN5bmMgZnVuY3Rpb24gYXBwcm92ZUFuYWx5c2lzKGlkLG1vZGUpe2NvbnN0IG1hdGNoPVsuLi5tYXRjaGVzLC4uLmJ1bGxldGluTWF0Y2hlc10uZmluZCh4PT5OdW1iZXIoeC5pZCk9PT1OdW1iZXIoaWQpKTtjb25zdCBib3g9JCgnYScraWQpO2lmKCFtYXRjaHx8IWJveClyZXR1cm47Y29uc3QgdmFscz17fTtib3gucXVlcnlTZWxlY3RvckFsbCgnLnRhYmxlIHRyJykuZm9yRWFjaChyb3c9Pntjb25zdCBjPXJvdy5xdWVyeVNlbGVjdG9yQWxsKCd0ZCcpO2lmKGMubGVuZ3RoPT09Mil2YWxzW2NbMF0udGV4dENvbnRlbnQudHJpbSgpXT1jWzFdLnRleHRDb250ZW50LnRyaW0oKX0pO2NvbnN0IGFuYWx5c2lzPXttYWluUGljazp2YWxzWydBTkEgVEVSQ8SwSCddfHwn4oCUJyxhbHRlcm5hdGl2ZTp2YWxzWydBTFRFUk5BVMSwRiddfHwn4oCUJyxoYWxmVGltZVNjb3JlOnZhbHNbJ8SwWSBTS09SJ118fCfigJQnLGZ1bGxUaW1lU2NvcmU6dmFsc1snTVMgU0tPUiddfHwn4oCUJyxsaXZlUGljazp2YWxzWydDQU5MSSBURVJDxLBIJ118fCfigJQnfTt0cnl7YXdhaXQgZmV0Y2goJy9hcGkvYW5hbHlzZXMvYXBwcm92ZScse21ldGhvZDonUE9TVCcsaGVhZGVyczp7J0NvbnRlbnQtVHlwZSc6J2FwcGxpY2F0aW9uL2pzb24nfSxib2R5OkpTT04uc3RyaW5naWZ5KHtmaXh0dXJlSWQ6TnVtYmVyKGlkKSxtYXRjaERhdGU6bWF0Y2guZml4dHVyZURhdGV8fCcnLGhvbWU6bWF0Y2guaG9tZSxhd2F5Om1hdGNoLmF3YXksYW5hbHlzaXN9KX0pO2FsZXJ0KCdBbmFsaXogb25heWxhbmTEsS4nKTt9Y2F0Y2goZSl7YWxlcnQoJ0hhdGE6ICcrZS5tZXNzYWdlKTt9fQpmdW5jdGlvbiBjbG9zZUFyY2hpdmVzKCl7JCgnYW5hbHlzZXNBcmNoaXZlJykuY2xhc3NMaXN0LmFkZCgnaGlkZGVuJyk7JCgnY291cG9uc0FyY2hpdmUnKS5jbGFzc0xpc3QuYWRkKCdoaWRkZW4nKTt9CmFzeW5jIGZ1bmN0aW9uIGxvYWRBcmNoaXZlcyh3aGljaCl7Y29uc3QgYm94PSQod2hpY2g9PT0nYW5hbHlzaXMnPydhbmFseXNlc0FyY2hpdmVMaXN0JzonY291cG9uc0FyY2hpdmVMaXN0Jyk7Ym94LnRleHRDb250ZW50PSdZw7xrbGVuaXlvcuKApic7dHJ5e2xldCByPWF3YWl0IGZldGNoKCcvYXBpL2FyY2hpdmVzJyksaj1hd2FpdCByLmpzb24oKTtpZih3aGljaD09PSdhbmFseXNpcycpe2JveC5pbm5lckhUTUw9KGouYW5hbHlzZXN8fFtdKS5sZW5ndGg/ai5hbmFseXNlcy5tYXAoeD0+YDxkaXYgY2xhc3M9ImFyY2hpdmUtaXRlbSI+PGRpdiBjbGFzcz0idGl0bGUiPiR7ZXNjKHguaG9tZV90ZWFtKX0gVlMgJHtlc2MoeC5hd2F5X3RlYW0pfTwvZGl2PjxkaXYgY2xhc3M9InJvd2xpbmUiPjxzcGFuPkFuYSB0ZXJjaWg8L3NwYW4+PGI+JHtlc2MoeC5hbmFseXNpcz8ubWFpblBpY2t8fCfigJQnKX08L2I+PC9kaXY+PGRpdiBjbGFzcz0icm93bGluZSI+PHNwYW4+xLBZIC8gTVMgc2tvcjwvc3Bhbj48Yj4ke2VzYyh4LmFuYWx5c2lzPy5oYWxmVGltZVNjb3JlfHwn4oCUJyl9IC8gJHtlc2MoeC5hbmFseXNpcz8uZnVsbFRpbWVTY29yZXx8J+KAlCcpfTwvYj48L2Rpdj48L2Rpdj5gKS5qb2luKCcnKTonPGRpdiBjbGFzcz0iZW1wdHkiPkthecSxdCB5b2suPC9kaXY+Jzt9ZWxzZXtib3guaW5uZXJIVE1MPShqLmNvdXBvbnN8fFtdKS5sZW5ndGg/ai5jb3Vwb25zLm1hcCh4PT5gPGRpdiBjbGFzcz0iYXJjaGl2ZS1pdGVtIj48ZGl2IGNsYXNzPSJ0aXRsZSI+JHt4LmlzTGl2ZT8n8J+OryBDYW5sxLEgS29tYmluJzonS3Vwb24nfSDCtyAke2VzYyh4LmRhdGV8fCcnKX08L2Rpdj48L2Rpdj5gKS5qb2luKCcnKTonPGRpdiBjbGFzcz0iZW1wdHkiPkthecSxdCB5b2suPC9kaXY+Jzt9fWNhdGNoKGUpe2JveC5pbm5lckhUTUw9YDxkaXYgY2xhc3M9ImVyciI+JHtlc2MoZS5tZXNzYWdlKX1gIH19CndpbmRvdy5hbmFseXplPWFuYWx5emU7d2luZG93LnN0YXRzPXN0YXRzOyQoJ3JlZnJlc2gnKS5vbmNsaWNrPWxpdmU7JCgnYnVsbGV0aW4nKS5vbmNsaWNrPWJ1bGxldGluOyQoJ3NlYXJjaE1hdGNoJykub25jbGljaz1zZWFyY2hNYXRjaDskKCdtYXRjaFNlYXJjaCcpLmFkZEV2ZW50TGlzdGVuZXIoJ2tleWRvd24nLGU9PntpZihlLmtleT09PSdFbnRlcicpc2VhcmNoTWF0Y2goKX0pOyQoJ2NsZWFyTWF0Y2hTZWFyY2gnKS5vbmNsaWNrPWNsZWFyTWF0Y2hTZWFyY2g7JCgnbWFrZUNvdXBvbicpLm9uY2xpY2s9bWFrZUNvdXBvbjskKCdtYWtlU3VycHJpc2VDb3Vwb24nKS5vbmNsaWNrPW1ha2VTdXJwcmlzZUNvdXBvbjskKCdtYWtlTGl2ZUJlc3QnKS5vbmNsaWNrPW1ha2VMaXZlQmVzdDskKCdzaG93QW5hbHlzZXMnKS5vbmNsaWNrPSgpPT57Y2xvc2VBcmNoaXZlcygpOyQoJ2FuYWx5c2VzQXJjaGl2ZScpLmNsYXNzTGlzdC5yZW1vdmUoJ2hpZGRlbicpO2xvYWRBcmNoaXZlcygnYW5hbHlzaXMnKTt9OyQoJ3Nob3dDb3Vwb25zJykub25jbGljaz0oKT0+e2Nsb3NlQXJjaGl2ZXMoKTskKCdjb3Vwb25zQXJjaGl2ZScpLmNsYXNzTGlzdC5yZW1vdmUoJ2hpZGRlbicpO2xvYWRBcmNoaXZlcygnY291cG9uJyk7fTskKCdmaWx0ZXInKS5vbmNoYW5nZT1yZW5kZXI7bGV0IGQ9bmV3IERhdGUoKTskKCdkYXRlJykudmFsdWU9YCR7ZC5nZXRGdWxsWWVhcigpfS0ke1N0cmluZyhkLmdldE1vbnRoKCkrMSkucGFkU3RhcnQoMiwnMCcpfS0ke1N0cmluZyhkLmdldERhdGUoKSkucGFkU3RhcnQoMiwnMCcpfWA7bGl2ZSgpOwo8L3NjcmlwdD48L2JvZHk+PC9odG1sPg==", "base64").toString("utf8");
 app.get("/", async (_req, res) => {
-  for (const candidate of [path.join(ROOT, "public", "index.html"), path.join(ROOT, "index.html")]) {
-    try { return res.type("html").send(await fs.readFile(candidate, "utf8")); } catch {}
+  try {
+    const html = await fs.readFile(path.join(ROOT, "index.html"), "utf8");
+    return res.type("html").send(html);
+  } catch {
+    return res.type("html").send(EMBEDDED_INDEX_HTML);
   }
-  return res.status(500).send("public/index.html bulunamadı.");
 });
+app.use(express.static(path.join(ROOT, "public")));
 
 const providerCache = new Map();
 const providerInFlight = new Map();
@@ -29,11 +32,7 @@ const { Pool } = pg;
 const databasePool = process.env.DATABASE_URL
   ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL) ? false : { rejectUnauthorized: false } })
   : null;
-const telegramSentFixtureIds = new Set();
-const goalTrackedFixtures = new Map();
-const goalScoreCache = new Map();
 let archiveDatabaseReady = Promise.resolve();
-
 if (databasePool) {
   archiveDatabaseReady = (async () => {
     try {
@@ -45,41 +44,54 @@ if (databasePool) {
       )`);
       await databasePool.query("CREATE INDEX IF NOT EXISTS winscope_archive_category_id_idx ON winscope_archive(category, id DESC)");
       await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_telegram_fixture_sent (
-        fixture_id BIGINT PRIMARY KEY, match_date DATE, coupon_type TEXT, sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        fixture_id BIGINT PRIMARY KEY,
+        match_date DATE,
+        coupon_type TEXT,
+        sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`);
-      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_goal_tracking (
-        fixture_id BIGINT PRIMARY KEY, home_team TEXT NOT NULL DEFAULT '', away_team TEXT NOT NULL DEFAULT '',
-        league_name TEXT NOT NULL DEFAULT '', source_label TEXT NOT NULL DEFAULT 'Telegram maç takibi',
-        last_score TEXT NOT NULL DEFAULT '0-0', active BOOLEAN NOT NULL DEFAULT TRUE, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )`);
-      const [a, c, s, t] = await Promise.all([
-        databasePool.query("SELECT payload FROM winscope_archive WHERE category='analysis' ORDER BY id DESC LIMIT 100"),
-        databasePool.query("SELECT payload FROM winscope_archive WHERE category='coupon' ORDER BY id DESC LIMIT 50"),
-        databasePool.query("SELECT fixture_id FROM winscope_telegram_fixture_sent"),
-        databasePool.query("SELECT fixture_id,home_team,away_team,league_name,source_label,last_score FROM winscope_goal_tracking WHERE active=TRUE")
+      const [analysisRows, couponRows, sentRows] = await Promise.all([
+        databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'analysis' ORDER BY id DESC LIMIT 100"),
+        databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'coupon' ORDER BY id DESC LIMIT 50"),
+        databasePool.query("SELECT fixture_id FROM winscope_telegram_fixture_sent")
       ]);
-      archives.analyses = a.rows.map(x => x.payload);
-      archives.coupons = c.rows.map(x => x.payload);
-      for (const r of s.rows) telegramSentFixtureIds.add(Number(r.fixture_id));
-      for (const r of t.rows) {
-        const id = Number(r.fixture_id);
-        goalTrackedFixtures.set(id, { home: r.home_team, away: r.away_team, league: r.league_name, sourceLabel: r.source_label, baselineScore: r.last_score });
-        goalScoreCache.set(id, r.last_score);
-      }
-      console.log("[Archive] PostgreSQL arşivi yüklendi.");
-    } catch (e) { console.error("[Archive] PostgreSQL başlatılamadı:", e.message); }
+      archives.analyses = analysisRows.rows.map(row => row.payload);
+      archives.coupons = couponRows.rows.map(row => row.payload);
+      for (const row of sentRows.rows) telegramSentFixtureIds.add(Number(row.fixture_id));
+      console.log(`[Archive] PostgreSQL arşivi yüklendi: analyses=${archives.analyses.length}, coupons=${archives.coupons.length}`);
+    } catch (error) {
+      console.error(`[Archive] PostgreSQL başlatılamadı; servis bellek içi arşivle devam edecek: ${error.message}`);
+    }
   })();
 }
-
 async function saveArchiveItem(category, payload) {
-  if (!databasePool) return { persisted: false };
+  if (!databasePool) return { persisted: false, reason: "DATABASE_URL tanımlı değil; kayıt yalnızca çalışan süreç belleğinde tutulur." };
   try {
     await archiveDatabaseReady;
-    await databasePool.query("INSERT INTO winscope_archive(category,payload) VALUES($1,$2::jsonb)", [category, JSON.stringify(payload)]);
+    await databasePool.query("INSERT INTO winscope_archive(category, payload) VALUES ($1, $2::jsonb)", [category, JSON.stringify(payload)]);
+    await databasePool.query(`DELETE FROM winscope_archive WHERE id IN (
+      SELECT id FROM winscope_archive WHERE category = $1 ORDER BY id DESC OFFSET $2
+    )`, [category, category === "analysis" ? 100 : 50]);
     return { persisted: true };
-  } catch (e) { return { persisted: false, error: e.message }; }
+  } catch (error) {
+    console.error(`[Archive] Kayıt kalıcılaştırılamadı (${category}): ${error.message}`);
+    return { persisted: false, error: error.message };
+  }
 }
-
+// Aynı kuponun art arda tıklama/yenilemelerde tekrar Telegram'a gitmesini önler.
+const telegramDeliveryCache = new Map();
+// Otomatik gönderimde aynı gün aynı maçı tekrar seçmemek için takip edilir.
+const autoSentFixtureKeys = new Set();
+// Fixture ID bazında tekrar engeli; PostgreSQL varsa sunucu yeniden başlasa da korunur.
+const telegramSentFixtureIds = new Set();
+let autoLiveTaskInFlight = false;
+let autoPrematchTaskInFlight = false;
+// Telegram'a gönderilmiş kuponlardaki maçlar için gol/skor değişimi takibi.
+// Not: Bu izleme durumu bellektedir; süreç yeniden başlarsa kupon yeniden gönderilince takip tekrar kurulur.
+const goalTrackedFixtures = new Map();
+const goalScoreCache = new Map();
+let goalScanInFlight = false;
+// API-Football plan limitine takılmamak için istekleri tek kuyruktan geçir.
+// 260 ms aralık yaklaşık 231 istek/dk ile 300/dk sınırının altında kalır.
 let providerQueue = Promise.resolve();
 let lastProviderRequestAt = 0;
 let providerCooldownUntil = 0;
@@ -91,11 +103,11 @@ async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
   const cached = providerCache.get(cacheKey);
   if (cached && now - cached.at < ttlMs) return cached.payload;
   if (providerInFlight.has(cacheKey)) return providerInFlight.get(cacheKey);
-  if (!API_KEY) throw new Error("API_FOOTBALL_KEY eksik. Render Environment Variables bölümünü kontrol et.");
+  if (!API_KEY) throw new Error("Render Environment Variables içinde API_FOOTBALL_KEY eksik.");
 
   const task = providerQueue.then(async () => {
-    const again = providerCache.get(cacheKey);
-    if (again && Date.now() - again.at < ttlMs) return again.payload;
+    const secondCheck = providerCache.get(cacheKey);
+    if (secondCheck && Date.now() - secondCheck.at < ttlMs) return secondCheck.payload;
     const allowedAt = Math.max(lastProviderRequestAt + PROVIDER_MIN_INTERVAL_MS, providerCooldownUntil);
     if (allowedAt > Date.now()) await delay(allowedAt - Date.now());
     lastProviderRequestAt = Date.now();
@@ -105,435 +117,1198 @@ async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
     });
     const raw = await response.text();
     let payload;
-    try { payload = raw ? JSON.parse(raw) : {}; } catch { throw new Error("API geçerli JSON döndürmedi."); }
-    if (response.status === 429) {
-      providerCooldownUntil = Date.now() + 60000;
-      throw new Error("API-Football istek sınırına ulaşıldı; bir dakika sonra tekrar dene.");
-    }
-    if (!response.ok) throw new Error(`API hatası: ${response.status}`);
-    if (payload.errors && Object.keys(payload.errors).length) {
-      const message = Object.values(payload.errors).flat().join("; ");
-      throw new Error(`API-Football: ${message}`);
+    try { payload = raw ? JSON.parse(raw) : {}; } catch { throw new Error("API-Football geçerli JSON döndürmedi."); }
+    const errors = payload.errors && Object.keys(payload.errors).length ? payload.errors : null;
+    const errorText = errors ? JSON.stringify(errors) : "";
+    if (!response.ok || errors) {
+      if (response.status === 429 || /rate.?limit|too many requests|per-minute/i.test(errorText)) {
+        providerCooldownUntil = Date.now() + 15000;
+        throw new Error(`API-Football istek sınırına ulaşıldı; 15 saniye bekleme uygulandı. ${errorText}`);
+      }
+      throw new Error(`API-Football hatası: ${errors ? errorText : `HTTP ${response.status}`}`);
     }
     providerCache.set(cacheKey, { at: Date.now(), payload });
+    // Bellek kullanımını sınırlı tut.
+    if (providerCache.size > 2500) {
+      const cutoff = Date.now() - 6 * 60 * 60 * 1000;
+      for (const [key, value] of providerCache) if (value.at < cutoff) providerCache.delete(key);
+      while (providerCache.size > 2000) providerCache.delete(providerCache.keys().next().value);
+    }
     return payload;
   });
   providerQueue = task.catch(() => undefined);
   providerInFlight.set(cacheKey, task);
-  try { return await task; } finally { providerInFlight.delete(cacheKey); }
+  try { return await task; }
+  finally { providerInFlight.delete(cacheKey); }
 }
 
 function normalizeProviderMatch(match) {
-  const statusRaw = String(match.fixture?.status?.short || match.status || "NS").toUpperCase();
-  let status = "NS";
-  if (["FT", "AET", "PEN"].includes(statusRaw)) status = "FT";
-  else if (["1H", "2H", "HT", "LIVE", "IN_PLAY", "ET", "BT", "P"].includes(statusRaw)) status = "LIVE";
+  const homeName = match.teams?.home?.name || match.home || "Ev sahibi";
+  const awayName = match.teams?.away?.name || match.away || "Deplasman";
+  const leagueName = match.league?.name || match.league || "Lig";
+  const countryName = match.league?.country || match.country || "";
+  const idNum = Number(match.fixture?.id ?? match.id) || 0;
+  let status = String(match.fixture?.status?.short || match.status || "NS").toUpperCase();
+  if (["FT", "AET", "PEN"].includes(status)) status = "FT";
+  else if (["1H", "2H", "HT", "LIVE", "IN_PLAY", "ET", "BT", "P"].includes(status)) status = "LIVE";
+  else if (["NS", "TBD", "PST", "CANC", "ABD", "AWD", "WO"].includes(status)) status = status === "NS" ? "NS" : status;
   return {
-    id: Number(match.fixture?.id ?? match.id) || 0,
-    homeId: Number(match.teams?.home?.id) || null, awayId: Number(match.teams?.away?.id) || null,
-    league: String(match.league?.name || match.league || "Lig"),
-    country: String(match.league?.country || match.country || ""),
+    id: idNum, homeId: Number(match.teams?.home?.id) || null, awayId: Number(match.teams?.away?.id) || null,
+    league: String(leagueName), country: String(countryName),
     minute: match.fixture?.status?.elapsed ?? match.minute ?? null, status,
-    home: String(match.teams?.home?.name || match.home || "Ev sahibi"),
-    away: String(match.teams?.away?.name || match.away || "Deplasman"),
-    homeScore: Number(match.goals?.home ?? 0), awayScore: Number(match.goals?.away ?? 0),
+    home: String(homeName), away: String(awayName),
+    homeScore: match.goals?.home ?? 0, awayScore: match.goals?.away ?? 0,
     htHomeScore: match.score?.halftime?.home ?? null, htAwayScore: match.score?.halftime?.away ?? null,
     fixtureDate: match.fixture?.date || match.kickoff_utc || null
   };
 }
 
-const norm = value => String(value ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[’']/g, "'").trim();
-function parseOdd(value) {
-  const n = Number(String(value ?? "").replace(",", "."));
-  return Number.isFinite(n) && n > 1.01 && n < 1000 ? n : null;
-}
-function marketKey(name) {
-  const n = norm(name);
-  const half = /first half|1st half|half time|half-time|1st half result|first half result/.test(n);
-  if (/both teams to score|btts/.test(n)) return half ? "İY KG" : "KG VAR";
-  if (/asian handicap|handicap/.test(n)) return "AH";
-  if (/match winner|1x2|full time result|regular time result|match result/.test(n)) return half ? "İY 1X2" : "MS 1X2";
-  if (/over\/under|goals over\/under|total goals|goals/.test(n)) return half ? "İY OU" : "MS OU";
-  return null;
-}
-function parseLabel(label) {
-  const n = norm(label);
-  const line = n.match(/(?:over|under|o|u)\s*([0-9]+(?:[.,][0-9]+)?)/) || n.match(/^([0-9]+(?:[.,][0-9]+)?)$/);
-  const total = line ? Number(line[1].replace(",", ".")) : null;
-  const side = /\b(over|o)\b/.test(n) ? "over" : /\b(under|u)\b/.test(n) ? "under" : null;
-  if (/^(home|1|1 \(home\))$/.test(n)) return { side: "home" };
-  if (/^(draw|x|tie)$/.test(n)) return { side: "draw" };
-  if (/^(away|2|2 \(away\))$/.test(n)) return { side: "away" };
-  if (/^(yes|y)$/.test(n)) return { side: "yes" };
-  if (/^(no|n)$/.test(n)) return { side: "no" };
-  if (total !== null && side) return { total, side };
-  if (/-0[.,]5/.test(n) || /home -0[.,]5/.test(n)) return { side: "home" };
-  return null;
+function computeAnalysis(match) {
+  const minute = Number(match.minute || 0);
+  const home = Number(match.homeScore || 0), away = Number(match.awayScore || 0);
+  const total = home + away, live = match.status === "LIVE", finished = match.status === "FT";
+  let ht = "Tahmin: 1-0", ft = "Tahmin: 2-1", mainPick = "MS 2.5 ÜST", alternative = "KG VAR";
+  if (finished) {
+    ht = `${match.htHomeScore ?? "?"}-${match.htAwayScore ?? "?"}`;
+    ft = `${home}-${away}`;
+  } else if (live) {
+    if (minute >= 45 && match.htHomeScore != null && match.htAwayScore != null) ht = `${match.htHomeScore}-${match.htAwayScore} (İY Gerçek)`;
+    else if (minute < 45 && total > 0) ht = `Tahmin: ${home}-${away}`;
+    else if (minute <= 30) ht = "Tahmin: 1-0";
+    else ht = "Tahmin: 0-0";
+    ft = minute >= 75 ? `Tahmin: ${home}-${away}` : `Tahmin: ${home + 1}-${away}`;
+    if (minute < 33 && total === 0) { mainPick = "İY 0.5 ÜST"; alternative = "MS 1.5 ÜST"; }
+    else if (minute >= 33 && minute < 45 && total === 0) { mainPick = "MS 1.5 ÜST"; alternative = "KG VAR"; }
+    else if (minute >= 45 && total < 2) { mainPick = "MS 1.5 ÜST"; alternative = "KG VAR"; }
+    else { mainPick = "MS 1.5 ÜST"; alternative = "KG VAR"; }
+  } else {
+    ht = "Tahmin: 1-0";
+    ft = "Tahmin: 2-1";
+    mainPick = "MS 2.5 ÜST"; alternative = "KG VAR";
+  }
+  return { halfTimeScore: ht, fullTimeScore: ft, mainPick, alternative, surprise: "MS 3.5 ÜST" };
 }
 
-/* Oranlar yalnızca motor içinde tutulur; API yanıtına ham oran gönderilmez.
-   Her market için önce Bet365, yoksa o marketi sunan başka büro seçilir. */
+function bookmakerRows(oddsRow) {
+  if (!oddsRow) return [];
+  if (Array.isArray(oddsRow.bookmakers) && oddsRow.bookmakers.length) return oddsRow.bookmakers;
+  if (Array.isArray(oddsRow.odds) && oddsRow.odds.length) {
+    return [{
+      name: oddsRow.bookmaker?.name || oddsRow.bookmaker || oddsRow.source || "API-Football",
+      bets: oddsRow.odds.map(item => ({ name: item.name || item.bet || "", values: item.values || [] }))
+    }];
+  }
+  return [];
+}
+
 function oddsForFixture(oddsRow) {
-  const bookmakers = Array.isArray(oddsRow?.bookmakers) ? oddsRow.bookmakers : [];
-  if (!bookmakers.length) return {};
-  const sorted = [...bookmakers].sort((a, b) => Number(/bet365/i.test(b.name || "")) - Number(/bet365/i.test(a.name || "")));
-  const result = {};
-  const wantedLines = new Set([0.5, 1.5, 2.5, 3.5, 5.5]);
-
-  for (const bookmaker of sorted) {
+  const markets = new Map();
+  const add = (book, key, side, odd) => {
+    if (!Number.isFinite(odd) || odd <= 1.01) return;
+    const mapKey = `${book}|${key}`;
+    if (!markets.has(mapKey)) markets.set(mapKey, { market: key, bookmaker: book, over: null, under: null, yes: null, no: null, home: null, draw: null, away: null });
+    const item = markets.get(mapKey);
+    item[side] = odd;
+  };
+  for (const bookmaker of bookmakerRows(oddsRow)) {
+    const book = String(bookmaker.name || "Kaynak belirtilmedi");
     for (const bet of (bookmaker.bets || [])) {
-      const name = String(bet.name || "");
-      const base = marketKey(name);
-      if (!base) continue;
+      const name = String(bet.name || "").toLowerCase().replace(/[–—]/g, "-");
+      const isHalf = /first half|1st half|half.?time|1st period|first period/.test(name);
+      const isHomeTeam = /home team|home goals|team 1 total|team 1 goals|team total - home/.test(name);
+      const isAwayTeam = /away team|away goals|team 2 total|team 2 goals|team total - away/.test(name);
+      const isBtts = /both teams to score|both teams score|btts/.test(name);
+      const isTotal = /over.?under|total goals|match goals|goal line|goals total|total/.test(name) && !isHomeTeam && !isAwayTeam;
+      const isWinner = /match winner|1x2|full.?time result|match result|regular time result|winner/.test(name);
       for (const value of (bet.values || [])) {
-        const parsed = parseLabel(value.value ?? value.name);
-        const odd = parseOdd(value.odd);
-        if (!parsed || !odd) continue;
-        let key = null;
-        if (base === "MS OU" || base === "İY OU") {
-          if (parsed.total !== undefined && wantedLines.has(parsed.total)) key = `${base === "İY OU" ? "İY" : "MS"} ${parsed.total} ${parsed.side === "over" ? "ÜST" : "ALT"}`;
-        } else if (base === "KG VAR" || base === "İY KG") {
-          key = `${base}:${parsed.side}`;
-        } else if (base === "MS 1X2" || base === "İY 1X2") {
-          key = `${base}:${parsed.side}`;
-        } else if (base === "AH" && (parsed.side === "home") && /-0[.,]5/.test(norm(value.value ?? value.name))) {
-          key = "AH -0.5";
+        const label = String(value.value ?? value.name ?? "").toLowerCase().trim();
+        const odd = Number(value.odd);
+        if (!Number.isFinite(odd) || odd <= 1.01) continue;
+        if (isWinner) {
+          if (/^(home|1|team 1|1 \(home\))$/.test(label)) add(book, "MS 1", "home", odd);
+          else if (/^(draw|x|tie)$/.test(label)) add(book, "MS 1", "draw", odd);
+          else if (/^(away|2|team 2|2 \(away\))$/.test(label)) add(book, "MS 1", "away", odd);
+          continue;
         }
-        if (key && result[key] === undefined) result[key] = { odd, bookmaker: String(bookmaker.name || "Bilinmeyen büro") };
+        if (isBtts) {
+          if (/^(yes|y|both teams to score - yes)$/.test(label)) add(book, "KG VAR", "yes", odd);
+          else if (/^(no|n|both teams to score - no)$/.test(label)) add(book, "KG VAR", "no", odd);
+          continue;
+        }
+        const overMatch = label.match(/over\s*([0-9]+[.,][0-9]+)/);
+        const underMatch = label.match(/under\s*([0-9]+[.,][0-9]+)/);
+        const lineMatch = label.match(/([0-9]+[.,][0-9]+)/);
+        const line = (overMatch || underMatch || lineMatch)?.[1]?.replace(',', '.');
+        if (!line) continue;
+        const side = overMatch ? "over" : underMatch ? "under" : null;
+        if (!side) continue;
+        let key = null;
+        if (isHomeTeam && Number(line) === 1.5) key = "EV 1.5 ÜST";
+        else if (isAwayTeam && Number(line) === 1.5) key = "DEP 1.5 ÜST";
+        else if (isHalf && [0.5, 1.5, 2.5].includes(Number(line))) key = `İY ${line} ÜST`;
+        else if (isTotal && [0.5, 1.5, 2.5, 3.5].includes(Number(line))) key = `MS ${line} ÜST`;
+        if (key) add(book, key, side, odd);
       }
     }
   }
-  return result;
+  const candidates = [];
+  for (const item of markets.values()) {
+    let pct = null;
+    if (item.over && item.under) pct = 100 * (1 / item.over) / ((1 / item.over) + (1 / item.under));
+    else if (item.yes && item.no) pct = 100 * (1 / item.yes) / ((1 / item.yes) + (1 / item.no));
+    else if (item.home && item.draw && item.away) {
+      const inv = [1 / item.home, 1 / item.draw, 1 / item.away], sum = inv.reduce((a,b)=>a+b,0);
+      pct = 100 * inv[0] / sum;
+    }
+    const odd = item.over || item.yes || item.home;
+    if (pct == null || !Number.isFinite(pct)) continue;
+    const ranks = { "EV 1.5 ÜST": 1, "DEP 1.5 ÜST": 1, "İY 0.5 ÜST": 2, "MS 0.5 ÜST": 2, "İY 1.5 ÜST": 3, "MS 1.5 ÜST": 3, "MS 2.5 ÜST": 4, "KG VAR": 5, "MS 3.5 ÜST": 6 };
+    candidates.push({ market: item.market, odd, probability: pct, rank: ranks[item.market] ?? 9, bookmaker: item.bookmaker,
+      homeOdd: item.market === "MS 1" ? item.home : null, drawOdd: item.market === "MS 1" ? item.draw : null,
+      awayOdd: item.market === "MS 1" ? item.away : null });
+  }
+  // If API-Football has multiple bookmakers, keep each book's pair intact and prefer Bet365 only as a tie-break.
+  return candidates.sort((a,b) => (/bet365/i.test(b.bookmaker)-/bet365/i.test(a.bookmaker)) || b.probability-a.probability || a.rank-b.rank);
 }
 
-function marketProbability(odds, key) {
-  const over = odds[`${key} ÜST`]?.odd;
-  const under = odds[`${key} ALT`]?.odd;
-  if (over && under) {
-    const a = 1 / over, b = 1 / under;
-    return a / (a + b);
-  }
+function marketSupport(market, homeForm, awayForm) {
+  if (!homeForm?.available || !awayForm?.available) return null;
+  const avg = (a,b) => a == null || b == null ? null : (Number(a)+Number(b))/2;
+  if (market === "EV 1.5 ÜST") return 0.65*Number(homeForm.teamGoalsOver15Pct ?? 0) + 0.35*Number(awayForm.goalsConcededPct ?? 0);
+  if (market === "DEP 1.5 ÜST") return 0.65*Number(awayForm.teamGoalsOver15Pct ?? 0) + 0.35*Number(homeForm.goalsConcededPct ?? 0);
+  if (market === "MS 2.5 ÜST") return avg(homeForm.over25Pct, awayForm.over25Pct);
+  if (market === "MS 3.5 ÜST") return avg(homeForm.over35Pct, awayForm.over35Pct);
+  if (market === "MS 1.5 ÜST") return avg(homeForm.over15Pct, awayForm.over15Pct);
+  if (market === "MS 0.5 ÜST") return avg(homeForm.over05Pct, awayForm.over05Pct);
+  if (market === "KG VAR") return avg(homeForm.bttsPct, awayForm.bttsPct);
+  if (market === "İY 0.5 ÜST") return avg(homeForm.htOver05Pct, awayForm.htOver05Pct);
+  if (market === "İY 1.5 ÜST") return avg(homeForm.htOver15Pct, awayForm.htOver15Pct);
   return null;
-}
-function resultProbabilities(odds, key) {
-  const h = odds[`${key}:home`]?.odd, d = odds[`${key}:draw`]?.odd, a = odds[`${key}:away`]?.odd;
-  if (!h || !d || !a) return null;
-  const vals = [1 / h, 1 / d, 1 / a], sum = vals.reduce((x, y) => x + y, 0);
-  return { home: vals[0] / sum, draw: vals[1] / sum, away: vals[2] / sum };
-}
-function bttsProbability(odds) {
-  const y = odds["KG VAR:yes"]?.odd, n = odds["KG VAR:no"]?.odd;
-  return y && n ? (1 / y) / ((1 / y) + (1 / n)) : null;
 }
 
 async function fetchTeamRecentForm(teamId, fixtureId) {
-  if (!teamId) return { available: false };
+  if (!teamId) return { available: false, sampleSize: 0 };
   try {
     const payload = await cachedProviderRequest(`form:${teamId}`, `/fixtures?team=${teamId}&last=10`, 6 * 60 * 60 * 1000);
-    const rows = (payload.response || []).filter(row =>
-      Number(row.fixture?.id) !== Number(fixtureId) &&
+    const rows = (payload.response || []).filter(row => Number(row.fixture?.id) !== Number(fixtureId) &&
       ["FT", "AET", "PEN"].includes(String(row.fixture?.status?.short || "").toUpperCase()) &&
-      Number.isFinite(Number(row.goals?.home)) && Number.isFinite(Number(row.goals?.away))
-    ).slice(0, 5);
-    if (!rows.length) return { available: false };
-    let gf = 0, ga = 0, points = 0;
-    for (const r of rows) {
+      row.goals?.home != null && row.goals?.away != null)
+      .sort((a,b) => new Date(b.fixture?.date || 0) - new Date(a.fixture?.date || 0)).slice(0,5);
+    if (rows.length < 5) return { available: false, sampleSize: rows.length };
+    const pct = fn => Math.round(100 * vals.filter(fn).length / vals.length);
+    const vals = rows.map(r => {
       const isHome = Number(r.teams?.home?.id) === Number(teamId);
-      const scored = Number(isHome ? r.goals.home : r.goals.away);
-      const conceded = Number(isHome ? r.goals.away : r.goals.home);
-      gf += scored; ga += conceded;
-      points += scored > conceded ? 3 : scored === conceded ? 1 : 0;
-    }
-    return { available: true, avgGoalsFor: gf / rows.length, avgGoalsAgainst: ga / rows.length, pointsPerMatch: points / rows.length, sampleSize: rows.length };
-  } catch { return { available: false }; }
-}
-
-async function fetchLiveStatistics(fixtureId) {
-  if (!fixtureId) return null;
-  try {
-    const payload = await cachedProviderRequest(`stats:${fixtureId}`, `/fixtures/statistics?fixture=${fixtureId}`, 15000);
-    const stats = payload.response || [];
-    if (!stats.length) return null;
-    const parseStat = teamStats => {
-      const list = teamStats.statistics || [];
-      const raw = type => list.find(s => norm(s.type).includes(norm(type)))?.value;
-      const number = type => {
-        const v = raw(type);
-        if (v === null || v === undefined || v === "") return null;
-        const n = Number(String(v).replace("%", "").replace(",", "."));
-        return Number.isFinite(n) ? n : null;
-      };
-      return { shotsTotal: number("Total Shots") ?? 0, shotsOn: number("Shots on Goal") ?? 0,
-        possession: number("Ball Possession"), corners: number("Corner Kicks") ?? 0, dangerousAttacks: number("Dangerous Attacks") };
-    };
-    if (stats.length < 2) return null;
-    return { home: parseStat(stats[0]), away: parseStat(stats[1]) };
-  } catch { return null; }
-}
-
-function factorial(n) { let out = 1; for (let i = 2; i <= n; i++) out *= i; return out; }
-const poisson = (k, lambda) => Math.exp(-lambda) * Math.pow(lambda, k) / factorial(k);
-
-function scorePrediction(match, homeForm, awayForm, odds, liveStats) {
-  const hNow = Number(match.homeScore || 0), aNow = Number(match.awayScore || 0);
-  const live = match.status === "LIVE";
-  if (match.status === "FT") {
-    return { halfTimeScore: `${match.htHomeScore ?? "?"}-${match.htAwayScore ?? "?"}`, fullTimeScore: `${hNow}-${aNow}`, mainPick: "Maç Bitti", alternative: "Maç Bitti", livePick: "Maç Bitti" };
-  }
-
-  const homeFor = homeForm?.available ? homeForm.avgGoalsFor : 1.25;
-  const homeAgainst = homeForm?.available ? homeForm.avgGoalsAgainst : 1.15;
-  const awayFor = awayForm?.available ? awayForm.avgGoalsFor : 1.05;
-  const awayAgainst = awayForm?.available ? awayForm.avgGoalsAgainst : 1.25;
-  let lambdaHome = Math.max(0.15, Math.min(3.0, (homeFor + awayAgainst) / 2));
-  let lambdaAway = Math.max(0.15, Math.min(3.0, (awayFor + homeAgainst) / 2));
-
-  // Maç önü 1X2 oranları takım gol beklentisini yumuşak biçimde etkiler.
-  const ft1x2 = resultProbabilities(odds, "MS 1X2");
-  if (ft1x2) {
-    const balance = Math.max(0.78, Math.min(1.22, 1 + (ft1x2.home - ft1x2.away) * 0.35));
-    const scale = Math.sqrt(balance);
-    lambdaHome *= scale;
-    lambdaAway /= scale;
-  }
-  const over25 = marketProbability(odds, "MS 2.5");
-  if (over25 !== null) {
-    // Calibrate total expected goals against the market's no-vig O/U 2.5 probability.
-    // For a Poisson total, P(3+ goals) = 1 - e^-L * (1 + L + L^2/2).
-    const probabilityOver25 = totalLambda => 1 - Math.exp(-totalLambda) * (1 + totalLambda + (totalLambda * totalLambda) / 2);
-    let low = 0.2, high = 6.0;
-    for (let i = 0; i < 45; i++) {
-      const mid = (low + high) / 2;
-      if (probabilityOver25(mid) < over25) low = mid;
-      else high = mid;
-    }
-    const targetTotal = (low + high) / 2;
-    const currentTotal = Math.max(0.3, lambdaHome + lambdaAway);
-    const scale = Math.max(0.55, Math.min(1.8, targetTotal / currentTotal));
-    lambdaHome *= scale;
-    lambdaAway *= scale;
-  }
-  const btts = bttsProbability(odds);
-  if (btts !== null) {
-    if (btts > 0.58) { lambdaHome = Math.max(lambdaHome, 0.95); lambdaAway = Math.max(lambdaAway, 0.85); }
-    if (btts < 0.42) lambdaAway = Math.min(lambdaAway, 0.95);
-  }
-
-  let remHome = lambdaHome, remAway = lambdaAway;
-  if (live) {
-    const minute = Math.max(0, Math.min(95, Number(match.minute || 0)));
-    const remaining = Math.max(0, 90 - minute);
-    const timeFactor = Math.max(0.04, remaining / 90);
-    remHome *= timeFactor; remAway *= timeFactor;
-    if (liveStats) {
-      const homePressure = liveStats.home.shotsOn * 0.12 + liveStats.home.corners * 0.025;
-      const awayPressure = liveStats.away.shotsOn * 0.12 + liveStats.away.corners * 0.025;
-      remHome *= Math.max(0.7, Math.min(1.35, 1 + homePressure - awayPressure * 0.35));
-      remAway *= Math.max(0.7, Math.min(1.35, 1 + awayPressure - homePressure * 0.35));
-    }
-  }
-
-  // En yüksek olasılıklı skor; oranlar gol toplamı beklentisini etkiler, skoru zorla belirlemez.
-  let best = { p: -1, h: 0, a: 0 };
-  for (let h = 0; h <= 5; h++) for (let a = 0; a <= 5; a++) {
-    const p = poisson(h, remHome) * poisson(a, remAway);
-    if (p > best.p) best = { p, h, a };
-  }
-  const ftH = live ? hNow + best.h : best.h;
-  const ftA = live ? aNow + best.a : best.a;
-  const currentMinute = Number(match.minute || 0);
-  let htH, htA;
-  if (live && currentMinute >= 45) {
-    htH = match.htHomeScore ?? hNow;
-    htA = match.htAwayScore ?? aNow;
-  } else if (live) {
-    // Devre öncesi skor tahmini, kalan ilk yarı golleri için düşük beklentiyle hesaplanır.
-    const elapsed = Math.max(0, Math.min(45, currentMinute));
-    const fraction = Math.max(0, (45 - elapsed) / 90);
-    htH = hNow + Math.round(Math.min(remHome, lambdaHome * fraction) * 0.45);
-    htA = aNow + Math.round(Math.min(remAway, lambdaAway * fraction) * 0.45);
-  } else {
-    htH = Math.min(ftH, Math.round(ftH * 0.42));
-    htA = Math.min(ftA, Math.round(ftA * 0.42));
-  }
-
-  const total = ftH + ftA, both = ftH > 0 && ftA > 0;
-  const over15 = marketProbability(odds, "MS 1.5");
-  const over35 = marketProbability(odds, "MS 3.5");
-  const bttsMarket = bttsProbability(odds);
-  let mainPick, alternative;
-
-  // Main/alternative picks use market-implied probabilities when both sides exist;
-  // scoreline is still the model's most likely exact score, not a forced pick label.
-  if (over25 !== null) {
-    mainPick = over25 >= 0.52 ? "MS 2.5 ÜST" : "MS 2.5 ALT";
-  } else if (over15 !== null) {
-    mainPick = over15 >= 0.62 ? "MS 1.5 ÜST" : "MS 1.5 ALT";
-  } else {
-    mainPick = total >= 3 ? "MS 2.5 ÜST" : "MS 2.5 ALT";
-  }
-
-  if (bttsMarket !== null && Math.abs(bttsMarket - 0.5) >= 0.04) {
-    alternative = bttsMarket >= 0.54 ? "KG VAR" : "KG YOK";
-  } else if (over15 !== null && Math.abs(over15 - 0.5) >= 0.08) {
-    alternative = over15 >= 0.58 ? "MS 1.5 ÜST" : "MS 1.5 ALT";
-  } else if (over35 !== null && Math.abs(over35 - 0.5) >= 0.08) {
-    alternative = over35 >= 0.58 ? "MS 3.5 ÜST" : "MS 3.5 ALT";
-  } else {
-    alternative = both ? "KG VAR" : (total >= 2 ? "MS 2.5 ALT" : "MS 1.5 ALT");
-  }
-
-  let livePick = "Maç önü analizi";
-  if (live) {
-    const currentTotal = hNow + aNow;
-    const remainingGoals = best.h + best.a;
-    if (remainingGoals >= 2) livePick = currentTotal + remainingGoals >= 3 ? "MS 2.5 ÜST" : "MS 1.5 ÜST";
-    else if (remainingGoals === 1) livePick = currentTotal === 0 ? "MS 0.5 ÜST" : `MS ${currentTotal + 0.5} ÜST`;
-    else livePick = currentTotal >= 2 ? "MS 2.5 ALT" : "Gol beklentisi düşük — pas geç";
-    // Skor zaten 1-0/0-1 ise ilk yarı 0.5 üst önerisi verme.
-    if (currentMinute < 45 && currentTotal > 0 && livePick === "MS 0.5 ÜST") livePick = "İY 1.5 ÜST";
-  }
-
-  return {
-    halfTimeScore: `${htH}-${htA}${live && currentMinute < 45 ? " (Tahmin)" : ""}`,
-    fullTimeScore: `${ftH}-${ftA}${live ? " (Mevcut + kalan tahmin)" : ""}`,
-    mainPick, alternative, livePick
-  };
-}
-
-function oddsSummary(odds) {
-  const has = key => Boolean(odds[key]);
-  return {
-    iy1x2: ["İY 1X2:home", "İY 1X2:draw", "İY 1X2:away"].every(has),
-    ms1x2: ["MS 1X2:home", "MS 1X2:draw", "MS 1X2:away"].every(has),
-    iy05: has("İY 0.5 ÜST"), iy15: has("İY 1.5 ÜST"),
-    btts: has("KG VAR:yes") && has("KG VAR:no"),
-    ms15: has("MS 1.5 ÜST"), ms25: has("MS 2.5 ÜST"),
-    ms35: has("MS 3.5 ÜST"), ms55: has("MS 5.5 ÜST"), ah05: has("AH -0.5")
-  };
-}
-function oddsSourceLabel(odds) {
-  const names = [...new Set(Object.values(odds).map(x => x.bookmaker).filter(Boolean))];
-  return names.length ? `Oran analizi: ${names.length > 1 ? "birden fazla bahis şirketi" : names[0]}; ham oranlar gizli.` : "Oran verisi bulunamadı; tahmin takım formu ve mevcut maç verileriyle üretildi.";
-}
-
-async function getOdds(match) {
-  // API-Football canlı oran endpoint'i her hesap/ligde bulunmayabilir.
-  // Canlı maçta yalnızca canlı oran endpoint'i denenir; maç önü oranına sessizce geri dönülmez.
-  const endpoint = match.status === "LIVE"
-    ? `/odds/live?fixture=${match.id}`
-    : `/odds?fixture=${match.id}`;
-  const key = `${match.status === "LIVE" ? "live-odds" : "prematch-odds"}:${match.id}`;
-  try {
-    const payload = await cachedProviderRequest(key, endpoint, match.status === "LIVE" ? 15000 : 90000);
-    const row = (payload.response || []).find(x => Number(x.fixture?.id) === match.id) || payload.response?.[0] || null;
-    return oddsForFixture(row);
-  } catch (e) {
-    console.warn(`[Odds] ${match.id}: ${e.message}`);
-    return {};
-  }
-}
-
-async function sendTelegram(message) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return { sent: false, reason: "Telegram yapılandırılmamış." };
-  try {
-    const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: message }), signal: AbortSignal.timeout(10000)
+      const gf = Number(isHome ? r.goals.home : r.goals.away);
+      const ga = Number(isHome ? r.goals.away : r.goals.home);
+      const total = Number(r.goals.home) + Number(r.goals.away);
+      const hth = r.score?.halftime?.home, hta = r.score?.halftime?.away;
+      return { gf, ga, total, btts: Number(r.goals.home)>0 && Number(r.goals.away)>0,
+        htTotal: hth == null || hta == null ? null : Number(hth)+Number(hta) };
     });
-    const data = await response.json();
-    return { sent: Boolean(data.ok), reason: data.ok ? undefined : (data.description || "Telegram mesajı gönderilemedi.") };
-  } catch (e) { return { sent: false, reason: e.message }; }
+    const htVals = vals.filter(x => x.htTotal != null);
+    return {
+      available: true, sampleSize: rows.length,
+      teamGoalsOver15Pct: pct(x => x.gf >= 2),
+      goalsConcededPct: pct(x => x.ga > 0),
+      over05Pct: pct(x => x.total >= 1), over15Pct: pct(x => x.total >= 2),
+      over25Pct: pct(x => x.total >= 3), over35Pct: pct(x => x.total >= 4),
+      bttsPct: pct(x => x.btts),
+      htOver05Pct: htVals.length ? Math.round(100 * htVals.filter(x=>x.htTotal>=1).length / htVals.length) : null,
+      htOver15Pct: htVals.length ? Math.round(100 * htVals.filter(x=>x.htTotal>=2).length / htVals.length) : null,
+      avgGoalsFor: Number((vals.reduce((sum,x)=>sum+x.gf,0)/vals.length).toFixed(2)),
+      avgGoalsAgainst: Number((vals.reduce((sum,x)=>sum+x.ga,0)/vals.length).toFixed(2)),
+      avgTotalGoals: Number((vals.reduce((sum,x)=>sum+x.total,0)/vals.length).toFixed(2)),
+      matches: rows.map(r=>({score:`${r.goals.home}-${r.goals.away}`, halftimeScore:r.score?.halftime?.home==null?null:`${r.score.halftime.home}-${r.score.halftime.away}`}))
+    };
+  } catch (e) {
+    console.warn(`[Team form] team=${teamId}: ${e.message}`);
+    return { available: false, sampleSize: 0 };
+  }
 }
 
-async function createCouponByMode(date, mode = "prematch") {
-  const isLive = mode === "live";
-  const targetDate = /^\d{4}-\d{2}-\d{2}$/.test(date || "") ? date : new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Istanbul" });
-  const url = isLive ? "/fixtures?live=all" : `/fixtures?date=${encodeURIComponent(targetDate)}&timezone=Europe/Istanbul`;
-  const payload = await cachedProviderRequest(`coupon-${mode}-${targetDate}`, url, isLive ? 15000 : 60000);
-  const matches = (payload.response || []).map(normalizeProviderMatch).filter(m => isLive ? m.status === "LIVE" : m.status === "NS");
-  if (!matches.length) return { status: "NO_MATCHES", picks: [], message: "Uygun maç bulunamadı." };
-
-  const limit = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
-  const analyzed = [];
-  for (const m of matches.slice(0, mode === "surprise" ? 30 : 12)) {
-    const [hForm, aForm, liveStats, odds] = await Promise.all([
-      fetchTeamRecentForm(m.homeId, m.id), fetchTeamRecentForm(m.awayId, m.id),
-      isLive ? fetchLiveStatistics(m.id) : Promise.resolve(null), getOdds(m)
-    ]);
-    const scores = scorePrediction(m, hForm, aForm, odds, liveStats);
-    const market = isLive ? scores.livePick : scores.mainPick;
-    const confidence = (hForm.available ? 1 : 0) + (aForm.available ? 1 : 0) +
-      (Object.keys(odds).length ? 1 : 0) + (isLive && liveStats ? 1 : 0);
-    analyzed.push({ fixtureId: m.id, league: m.league, home: m.home, away: m.away, market, currentScore: `${m.homeScore}-${m.awayScore}`, minute: m.minute, _confidence: confidence });
+function liveStatsMetrics(stats, fixture) {
+  const out = { available: false, shotsOnTarget: 0, totalShots: 0, corners: 0,
+    home: { shotsOnTarget: 0, totalShots: 0, corners: 0 }, away: { shotsOnTarget: 0, totalShots: 0, corners: 0 } };
+  const seen = { home: new Set(), away: new Set() };
+  for (const team of (Array.isArray(stats) ? stats : [])) {
+    const teamId = Number(team.team?.id);
+    const side = teamId === Number(fixture.homeId) ? "home" : teamId === Number(fixture.awayId) ? "away" : null;
+    if (!side) continue;
+    for (const st of (team.statistics || [])) {
+      const type = String(st.type || "").toLowerCase();
+      if (st.value == null || String(st.value).trim() === "" || /^[-—]+$/.test(String(st.value).trim())) continue;
+      const value = Number(String(st.value).replace('%',''));
+      if (!Number.isFinite(value)) continue;
+      if (/shots on goal|shots on target/.test(type)) { out.shotsOnTarget += value; out[side].shotsOnTarget += value; seen[side].add("shotsOnTarget"); }
+      else if (/total shots|goal attempts/.test(type)) { out.totalShots += value; out[side].totalShots += value; seen[side].add("totalShots"); }
+      else if (/corner kicks|corners/.test(type)) { out.corners += value; out[side].corners += value; seen[side].add("corners"); }
+    }
   }
-  analyzed.sort((a, b) => b._confidence - a._confidence);
-  const picks = analyzed.slice(0, limit).map(({ _confidence, ...p }) => p);
-  const coupon = { draftId: `coupon-${Date.now()}`, date: targetDate, type: mode, status: "READY", picks };
-  const tg = await sendTelegram(`🎯 WINSCOPE KUPON (${mode.toUpperCase()})\n${picks.map(p => `${p.home} vs ${p.away} — Tercih: ${p.market}`).join("\n")}`);
-  coupon.telegramSent = tg.sent;
-  archives.coupons.unshift(coupon);
-  archives.coupons = archives.coupons.slice(0, 50);
-  await saveArchiveItem("coupon", coupon);
+  // A two-row response alone is not proof that usable live stats exist.
+  out.available = seen.home.size > 0 && seen.away.size > 0;
+  out.pressure = out.shotsOnTarget*2.5 + out.totalShots*0.45 + out.corners*0.8;
+  return out;
+}
+
+function poissonProbabilityAtLeast(threshold, lambda, currentGoals = 0) {
+  const need = Number(threshold) - Number(currentGoals || 0);
+  if (need <= 0) return 1;
+  let cumulative = 0;
+  for (let k = 0; k < need; k++) cumulative += Math.exp(-lambda) * Math.pow(lambda, k) / factorial(k);
+  return Math.max(0, Math.min(1, 1 - cumulative));
+}
+function factorial(n) { let out = 1; for (let i = 2; i <= n; i++) out *= i; return out; }
+function lambdaFromMarketProbability(probability, threshold, currentGoals = 0) {
+  const p = Number(probability);
+  if (!Number.isFinite(p) || p <= 0.01 || p >= 0.99 || Number(currentGoals || 0) >= Number(threshold)) return null;
+  let low = 0, high = 8;
+  for (let i = 0; i < 50; i++) {
+    const mid = (low + high) / 2;
+    if (poissonProbabilityAtLeast(threshold, mid, currentGoals) < p) low = mid;
+    else high = mid;
+  }
+  return (low + high) / 2;
+}
+function marketProbabilitiesByName(oddsRow) {
+  const rows = oddsForFixture(oddsRow);
+  const grouped = new Map();
+  for (const row of rows) {
+    if (!Number.isFinite(Number(row.probability))) continue;
+    if (!grouped.has(row.market)) grouped.set(row.market, []);
+    grouped.get(row.market).push(row);
+  }
+  const result = {};
+  for (const [market, values] of grouped) {
+    // Bet365 varsa onu kullan; yoksa aynı pazardaki en yüksek güvenilir API olasılığını kullan.
+    const preferred = values.find(value => /bet365/i.test(String(value.bookmaker || "")));
+    const selected = preferred || values[0];
+    result[market] = Number(selected.probability) / 100;
+  }
+  return result;
+}
+function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, prematchOddsRow = null) {
+  const hNow = Number(fixture.homeScore || 0), aNow = Number(fixture.awayScore || 0);
+  const live = fixture.status === "LIVE";
+  if (fixture.status === "FT") return { halfTimeScore: `${fixture.htHomeScore ?? "?"}-${fixture.htAwayScore ?? "?"}`, fullTimeScore: `${hNow}-${aNow}`, scoreBasis: "Gerçekleşen skor" };
+
+  // Oran verisi, form verisi eksik olsa bile skor tahmininde kullanılabilir.
+  // Piyasa ana kaynak; son 5 maç formu yalnızca destekleyici ağırlık alır.
+  const homeFormAvailable = Boolean(homeForm?.available);
+  const awayFormAvailable = Boolean(awayForm?.available);
+  const hasForm = homeFormAvailable && awayFormAvailable;
+  const pre = marketProbabilitiesByName(prematchOddsRow);
+  const liveMarkets = live ? marketProbabilitiesByName(liveOddsRow) : {};
+  const hasLiveMarket = live && Object.keys(liveMarkets).length > 0;
+  const hasPreGoalMarket = ["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST"]
+    .some(key => Number.isFinite(pre[key]));
+  const hasLiveGoalMarket = hasLiveMarket && ["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST"]
+    .some(key => Number.isFinite(liveMarkets[key]));
+  const currentTotal = hNow + aNow;
+  const minute = Math.max(0, Math.min(90, Number(fixture.minute || 0)));
+  const remainingFraction = live ? Math.max(0.03, (90 - minute) / 90) : 1;
+
+  const preHomeMarket = lambdaFromMarketProbability(pre["EV 1.5 ÜST"], 2, 0);
+  const preAwayMarket = lambdaFromMarketProbability(pre["DEP 1.5 ÜST"], 2, 0);
+  const preTotalCandidates = [
+    lambdaFromMarketProbability(pre["MS 1.5 ÜST"], 2, 0),
+    lambdaFromMarketProbability(pre["MS 2.5 ÜST"], 3, 0),
+    lambdaFromMarketProbability(pre["MS 3.5 ÜST"], 4, 0)
+  ].filter(Number.isFinite);
+  const preTotal = preTotalCandidates.length ? preTotalCandidates.reduce((a,b)=>a+b,0) / preTotalCandidates.length : null;
+
+  let homeMarketLambda = hasLiveGoalMarket ? lambdaFromMarketProbability(liveMarkets["EV 1.5 ÜST"], 2, hNow) : null;
+  let awayMarketLambda = hasLiveGoalMarket ? lambdaFromMarketProbability(liveMarkets["DEP 1.5 ÜST"], 2, aNow) : null;
+  const liveTotalCandidates = hasLiveGoalMarket ? [
+    lambdaFromMarketProbability(liveMarkets["MS 1.5 ÜST"], 2, currentTotal),
+    lambdaFromMarketProbability(liveMarkets["MS 2.5 ÜST"], 3, currentTotal),
+    lambdaFromMarketProbability(liveMarkets["MS 3.5 ÜST"], 4, currentTotal)
+  ].filter(Number.isFinite) : [];
+  let totalRemainingMarket = liveTotalCandidates.length ? liveTotalCandidates.reduce((a,b)=>a+b,0) / liveTotalCandidates.length : null;
+
+  const formHomeFull = hasForm ? Math.max(0.05, 0.58 * Number(homeForm.avgGoalsFor || 0) + 0.42 * Number(awayForm.avgGoalsAgainst || 0)) : null;
+  const formAwayFull = hasForm ? Math.max(0.05, 0.58 * Number(awayForm.avgGoalsFor || 0) + 0.42 * Number(homeForm.avgGoalsAgainst || 0)) : null;
+  let lambdaHome = null, lambdaAway = null;
+
+  if (live) {
+    const formHomeRemaining = formHomeFull == null ? null : formHomeFull * remainingFraction;
+    const formAwayRemaining = formAwayFull == null ? null : formAwayFull * remainingFraction;
+    if (homeMarketLambda == null && preHomeMarket != null) homeMarketLambda = preHomeMarket * remainingFraction;
+    if (awayMarketLambda == null && preAwayMarket != null) awayMarketLambda = preAwayMarket * remainingFraction;
+    if (homeMarketLambda == null && totalRemainingMarket != null && awayMarketLambda != null) homeMarketLambda = Math.max(0.01, totalRemainingMarket - awayMarketLambda);
+    if (awayMarketLambda == null && totalRemainingMarket != null && homeMarketLambda != null) awayMarketLambda = Math.max(0.01, totalRemainingMarket - homeMarketLambda);
+    // Yalnızca toplam gol pazarı varsa taraflara form oranında, form yoksa eşit bölüştür.
+    if (totalRemainingMarket != null && homeMarketLambda == null && awayMarketLambda == null) {
+      const ratio = formHomeRemaining != null && formAwayRemaining != null
+        ? formHomeRemaining / Math.max(0.01, formHomeRemaining + formAwayRemaining) : 0.5;
+      homeMarketLambda = totalRemainingMarket * ratio;
+      awayMarketLambda = totalRemainingMarket - homeMarketLambda;
+    }
+    if (homeMarketLambda == null) homeMarketLambda = formHomeRemaining;
+    if (awayMarketLambda == null) awayMarketLambda = formAwayRemaining;
+    if (homeMarketLambda == null || awayMarketLambda == null) {
+      return { halfTimeScore: minute < 45 ? `${hNow}-${aNow} (canlı skor; devre tahmini hesaplanamadı)` : `${fixture.htHomeScore ?? "?"}-${fixture.htAwayScore ?? "?"} (devre skoru)`, fullTimeScore: `${hNow}-${aNow} (mevcut skor; tahmin için kullanılabilir gol pazarı/form yok)`, scoreBasis: "Skor tahmini için kullanılabilir gol oranı ve yeterli form verisi bulunamadı" };
+    }
+    if (totalRemainingMarket != null && homeMarketLambda + awayMarketLambda > 0) {
+      const scale = totalRemainingMarket / (homeMarketLambda + awayMarketLambda);
+      homeMarketLambda *= scale; awayMarketLambda *= scale;
+    }
+    // Piyasa varsa %85 piyasa / %15 form; canlı piyasa yoksa maç önü oranı öncelikli.
+    lambdaHome = formHomeRemaining == null ? homeMarketLambda : (hasLiveGoalMarket ? 0.85 * homeMarketLambda + 0.15 * formHomeRemaining : 0.85 * homeMarketLambda + 0.15 * formHomeRemaining);
+    lambdaAway = formAwayRemaining == null ? awayMarketLambda : (hasLiveGoalMarket ? 0.85 * awayMarketLambda + 0.15 * formAwayRemaining : 0.85 * awayMarketLambda + 0.15 * formAwayRemaining);
+  } else {
+    let h = preHomeMarket, a = preAwayMarket;
+    if (h == null && a == null && preTotal != null) {
+      const sum = formHomeFull != null && formAwayFull != null ? formHomeFull + formAwayFull : 0;
+      const ratio = sum > 0 ? formHomeFull / sum : 0.5;
+      h = preTotal * ratio; a = preTotal - h;
+    } else if (h == null && preTotal != null && a != null) h = Math.max(0.01, preTotal - a);
+    else if (a == null && preTotal != null && h != null) a = Math.max(0.01, preTotal - h);
+    lambdaHome = h == null ? formHomeFull : (formHomeFull == null ? h : 0.85 * h + 0.15 * formHomeFull);
+    lambdaAway = a == null ? formAwayFull : (formAwayFull == null ? a : 0.85 * a + 0.15 * formAwayFull);
+    if (preTotal != null && lambdaHome != null && lambdaAway != null && lambdaHome + lambdaAway > 0) {
+      const target = preHomeMarket != null || preAwayMarket != null ? 0.85 * preTotal + 0.15 * (lambdaHome + lambdaAway) : preTotal;
+      const scale = target / (lambdaHome + lambdaAway);
+      lambdaHome *= scale; lambdaAway *= scale;
+    }
+    if (lambdaHome == null || lambdaAway == null) {
+      return { halfTimeScore: "Skor tahmini hesaplanamadı: kullanılabilir gol pazarı/form yok", fullTimeScore: "Skor tahmini hesaplanamadı: kullanılabilir gol pazarı/form yok", scoreBasis: "Doğrulanabilir skor girdisi yok" };
+    }
+  }
+
+  // Olası skorları bağımsız Poisson dağılımıyla sıralar; canlıda gerçekleşen skoru korur.
+  const pmf = (k, lambda) => Math.exp(-lambda) * Math.pow(lambda, k) / factorial(k);
+  let best = null;
+  const maxExtra = 8; // 2-4 / 4-2 gibi yüksek skorlu senaryoları da değerlendirebilmek için.
+  for (let gh = 0; gh <= maxExtra; gh++) for (let ga = 0; ga <= maxExtra; ga++) {
+    const probability = pmf(gh, Math.max(0.01, lambdaHome)) * pmf(ga, Math.max(0.01, lambdaAway));
+    const finalH = live ? hNow + gh : gh;
+    const finalA = live ? aNow + ga : ga;
+    if (!best || probability > best.probability) best = { finalH, finalA, probability };
+  }
+  const fullTimeScore = best ? `${best.finalH}-${best.finalA} (tahmin)` : "Skor tahmini hesaplanamadı";
+  let halfTimeScore;
+  if (live && minute >= 45 && fixture.htHomeScore != null && fixture.htAwayScore != null) halfTimeScore = `${fixture.htHomeScore}-${fixture.htAwayScore} (Gerçek)`;
+  else if (live && minute < 45) {
+    const firstHalfRemainingFraction = Math.max(0, Math.min(1, (45 - minute) / Math.max(1, 90 - minute)));
+    const htHome = hNow + Math.round(lambdaHome * firstHalfRemainingFraction);
+    const htAway = aNow + Math.round(lambdaAway * firstHalfRemainingFraction);
+    halfTimeScore = `${htHome}-${htAway} (İY tahmini)`;
+  } else halfTimeScore = `${Math.max(0, Math.round(lambdaHome * 0.46))}-${Math.max(0, Math.round(lambdaAway * 0.46))} (tahmin)`;
+  const basis = hasLiveGoalMarket
+    ? (hasForm ? "Canlı gol oranları (%85) + son 5 maç formu (%15)" : "Canlı gol oranları; form verisi mevcut değil")
+    : hasPreGoalMarket
+      ? (hasForm ? "Maç önü gol oranları (%85) + son 5 maç formu (%15)" : "Maç önü gol oranları; form verisi mevcut değil")
+      : "Son 5 maç formu; kullanılabilir gol oranı bulunamadı";
+  return { halfTimeScore, fullTimeScore, scoreBasis: basis, scoreProbability: best ? Number(best.probability.toFixed(4)) : null };
+}
+
+function analysisPercentages(oddsRow, homeForm, awayForm) {
+  const map = { ht05: "İY 0.5 ÜST", ht15: "İY 1.5 ÜST", ms05: "MS 0.5 ÜST", ms15: "MS 1.5 ÜST", ms25: "MS 2.5 ÜST", ms35: "MS 3.5 ÜST", btts: "KG VAR", home15: "EV 1.5 ÜST", away15: "DEP 1.5 ÜST" };
+  const rows = oddsForFixture(oddsRow); const out = {};
+  for (const [key, market] of Object.entries(map)) {
+    const o = rows.filter(x => x.market === market).sort((a,b)=>(/bet365/i.test(b.bookmaker)-/bet365/i.test(a.bookmaker)) || b.probability-a.probability)[0];
+    const form = marketSupport(market, homeForm, awayForm);
+    if (o || form != null) {
+      const percent = o && form != null ? Math.round(o.probability * 0.55 + form * 0.45) : o ? Math.round(o.probability) : Math.round(form);
+      out[key] = { percent, sampleSize: Math.min(homeForm?.sampleSize || 0, awayForm?.sampleSize || 0), source: o && form != null ? "Maç önü oranı + son 5 maç formu" : o ? "Maç önü oranı; form verisi eksik" : "Son 5 maç formu; maç önü oranı bulunamadı" };
+    }
+  }
+  return out;
+}
+
+function marketConsistentWithScore(market, scoreObj) {
+  const pair = value => {
+    const m = String(value || "").match(/(\d+)\s*[-:]\s*(\d+)/);
+    return m ? [Number(m[1]), Number(m[2])] : null;
+  };
+  const ft = pair(scoreObj?.fullTimeScore);
+  const htText = String(scoreObj?.halfTimeScore || "");
+  const ht = /Canlı skor/i.test(htText) ? null : pair(htText);
+  if (market === "KG VAR" && ft && (ft[0] < 1 || ft[1] < 1)) return false;
+  if (market === "EV 1.5 ÜST" && ft && ft[0] < 2) return false;
+  if (market === "DEP 1.5 ÜST" && ft && ft[1] < 2) return false;
+  if (market === "MS 0.5 ÜST" && ft && ft[0] + ft[1] < 1) return false;
+  if (market === "MS 1.5 ÜST" && ft && ft[0] + ft[1] < 2) return false;
+  if (market === "MS 2.5 ÜST" && ft && ft[0] + ft[1] < 3) return false;
+  if (market === "MS 3.5 ÜST" && ft && ft[0] + ft[1] < 4) return false;
+  if (market === "İY 0.5 ÜST" && ht && ht[0] + ht[1] < 1) return false;
+  if (market === "İY 1.5 ÜST" && ht && ht[0] + ht[1] < 2) return false;
+  return true;
+}
+
+function chooseFormFallbackMarket(mode, fixture, forms, excludeMarket = null) {
+  // Fallback only when no usable market odds are available. It is explicitly labelled
+  // as form-based, never presented as an odds-backed signal.
+  if (!forms?.home?.available || !forms?.away?.available) return null;
+  const live = mode === "live";
+  const minute = Number(fixture.minute || 0);
+  if (live && (minute < 20 || minute > 85)) return null;
+  const total = Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0);
+  let allowed;
+  if (!live) allowed = ["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR", "MS 1.5 ÜST"];
+  else if (minute < 33) allowed = total === 0 ? ["İY 0.5 ÜST"] : ["İY 1.5 ÜST", "MS 1.5 ÜST"];
+  else if (minute < 45) allowed = total === 0 ? ["MS 1.5 ÜST"] : ["MS 1.5 ÜST", "KG VAR", "MS 2.5 ÜST"];
+  else if (minute < 66) allowed = total === 0 ? ["MS 0.5 ÜST", "MS 1.5 ÜST"] : total === 1 ? ["MS 1.5 ÜST", "KG VAR"] : ["MS 2.5 ÜST", "KG VAR"];
+  else if (minute <= 75) allowed = total <= 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST", "KG VAR"] : ["MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
+  else allowed = total <= 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST"] : ["MS 2.5 ÜST", "MS 3.5 ÜST"];
+  const thresholds = { "EV 1.5 ÜST": 45, "DEP 1.5 ÜST": 45, "MS 0.5 ÜST": 55, "MS 1.5 ÜST": 50, "MS 2.5 ÜST": 48, "MS 3.5 ÜST": 34, "KG VAR": 48, "İY 0.5 ÜST": 52, "İY 1.5 ÜST": 34 };
+  const scoreObj = scorePrediction(fixture, forms.home, forms.away, null, null);
+  const candidates = allowed.filter(m => m !== excludeMarket && marketConsistentWithScore(m, scoreObj))
+    .map(m => ({ market: m, formPct: marketSupport(m, forms.home, forms.away), bookmaker: "Son 5 maç formu (oran bulunamadı)", oddsTiming: "form-fallback", probability: null }))
+    .filter(x => x.formPct != null && x.formPct >= (thresholds[x.market] ?? 50))
+    .sort((a,b) => b.formPct - a.formPct);
+  return candidates[0] || null;
+}
+
+function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOddsRow, excludeMarket = null, preferredMarket = null) {
+  const live = mode === "live";
+  const total = Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0);
+  const minute = Number(fixture.minute || 0);
+  // Canlı tercih: 20. dakikadan sonra; dakika/skor pazar eşleşmesi korunur. 85+ riskli.
+  if (live && (minute < 20 || minute > 85)) return null;
+
+  // Dakika + anlık skora göre izin verilen piyasalar (dayanak: kalan süre ve mevcut gol sayısı).
+  let allowed;
+  if (!live) {
+    allowed = ["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
+  } else if (minute >= 20 && minute < 33) {
+    // 20–32. dakika: 0-0 ise İY 0.5; bir gol varsa İY 1.5, oran/form/istatistik desteğiyle değerlendirilir.
+    if (total === 0) allowed = ["İY 0.5 ÜST"];
+    else if (total === 1) allowed = ["İY 1.5 ÜST"];
+    else allowed = ["İY 1.5 ÜST"];
+  } else if (minute >= 33 && minute < 45) {
+    // Tek gol varsa MS 1.5 ÜST otomatik seçilmez: pazar zaten çok kısa fiyatlı olabilir.
+    // MS 2.5 ancak canlı baskı + form + maç önü pazar desteği birlikte yeterliyse değerlendirilir.
+    if (total === 0) allowed = ["MS 1.5 ÜST"];
+    else if (total === 1) allowed = ["MS 2.5 ÜST", "KG VAR"];
+    else allowed = ["MS 2.5 ÜST", "KG VAR"];
+  } else if (minute >= 45 && minute < 55) {
+    if (total === 0) allowed = ["MS 0.5 ÜST", "MS 1.5 ÜST"];
+    else if (total === 1) allowed = ["MS 2.5 ÜST", "KG VAR"];
+    else if (total === 2) allowed = ["MS 2.5 ÜST", "KG VAR"];
+    else allowed = ["MS 3.5 ÜST", "KG VAR"];
+  } else if (minute >= 55 && minute <= 65) {
+    if (total === 0) allowed = ["MS 0.5 ÜST", "MS 1.5 ÜST"];
+    else if (total === 1) allowed = ["MS 2.5 ÜST", "KG VAR"];
+    else if (total === 2) allowed = ["MS 2.5 ÜST", "KG VAR"];
+    else allowed = ["MS 3.5 ÜST", "KG VAR"];
+  } else if (minute >= 66 && minute <= 75) {
+    if (total === 0) allowed = ["MS 1.5 ÜST", "MS 2.5 ÜST"];
+    else if (total === 1) allowed = ["MS 1.5 ÜST", "MS 2.5 ÜST", "KG VAR"];
+    else if (total === 2) allowed = ["MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
+    else allowed = ["MS 3.5 ÜST"];
+  } else {
+    // 76–85: yalnızca kalan süre, baskı ve oran eşiği yeterliyse
+    if (total <= 1) allowed = ["MS 1.5 ÜST", "MS 2.5 ÜST"];
+    else if (total === 2) allowed = ["MS 2.5 ÜST", "MS 3.5 ÜST"];
+    else allowed = ["MS 3.5 ÜST"];
+  }
+
+  const h = forms.home, a = forms.away;
+  // Canlı maçta önce gerçek /odds/live piyasasını kullan. Yalnızca bu uç nokta boşsa
+  // maç önü oranına düş; seçimin dayanağını oddsTiming ile açıkça işaretle.
+  const liveMarketRows = live ? oddsForFixture(oddsRow || null) : [];
+  const preMarkets = oddsForFixture(prematchOddsRow || (!live ? oddsRow : null) || null);
+  // Initialize before scorePrediction reads it; otherwise live analysis throws a TDZ error.
+  const useLiveOdds = live && liveMarketRows.length > 0;
+  const predictedScores = scorePrediction(fixture, h, a, useLiveOdds ? oddsRow : null, prematchOddsRow || (!live ? oddsRow : null) || null);
+  const mergedMarketRows = (useLiveOdds ? liveMarketRows : preMarkets)
+    .map(x => ({ ...x, oddsTiming: useLiveOdds ? "live" : "prematch" }));
+  const choices = mergedMarketRows.filter(x => allowed.includes(x.market) && x.market !== excludeMarket && marketConsistentWithScore(x.market, predictedScores));
+  const statsM = stats || { available: false, pressure: 0, home: {}, away: {} };
+  const favorite = (() => {
+    const winners = preMarkets.filter(x => x.market === "MS 1");
+    const home = winners.find(x => x.bookmaker && x.market === "MS 1" && x.homeOdd)?.homeOdd;
+    const away = winners.find(x => x.bookmaker && x.market === "MS 1" && x.awayOdd)?.awayOdd;
+    return home && away ? (home < away ? "home" : "away") : null;
+  })();
+  const leader = Number(fixture.homeScore || 0) > Number(fixture.awayScore || 0) ? "home"
+    : Number(fixture.awayScore || 0) > Number(fixture.homeScore || 0) ? "away" : null;
+
+  // Canlıda biraz daha sıkı eşikler: oran olasılığı + form birlikte doğrulanmalı.
+  // Daha seçici eşikler: “bankoya yakın” hedefi için piyasa ve son-5 form desteği birlikte aranır.
+  // Bunlar garanti değildir; yeterli destek yoksa tercih üretilmez.
+  const minMarketPct = live ? {
+    "EV 1.5 ÜST": 58, "DEP 1.5 ÜST": 58, "MS 2.5 ÜST": 58, "MS 3.5 ÜST": 48,
+    "KG VAR": 58, "İY 0.5 ÜST": 60, "İY 1.5 ÜST": 48, "MS 0.5 ÜST": 64, "MS 1.5 ÜST": 60
+  } : {
+    "EV 1.5 ÜST": 60, "DEP 1.5 ÜST": 60, "MS 2.5 ÜST": 58, "MS 3.5 ÜST": 50,
+    "KG VAR": 58, "İY 0.5 ÜST": 60, "İY 1.5 ÜST": 48, "MS 0.5 ÜST": 64, "MS 1.5 ÜST": 60
+  };
+  const minFormPct = {
+    "EV 1.5 ÜST": 56, "DEP 1.5 ÜST": 56, "MS 2.5 ÜST": 56, "MS 3.5 ÜST": 48,
+    "KG VAR": 56, "İY 0.5 ÜST": 58, "İY 1.5 ÜST": 46, "MS 0.5 ÜST": 58, "MS 1.5 ÜST": 56
+  };
+
+  const ranked = choices.map(choice => {
+    const formPct = marketSupport(choice.market, h, a);
+    let liveBonus = 0;
+    let rejectReason = null;
+    if (live) {
+      if (!statsM.available) return null;
+
+      // Canlı piyasa olasılığı seçim puanında kullanılır; maç önü oranı scorePrediction içinde referans olarak kalır.
+
+      if (choice.market.startsWith("İY ") && minute >= 45) return null;
+      if (choice.market.startsWith("İY ")) {
+        const currentHalfGoals = Number(fixture.htHomeScore ?? fixture.homeScore ?? 0) + Number(fixture.htAwayScore ?? fixture.awayScore ?? 0);
+        const line = Number(choice.market.match(/(\d)[.,](\d)/)?.[1] || 0) + 0.5;
+        if (currentHalfGoals >= Math.ceil(line)) return null;
+      }
+      if (choice.market === "MS 0.5 ÜST" && total >= 1) return null;
+      if (choice.market === "MS 1.5 ÜST" && total >= 2) return null;
+      if (choice.market === "MS 2.5 ÜST" && total >= 3) return null;
+      if (choice.market === "MS 3.5 ÜST" && total >= 4) return null;
+
+      // Değer filtresi canlı oran varsa onu, yoksa açıkça etiketlenmiş maç önü oranını kullanır.
+      // 1 gol varken MS 1.5 ÜST, 55. dakikadan sonra yeterli oran/form/baskı desteği varsa değerlendirilebilir.
+      if (live && choice.market === "MS 1.5 ÜST" && total === 1) {
+        if (minute < 55) return null;
+        if (Number(choice.odd || 0) < 1.25) return null;
+        if (Number(formPct || 0) < 55) return null;
+        if (Number(choice.probability || 0) < 55 || Number(choice.probability || 0) > 82) return null;
+        if (Number(statsM.pressure || 0) < 10) return null;
+        if (Number(statsM.shotsOnTarget || 0) < 1 && Number(statsM.totalShots || 0) < 6) return null;
+      }
+      // Tek gol varken 2.5 ÜST en az iki gol daha gerektirir; sadece gerçek baskı ve yeterli fiyatla aday.
+      if (live && choice.market === "MS 2.5 ÜST" && total === 1) {
+        if (Number(choice.odd || 0) < 1.65) return null;
+        if (Number(formPct || 0) < 55) return null;
+        if (Number(statsM.pressure || 0) < 18) return null;
+        if (Number(statsM.shotsOnTarget || 0) < 3 && Number(statsM.totalShots || 0) < 12) return null;
+        if (minute >= 72 && Number(statsM.pressure || 0) < 22) return null;
+      }
+
+      const lineNum = Number(String(choice.market).match(/(\d)[.,](\d)/)?.[0]?.replace(",", ".") || 0);
+      const needed = choice.market.startsWith("MS ") ? Math.max(0, Math.ceil(lineNum + 0.01) - total) : 1;
+
+      // Geç dakikada çok gol ihtiyacı + düşük baskı = red.
+      if (minute >= 66 && needed > 1 && statsM.pressure < 16) return null;
+      if (minute >= 72 && needed > 1 && statsM.pressure < 22) return null;
+      if (minute >= 78 && needed >= 1 && statsM.pressure < 20) return null;
+      if (minute >= 75 && choice.market === "MS 3.5 ÜST" && (needed > 1 || statsM.pressure < 26)) return null;
+
+      // KG VAR: geride kalan favori takım baskısı şart.
+      if (choice.market === "KG VAR") {
+        if (total >= 2 && Number(fixture.homeScore || 0) > 0 && Number(fixture.awayScore || 0) > 0) return null; // zaten KG var
+        if (leader && favorite && leader !== favorite) {
+          const trailing = leader === "home" ? "away" : "home";
+          const p = statsM[trailing] || {};
+          const trailingPressure = Number(p.shotsOnTarget || 0) * 2.5 + Number(p.totalShots || 0) * 0.45 + Number(p.corners || 0) * 0.8;
+          if (trailingPressure < 5.5 || Number(formPct || 0) < 50) return null;
+          liveBonus += Math.min(14, trailingPressure * 0.55);
+        } else if (!leader) {
+          // Beraberlikte her iki tarafın da şut baskısı olmalı.
+          const hp = Number(statsM.home?.shotsOnTarget || 0) + Number(statsM.away?.shotsOnTarget || 0);
+          if (hp < 2 && statsM.pressure < 8) return null;
+        }
+      }
+
+      // 0-0 / 1-0 senaryolarında erken-orta canlı: baskı eşiği.
+      if (minute >= 55 && minute <= 65 && total === 0 && choice.market === "MS 0.5 ÜST" && statsM.pressure < 5.5) return null;
+      if (minute >= 20 && minute < 33 && total === 0 && choice.market === "İY 0.5 ÜST" && statsM.pressure < 4) return null;
+
+      // Genel baskı bonusu (isabetli şut ağırlıklı).
+      liveBonus += Math.min(16, statsM.pressure * 0.28);
+      // Dakika ilerledikçe üst gol piyasalarına hafif ceza (zaman riski).
+      if (/MS [23][.,][05] ÜST/.test(choice.market)) {
+        liveBonus -= Math.max(0, (minute - 60) * 0.22);
+      }
+    }
+
+    if (choice.probability < minMarketPct[choice.market]) return null;
+    if (formPct != null && formPct < minFormPct[choice.market]) return null;
+    const score = choice.probability * 0.72 + (formPct == null ? 0 : formPct * 0.18) + liveBonus
+      - (live && choice.market === "MS 3.5 ÜST" ? Math.max(0, minute - 65) * 0.4 : 0);
+    return {
+      ...choice,
+      formPct,
+      score,
+      statsSummary: live ? statsM : null,
+      liveContext: live ? { minute, total, pressure: statsM.pressure, neededGoals: choice.market.startsWith("MS ") ? Math.max(0, Math.ceil(Number(String(choice.market).match(/(\d)[.,](\d)/)?.[0]?.replace(",", ".") || 0) + 0.01) - total) : null } : null
+    };
+  }).filter(Boolean).sort((a, b) => b.score - a.score);
+
+  if (preferredMarket) {
+    const preferred = ranked.find(x => x.market === preferredMarket);
+    if (preferred) return preferred;
+  }
+  if (ranked[0]) return ranked[0];
+
+  // Relaxed fallback: prefer a real bookmaker market consistent with score/minute.
+  const fallback = choices
+    .filter(choice => Number.isFinite(Number(choice.probability)) && Number(choice.probability) >= 35)
+    .sort((x, y) => Number(y.probability) - Number(x.probability) || Number(x.rank || 9) - Number(y.rank || 9))[0];
+  if (fallback) return { ...fallback, score: Number(fallback.probability), fallbackUsed: true };
+
+  // No usable odds: provide an explicitly heuristic score/minute scenario, never fake odds.
+  const fallbackMarket = allowed.find(m => m !== excludeMarket && marketConsistentWithScore(m, predictedScores));
+  if (fallbackMarket && (!live || minute >= 20)) {
+    return { market: fallbackMarket, bookmaker: "Skor/dakika senaryosu", oddsTiming: "scenario-estimate",
+      probability: null, formPct: null, score: 1, fallbackUsed: true };
+  }
+  return null;
+}
+
+async function sendTelegram(text) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    return { sent: false, reason: "TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID tanımlı değil." };
+  }
+  const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, disable_web_page_preview: true }),
+    signal: AbortSignal.timeout(12000)
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.ok) throw new Error(result.description || `Telegram HTTP ${response.status}`);
+  return { sent: true };
+}
+
+function couponMessage(coupon) {
+  const heading = coupon.type === "surprise" ? "🎲 WINSCOPE MAÇ ÖNÜ SÜRPRİZ 10 MAÇ" :
+    coupon.type === "live" ? "⚡ WINSCOPE CANLI EN GÜVENİLİR TEK TERCİH" :
+    "🎯 WINSCOPE MAÇ ÖNÜ KUPONU";
+  const lines = [heading, `Tarih: ${coupon.date || "Bugün"}`, ""];
+  coupon.picks.forEach((p, i) => {
+    lines.push(`${i + 1}. ${p.home} - ${p.away}`);
+    lines.push(`Tercih: ${p.market}`);
+    lines.push(`Lig: ${p.league}`);
+    if (coupon.type === "live" || p.isLive) {
+      if (p.minute != null) lines.push(`Dakika: ${p.minute}' | Skor: ${p.currentScore || "—"}`);
+      if (p.source) lines.push(`Kaynak: ${p.source}`);
+      if (p.oddsBasis) lines.push(`Oran dayanağı: ${p.oddsBasis}`);
+      if (Array.isArray(p.statsSummary) && p.statsSummary.length) {
+        lines.push(`Canlı istatistik: ${p.statsSummary.join(" · ")}`);
+      }
+      if (p.marketProbability != null) lines.push(`Piyasa olasılığı: %${Number(p.marketProbability).toFixed(1)}`);
+      if (p.formSupport != null) lines.push(`Form desteği: %${Number(p.formSupport).toFixed(0)}`);
+    }
+    lines.push("");
+  });
+  if (coupon.type === "live") {
+    lines.push("Dayanak: yalnızca maç önü oranı kullanıldı; canlı oran kullanılmadı. Son 5 maç formu + canlı şut/korner baskısı + dakika/skor penceresi ayrıca değerlendirildi.");
+  }
+  return lines.join("\n");
+}
+
+
+async function getOddsForFixture(fixtureId, date) {
+  // Prefer date-level odds for the bulletin, then fall back to fixture-specific odds.
+  let row = null;
+  if (date) {
+    try {
+      const byDate = await cachedProviderRequest(`odds-date:${date}`, `/odds?date=${encodeURIComponent(date)}`, 90000);
+      row = (byDate.response || []).find(x => Number(x.fixture?.id) === Number(fixtureId)) || null;
+    } catch (e) {
+      console.warn("Date odds lookup failed:", e.message);
+    }
+  }
+  if (!row) {
+    const byFixture = await cachedProviderRequest(`odds-fixture:${fixtureId}`, `/odds?fixture=${encodeURIComponent(fixtureId)}`, 90000);
+    row = (byFixture.response || []).find(x => Number(x.fixture?.id) === Number(fixtureId)) || null;
+  }
+  return row;
+}
+
+function rankSingleMatchChoices(choices, mode = "prematch") {
+  const allowed = choices.filter(x => x.odd >= 1.15 && x.odd <= 2.10);
+  return allowed.sort((a, b) => {
+    // Conservative odds first; tie-break with market hierarchy, not invented percentages.
+    return Math.abs(a.odd - 1.35) - Math.abs(b.odd - 1.35) || a.rank - b.rank;
+  });
+}
+
+
+async function sendCouponAutomatically(coupon, chosen) {
+  await archiveDatabaseReady;
+  const originalPicks = coupon.picks || [];
+  const alreadySent = new Set(telegramSentFixtureIds);
+  if (databasePool && originalPicks.length) {
+    try {
+      const ids = originalPicks.map(p => Number(p.fixtureId)).filter(Boolean);
+      if (ids.length) {
+        const rows = await databasePool.query("SELECT fixture_id FROM winscope_telegram_fixture_sent WHERE fixture_id = ANY($1::bigint[])", [ids]);
+        for (const row of rows.rows) alreadySent.add(Number(row.fixture_id));
+      }
+    } catch (error) { console.warn(`[Telegram] Tekrar kontrolü DB'de yapılamadı: ${error.message}`); }
+  }
+  const remainingPicks = originalPicks.filter(p => !Number(p.fixtureId) || !alreadySent.has(Number(p.fixtureId)));
+  if (!remainingPicks.length) return { sent: true, duplicateSuppressed: true, message: "Bu maçlar daha önce Telegram'a gönderildi; tekrar gönderilmedi." };
+  const remainingIds = new Set(remainingPicks.map(p => Number(p.fixtureId)).filter(Boolean));
+  coupon = { ...coupon, picks: remainingPicks };
+  chosen = (chosen || []).filter(p => !Number(p.fixtureId) || remainingIds.has(Number(p.fixtureId)));
+  const signature = `${coupon.date}|${coupon.type}|${chosen.map(p => `${p.fixtureId}:${p.market}`).sort().join(",")}`;
+  const now = Date.now();
+  for (const [key, at] of telegramDeliveryCache) if (now - at > 24 * 60 * 60 * 1000) telegramDeliveryCache.delete(key);
+  if (telegramDeliveryCache.has(signature)) {
+    return { sent: true, duplicateSuppressed: true, message: "Bu kupon daha önce Telegram'a gönderildi; tekrar gönderilmedi." };
+  }
+  try {
+    const result = await sendTelegram(couponMessage(coupon));
+    if (result.sent) {
+      telegramDeliveryCache.set(signature, now);
+      if (telegramDeliveryCache.size > 500) telegramDeliveryCache.delete(telegramDeliveryCache.keys().next().value);
+      if (coupon.autoGenerated) {
+        for (const p of (coupon.picks || [])) {
+          if (p.fixtureId) autoSentFixtureKeys.add(`${coupon.type}|${coupon.date}|${Number(p.fixtureId)}`);
+        }
+      }
+      for (const p of (coupon.picks || [])) {
+        const fixtureId = Number(p.fixtureId);
+        if (!fixtureId) continue;
+        telegramSentFixtureIds.add(fixtureId);
+        if (databasePool) {
+          try {
+            await databasePool.query(
+              "INSERT INTO winscope_telegram_fixture_sent(fixture_id, match_date, coupon_type) VALUES ($1, $2::date, $3) ON CONFLICT (fixture_id) DO NOTHING",
+              [fixtureId, /^\d{4}-\d{2}-\d{2}$/.test(String(coupon.date || "")) ? coupon.date : null, coupon.type]
+            );
+          } catch (error) { console.warn(`[Telegram] Tekrar kaydı saklanamadı fixture=${fixtureId}: ${error.message}`); }
+        }
+      }
+      const sourceLabel = coupon.type === "live" ? "Canlı en güvenilir tek tercih" : coupon.type === "surprise" ? "Maç önü sürpriz kuponu" : "Günün kuponu";
+      for (const p of (coupon.picks || [])) {
+        const fixtureId = Number(p.fixtureId);
+        if (!fixtureId) continue;
+        const score = String(p.currentScore || "0-0");
+        goalTrackedFixtures.set(fixtureId, { home: p.home, away: p.away, league: p.league, sourceLabel, baselineScore: score });
+        // Kupon üretilirken bilinen skor başlangıç kabul edilir.
+        if (!goalScoreCache.has(fixtureId)) goalScoreCache.set(fixtureId, score);
+      }
+    }
+    return result;
+  } catch (error) {
+    console.error(`[Telegram] Otomatik kupon gönderimi başarısız (${coupon.type}):`, error.message);
+    return { sent: false, error: error.message };
+  }
+}
+
+function automaticLeaguePriority(match) {
+  const league = String(match.league || "").toLowerCase();
+  const country = String(match.country || "").toLowerCase();
+  if (league.includes("premier league") || league === "la liga" || league.includes("serie a") || league.includes("bundesliga") || league.includes("ligue 1")) return 1;
+  if (league.includes("eredivisie") || league.includes("primeira liga") || league.includes("championship") || league.includes("champions league") || league.includes("europa league") || league.includes("conference league")) return 2;
+  if (["england", "spain", "italy", "germany", "france", "portugal", "netherlands"].includes(country)) return 3;
+  return 4;
+}
+
+async function createCouponByMode(date, mode = "prematch", options = {}) {
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("Geçerli bir maç tarihi seç.");
+  const isLiveMode = mode === "live";
+  const fixturePath = isLiveMode ? "/fixtures?live=all" : `/fixtures?date=${encodeURIComponent(date)}&timezone=Europe/Istanbul`;
+  const fixtureKey = isLiveMode ? "liveListForCoupon" : `fixtures:${date}`;
+  const fixturePayload = await cachedProviderRequest(fixtureKey, fixturePath, isLiveMode ? 15000 : 60000);
+  const allFixtures = (fixturePayload.response || []).map(normalizeProviderMatch)
+    .filter(m => m.id && (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 25 && Number(m.minute || 0) <= 80 : m.status === "NS"));
+  // Büyük ligleri önceliklendir; aynı öncelikte erken başlayacak maçları öne al.
+  allFixtures.sort((a, b) => automaticLeaguePriority(a) - automaticLeaguePriority(b) ||
+    String(a.fixtureDate || "").localeCompare(String(b.fixtureDate || "")));
+  // Otomatik tarama ilk birkaç maçla sınırlı kalmasın; API istek kuyruğu hız sınırını korur.
+  // Maç önü havuzunu sabit 20/35 maçla kesme: bültenin tamamını oran eşleştirmesine al.
+  // Canlı taramada API kotası ve hız için ayrı, sınırlı havuz kullanılır.
+  const fixtures = isLiveMode
+    ? allFixtures.slice(0, options.automatic ? 12 : 15)
+    : allFixtures;
+  if (!fixtures.length) return { draftId:`coupon-${Date.now()}`, date, type:mode, status:"NO_MATCHES", picks:[], message:isLiveMode ? "Şu anda uygun dakika aralığında canlı maç bulunamadı." : "Seçilen tarihte başlamamış maç bulunamadı." };
+
+  const dateOdds = new Map();
+  if (!isLiveMode) {
+    // API-Football /odds uç noktası sayfalanır. Tek sayfayı okumak 390 maçın yalnızca
+    // küçük bir bölümünün oranlarını getirir; toplam sayfa bitene kadar sayfaları tara.
+    try {
+      const first = await cachedProviderRequest(`odds-date:${date}:page:1`, `/odds?date=${encodeURIComponent(date)}&page=1`, 15 * 60 * 1000);
+      for (const row of (first.response || [])) if (row.fixture?.id) dateOdds.set(Number(row.fixture.id), row);
+      const totalPages = Math.max(1, Math.min(100, Number(first.paging?.total || 1)));
+      for (let page = 2; page <= totalPages; page++) {
+        const payload = await cachedProviderRequest(`odds-date:${date}:page:${page}`, `/odds?date=${encodeURIComponent(date)}&page=${page}`, 15 * 60 * 1000);
+        for (const row of (payload.response || [])) if (row.fixture?.id) dateOdds.set(Number(row.fixture.id), row);
+      }
+      console.log(`[Coupon] Piyasa oran sayfaları tamamlandı: date=${date}, pages=${totalPages}, oddsFixtures=${dateOdds.size}`);
+    } catch (e) { console.warn(`[Coupon] date odds pagination: ${e.message}`); }
+  }
+  const candidates = [], errors = [];
+  const rejected = { noOdds: 0, noIds: 0, noForm: 0, noStats: 0, noMarket: 0, noSignal: 0, apiErrors: 0, duplicate: 0 };
+  let fixturesToAnalyze = fixtures;
+  if (!isLiveMode) {
+    const withBulkOdds = fixtures.filter(f => dateOdds.has(f.id));
+    const withoutBulkOdds = fixtures.filter(f => !dateOdds.has(f.id));
+    // Önce bütün fikstürlerin oran sayfalarını tara; takım formu API kotasını korumak için
+    // en fazla 50 oranlı ve 10 oran-yedek fikstürde çekilir. Canlı istatistik çağrısı yoktur.
+    fixturesToAnalyze = [...withBulkOdds.slice(0, 50), ...withoutBulkOdds.slice(0, 10)];
+  }
+  let analyzedFixtures = 0;
+  // Maç önü kuponunda ilk 2 adayı bulunca durma: daha geniş örneklemden
+  // en iyi 2 tercihi sıralayabilmek için 10 aday hedefle. Nihai kupon boyutu 2 kalır.
+  const targetPicks = mode === "surprise" ? 10 : mode === "prematch" ? 10 : 1;
+  for (const fixture of fixturesToAnalyze) {
+    // Yeterli sayıda yeni, doğrulanmış aday oluştuğunda gereksiz API çağrılarını kes.
+    const uniqueCandidateCount = options.automatic
+      ? candidates.filter(p => !autoSentFixtureKeys.has(`${mode}|${date}|${Number(p.fixtureId)}`)).length
+      : candidates.length;
+    if (uniqueCandidateCount >= targetPicks) break;
+    analyzedFixtures++;
+    try {
+      let marketOddsRow = null, prematchOddsRow = null, oddsBasis = "";
+      if (isLiveMode) {
+        const [prePayload, liveOddsPayload, statsPayload, homeForm, awayForm] = await Promise.all([
+          cachedProviderRequest(`odds-fixture:${fixture.id}`, `/odds?fixture=${fixture.id}`, 90000).catch(()=>({response:[]})),
+          cachedProviderRequest(`odds-live-fixture:${fixture.id}`, `/odds/live?fixture=${fixture.id}`, 10000).catch(()=>({response:[]})),
+          cachedProviderRequest(`stats:${fixture.id}`, `/fixtures/statistics?fixture=${fixture.id}`, 15000),
+          fetchTeamRecentForm(fixture.homeId, fixture.id),
+          fetchTeamRecentForm(fixture.awayId, fixture.id)
+        ]);
+        prematchOddsRow = (prePayload.response || []).find(row=>Number(row.fixture?.id)===fixture.id) || null;
+        const liveOddsRow = (liveOddsPayload.response || []).find(row=>Number(row.fixture?.fixture?.id ?? row.fixture?.id ?? row.fixtureId)===fixture.id) || null;
+        marketOddsRow = liveOddsRow || prematchOddsRow;
+        const statsRows = statsPayload.response || [];
+        const stats = liveStatsMetrics(statsRows, fixture);
+        if (!marketOddsRow) { rejected.noOdds++; continue; }
+        if (!stats.available) { rejected.noStats++; continue; }
+        if (!homeForm.available || !awayForm.available) { rejected.noForm++; continue; }
+        const chosen = chooseSupportedMarket(liveOddsRow, mode, fixture, {home:homeForm,away:awayForm}, stats, prematchOddsRow);
+        if (!chosen) { rejected.noSignal++; continue; }
+        oddsBasis = chosen.oddsTiming === "live"
+          ? `Gerçek canlı oran · ${chosen.bookmaker}`
+          : `Canlı oran bulunamadı; maç önü oranı · ${chosen.bookmaker} (canlı oran değildir)`;
+        candidates.push({
+          fixtureId: fixture.id, league: fixture.league, country: fixture.country,
+          home: fixture.home, away: fixture.away, fixtureDate: fixture.fixtureDate,
+          market: chosen.market, source: chosen.bookmaker, oddsTiming: chosen.oddsTiming,
+          internalOdd: chosen.odd, marketProbability: chosen.probability,
+          formSupport: chosen.formPct, score: chosen.score,
+          minute: fixture.minute, currentScore: `${fixture.homeScore}-${fixture.awayScore}`,
+          isLive: true, oddsBasis,
+          statsSummary: [
+            `İsabetli şut: ${stats.shotsOnTarget}`,
+            `Toplam şut: ${stats.totalShots}`,
+            `Korner: ${stats.corners}`,
+            `Baskı skoru: ${Number(stats.pressure || 0).toFixed(1)}`
+          ]
+        });
+      } else {
+        marketOddsRow = dateOdds.get(fixture.id) || null;
+        if (!marketOddsRow) {
+          const payload = await cachedProviderRequest(`odds-fixture:${fixture.id}`, `/odds?fixture=${fixture.id}`, 90000);
+          marketOddsRow = (payload.response || []).find(row=>Number(row.fixture?.id)===fixture.id) || null;
+        }
+        if (!marketOddsRow) { rejected.noOdds++; continue; }
+        if (!fixture.homeId || !fixture.awayId) { rejected.noIds++; continue; }
+        const [homeForm, awayForm] = await Promise.all([fetchTeamRecentForm(fixture.homeId,fixture.id),fetchTeamRecentForm(fixture.awayId,fixture.id)]);
+        if (!homeForm.available || !awayForm.available) { rejected.noForm++; continue; }
+        const chosen = chooseSupportedMarket(marketOddsRow, mode, fixture, {home:homeForm,away:awayForm}, null, marketOddsRow);
+        if (!chosen) { rejected.noSignal++; continue; }
+        oddsBasis = "API-Football maç önü son mevcut oran kaydı; resmî kapanış olduğu garanti edilemez";
+        candidates.push({fixtureId:fixture.id,league:fixture.league,country:fixture.country,home:fixture.home,away:fixture.away,
+          fixtureDate:fixture.fixtureDate,market:chosen.market,source:chosen.bookmaker,internalOdd:chosen.odd,marketProbability:chosen.probability,
+          formSupport:chosen.formPct,score:chosen.score,minute:null,currentScore:"0-0",isLive:false,oddsBasis,statsSummary:null});
+      }
+    } catch(e) {
+      rejected.apiErrors++;
+      const message = /istek sınırına ulaşıldı/i.test(e.message) ? "API-Football istek sınırı; kuyruk beklemesi devrede" : e.message;
+      errors.push(`${fixture.home} - ${fixture.away}: ${message}`);
+      if (/istek sınırına ulaşıldı/i.test(e.message)) break;
+    }
+  }
+  // Otomatik gönderimlerde aynı gün daha önce gönderilmiş maçları yeniden seçme.
+  const availableCandidates = options.automatic
+    ? candidates.filter(p => !autoSentFixtureKeys.has(`${mode}|${date}|${Number(p.fixtureId)}`))
+    : candidates;
+  rejected.duplicate = candidates.length - availableCandidates.length;
+  console.log(`[COUPON SCAN ${mode.toUpperCase()}] date=${date} live=${isLiveMode} fixtures=${allFixtures.length} prioritized=${fixtures.length} analyzed=${analyzedFixtures} candidates=${candidates.length} available=${availableCandidates.length} rejected=${JSON.stringify(rejected)} errors=${errors.length}`);
+  availableCandidates.sort((a,b)=>b.score-a.score || b.formSupport-a.formSupport || a.internalOdd-b.internalOdd);
+  const count = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
+  const chosen = availableCandidates.slice(0,count);
+  if (!chosen.length || (mode === "prematch" && chosen.length < 2)) {
+    const needed = mode === "prematch" ? 2 : 1;
+    return {draftId:`coupon-${Date.now()}`,date,type:mode,status:"NO_MATCHES",picks:[],
+      message:`Maç önü oranı + son 5 maç formu${isLiveMode ? " + canlı istatistik" : ""} eşiklerini geçen yeterli maç yok (gereken: ${needed}). Kupon zorlanmadı.`,
+      detail:`Fikstür: ${allFixtures.length}; oran sayfasından eşleşen: ${dateOdds.size}; form/statistik için incelenen: ${fixturesToAnalyze.length}; aday: ${candidates.length}; elenme: oran=${rejected.noOdds}, form=${rejected.noForm}, canlı-istatistik=${rejected.noStats}, piyasa-sinyali=${rejected.noSignal}, API-hatası=${rejected.apiErrors}, tekrar=${rejected.duplicate}. ${errors.slice(0,2).join(" | ")}`};
+  }
+  // internalOdd / score iç skorlama; canlı kupon Telegram'da olasılık + form + dk/skor gösterilsin.
+  const publicPicks = chosen.map(({ internalOdd, score, ...p }) => p);
+  const draftId = `coupon-${Date.now()}`;
+  const coupon = {draftId,date,type:mode,isLive:isLiveMode,status:"READY",picks:publicPicks,autoGenerated:Boolean(options.automatic),
+    message:mode==="live" ? "Tek canlı tercih: yalnızca maç önü oranı kullanıldı; dakika/skor + son 5 maç formu + canlı şut/korner baskısı değerlendirildi." :
+      mode==="surprise" ? `Sürpriz kupon: ${publicPicks.length} maç (en fazla 10); yalnızca oran ve son 5 maç formu eşiğini geçen adaylar eklendi.` :
+      "Maç önü kuponu: en az iki maç, maç önü son mevcut oran ve son 5 gerçek skor formu birlikte değerlendirildi."};
+  const archiveCoupon = {date,type:mode,picks:publicPicks,createdAt:new Date().toISOString()};
+  archives.coupons.unshift(archiveCoupon);
+  archives.coupons=archives.coupons.slice(0,50);
+  await saveArchiveItem("coupon", archiveCoupon);
+  // Onay butonu olmadan, kupon başarıyla üretildiğinde Telegram'a otomatik gönder.
+  coupon.telegram = await sendCouponAutomatically(coupon, chosen);
   return coupon;
 }
 
-app.get("/api/coupon/best", async (req, res) => {
-  try { res.json(await createCouponByMode(String(req.query.date || ""), "prematch")); }
-  catch (e) { res.status(502).json({ status: "ERROR", error: e.message }); }
+app.get("/api/telegram/status", async (_req, res) => {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    return res.status(503).json({
+      ok: false,
+      configured: false,
+      botActive: false,
+      chatConfigured: Boolean(TELEGRAM_CHAT_ID),
+      message: "Render Environment içinde TELEGRAM_BOT_TOKEN ve TELEGRAM_CHAT_ID kontrol edilmeli."
+    });
+  }
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`, {
+      signal: AbortSignal.timeout(10000)
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.ok) {
+      return res.status(502).json({
+        ok: false, configured: true, botActive: false,
+        message: result.description || `Telegram API HTTP ${response.status}`
+      });
+    }
+    return res.json({
+      ok: true, configured: true, botActive: true,
+      botUsername: result.result?.username || null,
+      chatConfigured: true,
+      message: "Bot token geçerli ve Telegram botu aktif. Chat ID'ye mesaj gönderme yetkisi ayrıca test edilmelidir."
+    });
+  } catch (e) {
+    return res.status(502).json({
+      ok: false, configured: true, botActive: false,
+      message: `Telegram bağlantı testi başarısız: ${e.message}`
+    });
+  }
 });
-app.get("/api/coupon/surprise", async (req, res) => {
-  try { res.json(await createCouponByMode(String(req.query.date || ""), "surprise")); }
-  catch (e) { res.status(502).json({ status: "ERROR", error: e.message }); }
-});
-app.get("/api/coupon/live-best", async (_req, res) => {
-  try { res.json(await createCouponByMode("", "live")); }
-  catch (e) { res.status(502).json({ status: "ERROR", error: e.message }); }
-});
+
+app.get("/api/health", (_req, res) => res.json({
+  ok: true, apiKeyConfigured: Boolean(API_KEY),
+  telegramConfigured: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
+  databaseConfigured: Boolean(databasePool),
+  provider: "API-Football", oddsPolicy: "prematch-only; live-analysis-disabled", oddsValuesHidden: true
+}));
 
 app.get("/api/match/:id/analyze", async (req, res) => {
   try {
-    const fixtureId = Number(req.params.id);
-    if (!Number.isInteger(fixtureId) || fixtureId <= 0) return res.status(400).json({ error: "Geçersiz maç numarası." });
-    const payload = await cachedProviderRequest(`fixture:${fixtureId}`, `/fixtures?id=${fixtureId}`, 15000);
+    const payload = await cachedProviderRequest(`fixture:${req.params.id}`, `/fixtures?id=${encodeURIComponent(req.params.id)}`, 15000);
     const row = payload.response?.[0];
     if (!row) return res.status(404).json({ error: "Maç verisi bulunamadı." });
+
     const match = normalizeProviderMatch(row);
-    const [odds, homeForm, awayForm, liveStats] = await Promise.all([
-      getOdds(match), fetchTeamRecentForm(match.homeId, match.id), fetchTeamRecentForm(match.awayId, match.id),
-      match.status === "LIVE" ? fetchLiveStatistics(match.id) : Promise.resolve(null)
-    ]);
-    const scores = scorePrediction(match, homeForm, awayForm, odds, liveStats);
-    const markets = oddsSummary(odds);
-    const result = {
-      fixtureId: match.id, matchStatus: match.status,
-      halfTimeScore: scores.halfTimeScore, fullTimeScore: scores.fullTimeScore,
-      mainPick: scores.mainPick, alternative: scores.alternative, livePick: scores.livePick,
-      markets, note: oddsSourceLabel(odds),
-      form: { homeAvailable: Boolean(homeForm.available), awayAvailable: Boolean(awayForm.available), sampleSize: Math.min(homeForm.sampleSize || 0, awayForm.sampleSize || 0) },
-      liveStatsAvailable: Boolean(liveStats)
+    // WinScope test modu: canlı maç kartta görünür, analiz ise tamamen maç önü verisiyle yapılır.
+    // Canlı oranlar ve canlı istatistikler bu endpointte kesinlikle kullanılmaz.
+    const prematchFixture = {
+      ...match,
+      status: "NS",
+      minute: null,
+      homeScore: 0,
+      awayScore: 0,
+      htHomeScore: null,
+      htAwayScore: null
     };
-    archives.analyses.unshift({ ...result, home: match.home, away: match.away, createdAt: new Date().toISOString() });
-    archives.analyses = archives.analyses.slice(0, 100);
-    await saveArchiveItem("analysis", { ...result, home: match.home, away: match.away, createdAt: new Date().toISOString() });
-    res.json(result);
-  } catch (e) { res.status(502).json({ error: "Analiz üretilemedi.", detail: e.message }); }
+
+    const [oddsPayload, homeForm, awayForm] = await Promise.all([
+      cachedProviderRequest(`odds-fixture:${match.id}`, `/odds?fixture=${match.id}`, 90000).catch(() => ({ response: [] })),
+      fetchTeamRecentForm(match.homeId, match.id),
+      fetchTeamRecentForm(match.awayId, match.id)
+    ]);
+    const prematchRow = (oddsPayload.response || []).find(x => Number(x.fixture?.id) === Number(match.id)) || null;
+    const forms = { home: homeForm, away: awayForm };
+    const scores = scorePrediction(prematchFixture, homeForm, awayForm, null, prematchRow);
+
+    // Tercih yalnızca maç önü piyasasında gerçekten bulunan oranlardan seçilir.
+    const chosen = prematchRow
+      ? chooseSupportedMarket(prematchRow, "prematch", prematchFixture, forms, null, prematchRow)
+      : null;
+    const ftMatch = String(scores.fullTimeScore || "").match(/(\d+)\s*[-:]\s*(\d+)/);
+    const scoreSuggestsBtts = Boolean(ftMatch && Number(ftMatch[1]) > 0 && Number(ftMatch[2]) > 0);
+    const alternative = chosen
+      ? chooseSupportedMarket(prematchRow, "prematch", prematchFixture, forms, null, prematchRow, chosen.market, scoreSuggestsBtts ? "KG VAR" : null)
+      : null;
+
+    const percentages = analysisPercentages(prematchRow, homeForm, awayForm);
+    const marketNames = oddsForFixture(prematchRow).map(x => x.market);
+    const marketAvailable = name => marketNames.includes(name);
+    res.json({
+      fixtureId: match.id,
+      matchStatus: match.status,
+      analysisMode: "PREMATCH_ONLY",
+      halfTimeScore: scores.halfTimeScore,
+      fullTimeScore: scores.fullTimeScore,
+      scoreBasis: scores.scoreBasis || "Maç önü oranları ve erişilebilen son 5 maç formu",
+      mainPick: chosen?.market || "Maç önü oranlarından doğrulanmış tercih bulunamadı",
+      alternative: alternative?.market || "Doğrulanmış alternatif bulunamadı",
+      livePick: "Canlı analiz kapalı — maç önü analizi",
+      livePickBasis: "Canlı oran ve canlı istatistik kullanılmıyor.",
+      marketPercentages: percentages,
+      markets: {
+        ht1x2: marketAvailable("İY 1X2"),
+        ft1x2: marketAvailable("MS 1X2"),
+        ht05: marketAvailable("İY 0.5 ÜST"),
+        ht15: marketAvailable("İY 1.5 ÜST"),
+        btts: marketAvailable("KG VAR"),
+        ms15: marketAvailable("MS 1.5 ÜST"),
+        ms25: marketAvailable("MS 2.5 ÜST"),
+        ms35: marketAvailable("MS 3.5 ÜST"),
+        ms55: marketAvailable("MS 5.5 ÜST"),
+        ah05: marketAvailable("AH -0.5")
+      },
+      note: prematchRow
+        ? `${chosen?.bookmaker || "Maç önü oran kaydı"} ve erişilebilen takım formu değerlendirildi. Ham oranlar arayüzde gösterilmez.`
+        : "Bu maç için API-Football üzerinden maç önü oran kaydı alınamadı. Skor tahmini yalnızca mevcut takım formu verisiyle üretilebilir; oran dayanaklı tercih üretilmedi.",
+      oddsBasis: prematchRow
+        ? "Yalnızca API-Football maç önü oranları; canlı oranlar kullanılmadı."
+        : "Maç önü oranı bulunamadı.",
+      htMarketAlreadyHit: false
+    });
+  } catch (e) {
+    res.status(502).json({ error: "Maç önü analizi üretilemedi.", detail: e.message });
+  }
 });
 
 app.get("/api/live", async (_req, res) => {
   try {
     const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 20000);
-    res.json({ matches: (payload.response || []).map(normalizeProviderMatch) });
-  } catch (e) { res.status(502).json({ matches: [], error: e.message }); }
-});
-app.get("/api/fixtures", async (req, res) => {
-  const date = String(req.query.date || "");
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ matches: [], error: "Tarih YYYY-AA-GG biçiminde olmalı." });
-  try {
-    const payload = await cachedProviderRequest(`fixtures:${date}`, `/fixtures?date=${encodeURIComponent(date)}&timezone=Europe/Istanbul`, 60000);
-    res.json({ matches: (payload.response || []).map(normalizeProviderMatch) });
-  } catch (e) { res.status(502).json({ matches: [], error: e.message }); }
+    const matches = (payload.response || []).map(normalizeProviderMatch);
+    res.json({ source: "API-Football", results: matches.length, matches, fetchedAt: new Date().toISOString() });
+  } catch (e) { res.status(502).json({ error: "Canlı maçlar alınamadı", detail: e.message, matches: [] }); }
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, apiKeyConfigured: Boolean(API_KEY), databaseConfigured: Boolean(databasePool), telegramConfigured: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) }));
-app.listen(PORT, () => console.log(`WinScope running on port ${PORT}`));
+app.get("/api/fixtures", async (req, res) => {
+  const date = String(req.query.date || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "Tarih YYYY-MM-DD biçiminde olmalı." });
+  try {
+    const payload = await cachedProviderRequest(`fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 60000);
+    const matches = (payload.response || []).map(normalizeProviderMatch);
+    res.json({ source: "API-Football", results: matches.length, matches });
+  } catch (e) { res.status(502).json({ error: "Bülten alınamadı", detail: e.message, matches: [] }); }
+});
+
+
+app.get("/api/coupon/daily", async (req, res) => {
+  try { res.json(await createCouponByMode(String(req.query.date || ""), "prematch")); }
+  catch (e) { res.status(502).json({ status: "ERROR", picks: [], error: "Maç önü kuponu oluşturulamadı.", detail: e.message }); }
+});
+app.get("/api/coupon/best", async (req, res) => {
+  try { res.json(await createCouponByMode(String(req.query.date || ""), "prematch")); }
+  catch (e) { res.status(502).json({ status: "ERROR", picks: [], error: "Maç önü kuponu oluşturulamadı.", detail: e.message }); }
+});
+app.get("/api/coupon/surprise", async (req, res) => {
+  try { res.json(await createCouponByMode(String(req.query.date || ""), "surprise")); }
+  catch (e) { res.status(502).json({ status: "ERROR", type: "surprise", picks: [], error: "10 maçlık sürpriz kupon oluşturulamadı.", detail: e.message }); }
+});
+async function liveCouponHandler(_req, res) {
+  res.json({
+    status: "DISABLED",
+    type: "live",
+    picks: [],
+    error: "Canlı analiz şimdilik kapalı. Canlı maçlar yalnızca listelenir; analiz maç önü oranlarıyla yapılır."
+  });
+}
+app.get("/api/coupon/live-best", liveCouponHandler);
+app.get("/api/coupon/live", liveCouponHandler);
+app.get("/api/live-combo", liveCouponHandler);
+
+app.post("/api/analyses/approve", async (req, res) => {
+  const body = req.body || {};
+  if (!body.fixtureId || !body.home || !body.away) return res.status(400).json({ success: false, error: "Maç bilgileri eksik." });
+  const approved = {
+    fixture_id: Number(body.fixtureId), home_team: String(body.home), away_team: String(body.away),
+    analysis: body.analysis || {}, created_at: new Date().toISOString()
+  };
+  archives.analyses.unshift(approved);
+  archives.analyses = archives.analyses.slice(0, 100);
+  const storage = await saveArchiveItem("analysis", approved);
+  res.json({ success: true, persisted: storage.persisted, storageReason: storage.reason || storage.error || null });
+});
+
+app.get("/api/archives", async (_req, res) => {
+  await archiveDatabaseReady;
+  res.json({ analyses: archives.analyses, coupons: archives.coupons, persistentStorage: Boolean(databasePool) });
+});
+
+app.get("/api/match/:id/stats", async (req, res) => {
+  try {
+    const payload = await cachedProviderRequest(`stats:${req.params.id}`, `/fixtures/statistics?fixture=${encodeURIComponent(req.params.id)}`, 30000);
+    res.json({ success: true, stats: payload.response || [] });
+  } catch (e) { res.status(502).json({ success: false, error: "İstatistik alınamadı.", detail: e.message, stats: [] }); }
+});
+
+// Otomatik Telegram akışı: canlı tek tercih açılışta ve her 20 dakikada;
+// günün maç önü kuponu açılışta ve ardından 2 saatte bir. Buton gerekmez.
+function turkeyDateString() {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Istanbul", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
+  const get = type => parts.find(p => p.type === type)?.value;
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+async function runAutomaticLivePick() {
+  if (autoLiveTaskInFlight) return;
+  autoLiveTaskInFlight = true;
+  try {
+    const date = turkeyDateString();
+    const result = await createCouponByMode(date, "live", { automatic: true });
+    if (result.status === "READY" && result.telegram?.sent) {
+      console.log(`[AUTO LIVE] Telegram'a tek canlı tercih gönderildi: ${result.picks?.[0]?.home} - ${result.picks?.[0]?.away}`);
+    } else {
+      console.log(`[AUTO LIVE] Gönderilecek uygun tek tercih yok veya gönderim başarısız: ${result.message || result.telegram?.reason || result.telegram?.error || result.status}`);
+    }
+  } catch (error) {
+    console.error(`[AUTO LIVE ERROR] ${error.message}`);
+  } finally {
+    autoLiveTaskInFlight = false;
+  }
+}
+
+async function runAutomaticDailyCoupon() {
+  if (autoPrematchTaskInFlight) return;
+  autoPrematchTaskInFlight = true;
+  try {
+    const date = turkeyDateString();
+    const result = await createCouponByMode(date, "prematch", { automatic: true });
+    if (result.status === "READY" && result.telegram?.sent) {
+      console.log(`[AUTO DAILY] Telegram'a günün kuponu gönderildi: ${result.picks?.length || 0} maç`);
+    } else {
+      console.log(`[AUTO DAILY] Yeni ve uygun iki maç bulunamadı veya gönderim başarısız: ${result.message || result.telegram?.reason || result.telegram?.error || result.status}`);
+    }
+  } catch (error) {
+    console.error(`[AUTO DAILY ERROR] ${error.message}`);
+  } finally {
+    autoPrematchTaskInFlight = false;
+  }
+}
+
+setTimeout(() => { void runAutomaticDailyCoupon(); }, 20000);
+// Otomatik canlı analiz devre dışı: yalnızca maç önü analizleri çalışır.
+setInterval(() => { void runAutomaticDailyCoupon(); }, 2 * 60 * 60 * 1000);
+
+// Her 60 saniyede bir Telegram'a gönderilmiş kupon maçlarının skor değişimini kontrol et.
+// Böylece gol alarmı yalnızca kupon mesajı atmakla kalmaz, maçtaki skor değişimini de bildirir.
+setInterval(async () => {
+  if (goalScanInFlight || goalTrackedFixtures.size === 0) return;
+  goalScanInFlight = true;
+  try {
+    const payload = await cachedProviderRequest("goalAlertLiveList", "/fixtures?live=all", 15000);
+    const liveMatches = (payload.response || []).map(normalizeProviderMatch);
+    const liveById = new Map(liveMatches.map(m => [Number(m.id), m]));
+    for (const [fixtureId, tracked] of goalTrackedFixtures.entries()) {
+      const match = liveById.get(fixtureId);
+      if (!match || match.status !== "LIVE") continue;
+      const score = `${match.homeScore}-${match.awayScore}`;
+      const previous = goalScoreCache.get(fixtureId) ?? tracked.baselineScore ?? score;
+      if (score === previous) continue;
+      const message = `⚽ WINSCOPE GOOOOOL!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Skor değişti: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}'\n🎯 Takip nedeni: ${tracked.sourceLabel}`;
+      try {
+        const sent = await sendTelegram(message);
+        if (sent.sent) {
+          goalScoreCache.set(fixtureId, score);
+          tracked.baselineScore = score;
+          console.log(`[GOOOOL Alert OK] ${fixtureId} ${previous} -> ${score}`);
+        }
+      } catch (error) {
+        console.error(`[GOOOOL Alert Error] ${fixtureId}: ${error.message}`);
+      }
+    }
+  } catch (error) {
+    console.error(`[GOOOOL Scan Error] ${error.message}`);
+  } finally {
+    goalScanInFlight = false;
+  }
+}, 60_000);
+
+app.use("/api", (_req, res) => res.status(404).json({ error: "API uç noktası bulunamadı." }));
+app.listen(PORT, () => console.log(`WinScope server running on port ${PORT}`));
