@@ -52,13 +52,13 @@ button{cursor:pointer}.primary,.active{background:var(--pink);border-color:var(-
     <div id="couponResult" class="small" style="margin-top:12px"></div>
   </section>
   <div id="msg" class="small"></div>
-  <section class="panel" id="goalAlertsPanel"><div class="head"><b>⚡ Otomatik Gol Bildirimleri</b><span id="alertsUpdated">Kontrol ediliyor…</span></div><div id="goalAlerts" class="small" style="margin-top:10px">Canlı maçlar otomatik taranıyor. Gol fırsatı veya skor değişimi oluştuğunda burada görünecek.</div></section>
+  <section class="panel" id="goalAlertsPanel"><div class="head"><b>⚡ Otomatik Gol Bildirimleri</b><span id="alertsUpdated">Kontrol ediliyor…</span></div><div id="goalAlerts" class="small" style="margin-top:10px">Yalnızca “MAÇI TAKİBE AL” dediğin maç için Gooooool ve gol iptali bildirimi gösterilir.</div></section>
   <section class="panel hidden" id="trackingPanel"><div class="head"><b>📊 Tahmin Sonuç Takibi</b><button id="hideTracking">Kapat</button></div><div id="trackingResults" class="small">Sonuçlar yükleniyor…</div></section>
   <section id="matches"><div class="empty">Maçlar yükleniyor…</div></section>
 </main>
 <script>
 const $=x=>document.getElementById(x);
-let matches=[],bulletinMatches=[],viewMode='live';
+let matches=[],bulletinMatches=[],viewMode='live',trackedFixtureIds=new Set();
 function esc(x){return String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function formatKickoff(value){
   if(!value) return 'Saat bilgisi yok';
@@ -72,7 +72,7 @@ function card(m){
     <div class="head"><span>${esc(m.country)} · ${esc(m.league)}</span><span>${live?'<span class="pill">CANLI MAÇ</span>':esc(m.status||'MAÇ ÖNÜ')} ${m.minute!=null&&live?esc(m.minute)+"'":''}</span></div>
     <div class="teams"><div class="team">${esc(m.home)}</div><div class="score">${live?`${esc(m.homeScore)} : ${esc(m.awayScore)}`:'VS'}</div><div class="team">${esc(m.away)}</div></div>
     <div class="meta">🕒 ${esc(formatKickoff(m.fixtureDate))}</div>
-    <div class="toolbar"><button class="primary" onclick="analyze(${Number(m.id)},'${live?'live':'prematch'}')">${live?'⚽ CANLI GOL ANALİZİ':'MAÇ ÖNÜ ANALİZİ'}</button></div>
+    <div class="toolbar"><button class="primary" onclick="analyze(${Number(m.id)},'${live?'live':'prematch'}')">${live?'⚽ CANLI GOL ANALİZİ':'MAÇ ÖNÜ ANALİZİ'}</button>${live?`<button onclick="toggleGoalTrack(${Number(m.id)})">${trackedFixtureIds.has(Number(m.id))?'🛑 TAKİBİ BIRAK':'🔔 MAÇI TAKİBE AL'}</button>`:''}</div>
     <div id="a${Number(m.id)}"><div class="empty">${live?'Canlı gol analizi için dokun.':'Maç önü analizi için dokun.'}</div></div>
   </article>`;
 }
@@ -82,10 +82,16 @@ function renderGoalAlerts(alerts){
  const out=$('goalAlerts');
  if(!Array.isArray(alerts)||!alerts.length){out.textContent='Henüz otomatik gol bildirimi yok. Canlı tarama arka planda sürüyor.';return}
  out.innerHTML=alerts.slice(0,12).map(a=>{
-  const isGoal=a.type==='goal';
-  const detail=isGoal?`Skor: ${esc(a.previousScore)} → ${esc(a.currentScore)}`:`Tercih: <b>${esc(a.market||'')}</b> · ${esc(a.oddsTiming||'')}`;
-  return `<div style="padding:9px 0;border-bottom:1px solid var(--line)"><div style="display:flex;justify-content:space-between;gap:8px"><b>${isGoal?'⚽ GOL OLDU':'⚡ GOL FIRSATI'}</b><span>${esc(a.minute??'?')}'</span></div><div style="margin-top:4px;font-weight:750">${esc(a.home||'')} ${esc(a.currentScore||'')} ${esc(a.away||'')}</div><div>${esc(a.league||'')} · ${detail}</div></div>`
+  const isGoal=a.type==='goal'; const isCancelled=a.type==='cancelled';
+  const detail=(isGoal||isCancelled)?`Skor: ${esc(a.previousScore??a.currentScore??'')}${a.previousScore!=null&&a.currentScore!=null?' → '+esc(a.currentScore):''}`:`Tercih: <b>${esc(a.market||'')}</b> · ${esc(a.oddsTiming||'')}`;
+  return `<div style="padding:9px 0;border-bottom:1px solid var(--line)"><div style="display:flex;justify-content:space-between;gap:8px"><b>${isCancelled?'🚫 GOL İPTAL EDİLDİ':isGoal?'🎉 Gooooool!':'⚡ GOL FIRSATI'}</b><span>${esc(a.minute??'?')}'</span></div><div style="margin-top:4px;font-weight:750">${esc(a.home||'')} ${esc(a.currentScore||'')} ${esc(a.away||'')}</div><div>${esc(a.league||'')} · ${detail}</div></div>`
  }).join('');
+}
+async function loadTrackedFixtures(){
+ try{const r=await fetch('/api/live-tracked');const j=await r.json();trackedFixtureIds=new Set((j.tracked||[]).map(x=>Number(x.fixtureId)));renderList(currentList())}catch(e){console.warn('Takip listesi alınamadı',e)}
+}
+async function toggleGoalTrack(id){
+ try{const r=await fetch('/api/live-track',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fixtureId:Number(id)})});const j=await r.json();if(!r.ok)throw Error(j.error||'Takip ayarı değiştirilemedi');if(j.tracked){trackedFixtureIds.add(Number(id));$('msg').textContent=`🔔 ${j.home} - ${j.away} takibe alındı. Artık yalnızca bu maç için Gooooool ve gol iptali bildirimi gelecek.`}else{trackedFixtureIds.delete(Number(id));$('msg').textContent='Maç takibinden çıkarıldı.'}renderList(currentList())}catch(e){$('msg').textContent=e.message}
 }
 async function loadGoalAlerts(){
  try{const r=await fetch('/api/live-goal-alerts');const j=await r.json();if(!r.ok)throw Error('Bildirimler alınamadı');renderGoalAlerts(j.alerts||[]);$('alertsUpdated').textContent='Güncellendi: '+new Intl.DateTimeFormat('tr-TR',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Istanbul'}).format(new Date())}
@@ -173,7 +179,7 @@ $('clearMatchSearch').onclick=()=>{$('matchSearch').value='';$('matchSearchResul
 $('makeCoupon').onclick=async()=>{try{const r=await fetch('/api/coupon/best?date='+encodeURIComponent($('date').value));renderCoupon(await r.json())}catch(e){$('couponResult').textContent=e.message}};
 $('makeSurpriseCoupon').onclick=async()=>{try{const r=await fetch('/api/coupon/surprise?date='+encodeURIComponent($('date').value));renderCoupon(await r.json())}catch(e){$('couponResult').textContent=e.message}};
 $('filter').onchange=()=>renderList(currentList());
-const d=new Date();$('date').value=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;loadGoalAlerts();setInterval(loadGoalAlerts,30000);
+const d=new Date();$('date').value=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;loadGoalAlerts();loadTrackedFixtures();setInterval(loadGoalAlerts,30000);
 live();
 </script>
 </body></html>
