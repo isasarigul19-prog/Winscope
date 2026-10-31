@@ -1380,20 +1380,39 @@ app.get("/api/predictions/summary", async (_req, res) => {
 app.get("/api/live-goal-predictions", async (req, res) => {
   await archiveDatabaseReady;
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
-  const rows = databasePool
-    ? (await databasePool.query("SELECT * FROM winscope_live_goal_predictions ORDER BY created_at DESC LIMIT $1", [limit])).rows.map(row => ({
-        id:Number(row.id), fixtureId:Number(row.fixture_id), home:row.home_team, away:row.away_team, league:row.league,
-        minute:Number(row.match_minute), scoreAtPick:row.score_at_pick, market:row.market,
-        probability:row.model_probability == null ? null : Number(row.model_probability), oddsSource:row.odds_source,
-        stats:row.stats || {}, status:row.status, finalScore:row.final_score, halftimeScore:row.halftime_score,
-        createdAt:row.created_at, settledAt:row.settled_at
-      }))
-    : liveGoalPredictionTracking.slice(0, limit);
-  const settled = rows.filter(x => ["won","lost","void"].includes(x.status));
-  const decided = settled.filter(x => x.status === "won" || x.status === "lost");
-  const wins = decided.filter(x => x.status === "won").length;
-  res.json({ total:rows.length, settled:settled.length, pending:rows.filter(x => x.status === "pending").length,
-    wins, losses:decided.length-wins, hitRate:decided.length ? Math.round(wins*1000/decided.length)/10 : null,
+  let rows, stats;
+  if (databasePool) {
+    const [resultRows, resultStats] = await Promise.all([
+      databasePool.query("SELECT * FROM winscope_live_goal_predictions ORDER BY created_at DESC LIMIT $1", [limit]),
+      databasePool.query(`SELECT COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE status='pending')::int AS pending,
+        COUNT(*) FILTER (WHERE status='won')::int AS wins,
+        COUNT(*) FILTER (WHERE status='lost')::int AS losses,
+        COUNT(*) FILTER (WHERE status='void')::int AS void
+        FROM winscope_live_goal_predictions`)
+    ]);
+    rows = resultRows.rows.map(row => ({
+      id:Number(row.id), fixtureId:Number(row.fixture_id), home:row.home_team, away:row.away_team, league:row.league,
+      minute:Number(row.match_minute), scoreAtPick:row.score_at_pick, market:row.market,
+      probability:row.model_probability == null ? null : Number(row.model_probability), oddsSource:row.odds_source,
+      stats:row.stats || {}, status:row.status, finalScore:row.final_score, halftimeScore:row.halftime_score,
+      createdAt:row.created_at, settledAt:row.settled_at
+    }));
+    stats = resultStats.rows[0] || {total:0,pending:0,wins:0,losses:0,void:0};
+  } else {
+    rows = liveGoalPredictionTracking.slice(0, limit);
+    stats = {
+      total:liveGoalPredictionTracking.length,
+      pending:liveGoalPredictionTracking.filter(x => x.status === "pending").length,
+      wins:liveGoalPredictionTracking.filter(x => x.status === "won").length,
+      losses:liveGoalPredictionTracking.filter(x => x.status === "lost").length,
+      void:liveGoalPredictionTracking.filter(x => x.status === "void").length
+    };
+  }
+  const total=Number(stats.total)||0, pending=Number(stats.pending)||0, wins=Number(stats.wins)||0,
+    losses=Number(stats.losses)||0, voidCount=Number(stats.void)||0, decided=wins+losses;
+  res.json({ total, settled:wins+losses+voidCount, pending, wins, losses, void:voidCount,
+    hitRate:decided ? Math.round(wins*1000/decided)/10 : null,
     persistentStorage:Boolean(databasePool), results:rows,
     note: databasePool ? "Kalıcı kayıt PostgreSQL'de tutuluyor." : "DATABASE_URL yok: kayıt yalnızca sunucu belleğinde tutulur ve yeniden başlatmada kaybolur." });
 });
