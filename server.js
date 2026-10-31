@@ -244,7 +244,7 @@ async function fetchTeamRecentForm(teamId, fixtureId) {
 }
 
 function factorial(n) { let out = 1; for (let i = 2; i <= n; i++) out *= i; return out; }
-function scorePrediction(match, homeForm, awayForm, oddsRow) {
+function scorePrediction(match, homeForm, awayForm) {
   const hNow = Number(match.homeScore || 0), aNow = Number(match.awayScore || 0);
   const live = match.status === "LIVE";
   if (match.status === "FT") return { halfTimeScore: `${match.htHomeScore ?? "?"}-${match.htAwayScore ?? "?"}`, fullTimeScore: `${hNow}-${aNow}` };
@@ -279,6 +279,84 @@ function scorePrediction(match, homeForm, awayForm, oddsRow) {
   };
 }
 
+// Telegram Bildirim Fonksiyonu
+async function sendTelegram(text) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    return { sent: false, reason: "Telegram token veya chat id eksik." };
+  }
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text })
+    });
+    const data = await res.json();
+    return { sent: data.ok };
+  } catch (e) {
+    return { sent: false, error: e.message };
+  }
+}
+
+// Kupon Üretici Endpoint Mantıkları
+async function createCouponByMode(date, mode = "prematch") {
+  const isLive = mode === "live";
+  const url = isLive ? "/fixtures?live=all" : `/fixtures?date=${encodeURIComponent(date)}&timezone=Europe/Istanbul`;
+  const payload = await cachedProviderRequest(`coupon-${mode}-${date}`, url, isLive ? 15000 : 60000);
+  const matches = (payload.response || []).map(normalizeProviderMatch).filter(m => isLive ? m.status === "LIVE" : m.status === "NS");
+
+  if (!matches.length) {
+    return { status: "NO_MATCHES", picks: [], message: "Uygun maç bulunamadı." };
+  }
+
+  const picks = [];
+  const limit = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
+
+  for (const m of matches.slice(0, limit)) {
+    picks.push({
+      fixtureId: m.id,
+      league: m.league,
+      home: m.home,
+      away: m.away,
+      market: mode === "surprise" ? "MS 1.5 ÜST" : "MS 2.5 ÜST",
+      currentScore: `${m.homeScore}-${m.awayScore}`,
+      minute: m.minute
+    });
+  }
+
+  const coupon = {
+    draftId: `coupon-${Date.now()}`,
+    date: date || new Date().toISOString().slice(0,10),
+    type: mode,
+    status: "READY",
+    picks,
+    message: `${mode.toUpperCase()} kuponu başarıyla oluşturuldu.`
+  };
+
+  // Telegram'a otomatik gönder
+  const msgText = `🎯 WINSCOPE KUPON (${mode.toUpperCase()})\n` + picks.map(p => `${p.home} - ${p.away} | Tercih: ${p.market}`).join('\n');
+  coupon.telegram = await sendTelegram(msgText);
+
+  archives.coupons.unshift(coupon);
+  await saveArchiveItem("coupon", coupon);
+
+  return coupon;
+}
+
+app.get("/api/coupon/best", async (req, res) => {
+  try { res.json(await createCouponByMode(String(req.query.date || ""), "prematch")); }
+  catch (e) { res.status(502).json({ status: "ERROR", error: e.message }); }
+});
+
+app.get("/api/coupon/surprise", async (req, res) => {
+  try { res.json(await createCouponByMode(String(req.query.date || ""), "surprise")); }
+  catch (e) { res.status(502).json({ status: "ERROR", error: e.message }); }
+});
+
+app.get("/api/coupon/live-best", async (req, res) => {
+  try { res.json(await createCouponByMode(String(req.query.date || ""), "live")); }
+  catch (e) { res.status(502).json({ status: "ERROR", error: e.message }); }
+});
+
 app.get("/api/match/:id/analyze", async (req, res) => {
   try {
     const payload = await cachedProviderRequest(`fixture:${req.params.id}`, `/fixtures?id=${encodeURIComponent(req.params.id)}`, 15000);
@@ -295,7 +373,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
 
     const prematchRow = (prematchOddsPayload.response || []).find(x => Number(x.fixture?.id) === match.id) || null;
     const oddsList = oddsForFixture(prematchRow);
-    const scores = scorePrediction(match, homeForm, awayForm, prematchRow);
+    const scores = scorePrediction(match, homeForm, awayForm);
 
     const getMarket = (key) => oddsList.find(o => o.market === key);
     const formatOdds = (item) => item ? `Oran: ${item.odd || '—'} (%${item.probability ? item.probability.toFixed(0) : '—'})` : "Veri Yok";
