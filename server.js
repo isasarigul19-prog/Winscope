@@ -1552,18 +1552,18 @@ async function runAutomaticLiveGoalAnalysis() {
           cachedProviderRequest(`stats:${id}`, `/fixtures/statistics?fixture=${id}`, 12_000).catch(() => ({ response: [] }))
         ]);
         const stats = liveStatsMetrics(statsPayload.response || [], fixture);
-        if (!stats.available) { scanStats.noStats++; continue; }
+        if (!stats.available) { scanStats.noStats++; console.log(`[AUTO GOAL REJECT] fixture=${id} minute=${fixture.minute} score=${fixture.homeScore}-${fixture.awayScore} reason=no_live_stats`); continue; }
         const [homeForm, awayForm] = await Promise.all([
           fetchTeamRecentForm(fixture.homeId, id), fetchTeamRecentForm(fixture.awayId, id)
         ]);
-        if (!homeForm.available || !awayForm.available) { scanStats.noForm++; continue; }
+        if (!homeForm.available || !awayForm.available) { scanStats.noForm++; console.log(`[AUTO GOAL REJECT] fixture=${id} minute=${fixture.minute} score=${fixture.homeScore}-${fixture.awayScore} reason=missing_recent_form homeForm=${Boolean(homeForm.available)} awayForm=${Boolean(awayForm.available)}`); continue; }
         const liveOddsRow = (liveOddsPayload.response || []).find(x => Number(x.fixture?.fixture?.id ?? x.fixture?.id ?? x.fixtureId ?? x.fixture?.id) === id) || null;
         // Otomatik canlı tercih için gerçek canlı piyasa şart; maç önü oranı yedek olarak kullanılmaz.
-        if (!liveOddsRow || !oddsForFixture(liveOddsRow).length) { scanStats.noLiveOdds++; continue; }
+        if (!liveOddsRow || !oddsForFixture(liveOddsRow).length) { scanStats.noLiveOdds++; console.log(`[AUTO GOAL REJECT] fixture=${id} minute=${fixture.minute} score=${fixture.homeScore}-${fixture.awayScore} reason=no_live_market_odds`); continue; }
         const chosen = chooseSupportedMarket(liveOddsRow, "live", fixture, { home: homeForm, away: awayForm }, stats, null);
-        if (!chosen || chosen.oddsTiming !== "live" || !Number.isFinite(Number(chosen.probability))) { scanStats.noSignal++; continue; }
+        if (!chosen || chosen.oddsTiming !== "live" || !Number.isFinite(Number(chosen.probability))) { scanStats.noSignal++; const availableMarkets = oddsForFixture(liveOddsRow).map(o => String(o.market || o.name || o.label || "unknown")).slice(0, 25); console.log(`[AUTO GOAL REJECT] fixture=${id} minute=${fixture.minute} score=${fixture.homeScore}-${fixture.awayScore} reason=no_eligible_market stats=${JSON.stringify({shots:stats.totalShots,shotsOnTarget:stats.shotsOnTarget,corners:stats.corners,pressure:stats.pressure})} markets=${JSON.stringify(availableMarkets)}`); continue; }
         const probability = Number(chosen.probability);
-        if (probability < 65 || (stats.shotsOnTarget < 2 && stats.totalShots < 8)) { scanStats.lowConfidence++; continue; }
+        if (probability < 65 || (stats.shotsOnTarget < 2 && stats.totalShots < 8)) { scanStats.lowConfidence++; console.log(`[AUTO GOAL REJECT] fixture=${id} minute=${fixture.minute} score=${fixture.homeScore}-${fixture.awayScore} reason=low_confidence probability=${probability} shots=${stats.totalShots} shotsOnTarget=${stats.shotsOnTarget}`); continue; }
         const score = `${fixture.homeScore}-${fixture.awayScore}`;
         const key = `${id}|${score}|${chosen.market}`;
         if (automaticGoalSignalCache.has(key) || livePredictionSignalKeys.has(key)) { scanStats.duplicate++; continue; }
