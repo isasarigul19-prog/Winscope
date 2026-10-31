@@ -150,6 +150,7 @@ function normalizeProviderMatch(match) {
   };
 }
 
+// 🟢 BET365 ÖNCELİKLİ VE Kapsamlı ORAN AYIKLAYICI
 function oddsForFixture(oddsRow) {
   if (!oddsRow || !Array.isArray(oddsRow.bookmakers)) return [];
   let selectedBookmaker = oddsRow.bookmakers.find(b => /bet365/i.test(b.name || ""));
@@ -167,38 +168,37 @@ function oddsForFixture(oddsRow) {
 
   for (const bet of (selectedBookmaker.bets || [])) {
     const name = String(bet.name || "").toLowerCase();
-    const isHalf = /first half|1st half|half time/.test(name);
+    const isHalf = /first half|1st half|half time|1st half result|half-time/.test(name);
     const isBtts = /both teams to score|btts/.test(name);
     const isHandicap = /asian handicap|handicap/.test(name);
-    const isWinner = /match winner|1x2|full time result|1st half result/.test(name) && !isHandicap;
+    const isWinner = /match winner|1x2|full time result|regular time result/.test(name) && !isHandicap;
 
     for (const value of (bet.values || [])) {
       const label = String(value.value ?? value.name ?? "").toLowerCase();
       const odd = Number(value.odd);
       if (!Number.isFinite(odd) || odd <= 1.01) continue;
 
-      if (isHandicap && label.includes("-0.5")) {
-        if (/home|1/.test(label)) add("AH -0.5", "home", odd);
-        else if (/away|2/.test(label)) add("AH -0.5", "away", odd);
+      if (isHandicap && (label.includes("-0.5") || label.includes("home"))) {
+        if (/home|1|-0[.,]5/.test(label)) add("AH -0.5", "home", odd);
         continue;
       }
       if (isWinner) {
         const key = isHalf ? "İY 1X2" : "MS 1X2";
-        if (/^home|1$/.test(label)) add(key, "home", odd);
-        else if (/^draw|x$/.test(label)) add(key, "draw", odd);
-        else if (/^away|2$/.test(label)) add(key, "away", odd);
+        if (/^home|1|1 \(home\)$/.test(label)) add(key, "home", odd);
+        else if (/^draw|x|tie$/.test(label)) add(key, "draw", odd);
+        else if (/^away|2|2 \(away\)$/.test(label)) add(key, "away", odd);
         continue;
       }
       if (isBtts) {
-        if (/yes/.test(label)) add("KG VAR", "yes", odd);
-        else if (/no/.test(label)) add("KG VAR", "no", odd);
+        if (/yes|y/.test(label)) add("KG VAR", "yes", odd);
+        else if (/no|n/.test(label)) add("KG VAR", "no", odd);
         continue;
       }
       const lineMatch = label.match(/over\s*([0-9]+[.,][0-9]+)/) || label.match(/([0-9]+[.,][0-9]+)/);
       if (lineMatch) {
         const n = Number(lineMatch[1].replace(',', '.'));
-        const side = label.includes("over") ? "over" : label.includes("under") ? "under" : null;
-        if (side) {
+        const side = label.includes("over") ? "over" : label.includes("under") ? "under" : "over";
+        if ([0.5, 1.5, 2.5, 3.5].includes(n)) {
           let key = isHalf ? `İY ${n} ÜST` : `MS ${n} ÜST`;
           add(key, side, odd);
         }
@@ -236,25 +236,27 @@ async function fetchTeamRecentForm(teamId, fixtureId) {
 }
 
 function factorial(n) { let out = 1; for (let i = 2; i <= n; i++) out *= i; return out; }
-function scorePrediction(match, homeForm, awayForm) {
+
+// 🟢 SKOR VE TERCİH MOTORU (TUTARLI VE ÇAKIŞMASIZ)
+function scorePrediction(match, homeForm, awayForm, oddsList) {
   const hNow = Number(match.homeScore || 0), aNow = Number(match.awayScore || 0);
   const live = match.status === "LIVE";
-  if (match.status === "FT") return { halfTimeScore: `${match.htHomeScore ?? "?"}-${match.htAwayScore ?? "?"}`, fullTimeScore: `${hNow}-${aNow}` };
+  if (match.status === "FT") return { halfTimeScore: `${match.htHomeScore ?? "?"}-${match.htAwayScore ?? "?"}`, fullTimeScore: `${hNow}-${aNow}`, mainPick: "MS 2.5 ÜST", alternative: "MS 1.5 ÜST", livePick: "Maç Bitti" };
 
   let lambdaHome = homeForm?.available ? (homeForm.avgGoalsFor + (awayForm?.avgGoalsAgainst || 1)) / 2 : 1.35;
   let lambdaAway = awayForm?.available ? (awayForm.avgGoalsFor + (homeForm?.avgGoalsAgainst || 1)) / 2 : 1.05;
 
   if (live) {
     const minute = Math.max(1, Math.min(90, Number(match.minute || 0)));
-    const remainRatio = (90 - minute) / 90;
+    const remainRatio = Math.max(0.15, (90 - minute) / 90);
     lambdaHome *= remainRatio;
     lambdaAway *= remainRatio;
   }
 
   const pmf = (k, l) => Math.exp(-l) * Math.pow(l, k) / factorial(k);
   let bestProb = -1, bestH = 0, bestA = 0;
-  for (let h = 0; h <= 5; h++) {
-    for (let a = 0; a <= 5; a++) {
+  for (let h = 0; h <= 4; h++) {
+    for (let a = 0; a <= 4; a++) {
       const p = pmf(h, lambdaHome) * pmf(a, lambdaAway);
       if (p > bestProb) { bestProb = p; bestH = h; bestA = a; }
     }
@@ -265,9 +267,43 @@ function scorePrediction(match, homeForm, awayForm) {
   const htH = live && match.minute >= 45 ? (match.htHomeScore ?? hNow) : Math.min(ftH, Math.round(ftH * 0.45));
   const htA = live && match.minute >= 45 ? (match.htAwayScore ?? aNow) : Math.min(ftA, Math.round(ftA * 0.45));
 
+  const totalGoalsForecast = ftH + ftA;
+  
+  // Oran listesinden en mantıklı tercihleri filtrele
+  const hasMarket = (mName) => oddsList.some(o => o.market === mName);
+  
+  let mainPick = hasMarket("MS 2.5 ÜST") ? "MS 2.5 ÜST" : "KG VAR";
+  let alternative = hasMarket("MS 1.5 ÜST") ? "MS 1.5 ÜST" : "İY 0.5 ÜST";
+  let livePick = "MS 1.5 ÜST";
+
+  if (totalGoalsForecast >= 3) {
+    mainPick = "MS 2.5 ÜST";
+    alternative = "KG VAR";
+  } else if (totalGoalsForecast >= 2) {
+    mainPick = "MS 1.5 ÜST";
+    alternative = "MS 2.5 ÜST";
+  } else {
+    mainPick = "MS 1.5 ÜST";
+    alternative = "İY 0.5 ÜST";
+  }
+
+  if (live) {
+    const currentTotal = hNow + aNow;
+    if (currentTotal === 0) {
+      livePick = match.minute > 60 ? "MS 1.5 ÜST" : "İY 0.5 ÜST";
+    } else {
+      livePick = "MS " + (currentTotal + 1) + ".5 ÜST";
+    }
+  } else {
+    livePick = "Maç Önü Analiz";
+  }
+
   return {
     halfTimeScore: `${htH}-${htA}${live && match.minute < 45 ? ' (Tahmin)' : ''}`,
-    fullTimeScore: `${ftH}-${ftA}${live ? ' (Tahmin)' : ''}`
+    fullTimeScore: `${ftH}-${ftA}${live ? ' (Mevcut + Kalan)' : ''}`,
+    mainPick,
+    alternative,
+    livePick
   };
 }
 
@@ -324,7 +360,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
 
     const prematchRow = (prematchOddsPayload.response || []).find(x => Number(x.fixture?.id) === match.id) || null;
     const oddsList = oddsForFixture(prematchRow);
-    const scores = scorePrediction(match, homeForm, awayForm);
+    const scores = scorePrediction(match, homeForm, awayForm, oddsList);
 
     const getMarket = (key) => oddsList.find(o => o.market === key);
     const formatOdds = (item) => item ? `Oran: ${item.odd || '—'} (%${item.probability ? item.probability.toFixed(0) : '—'}) [${item.bookmaker}]` : "Veri Yok";
@@ -344,10 +380,10 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       ms25: formatOdds(getMarket("MS 2.5 ÜST")),
       ms35: formatOdds(getMarket("MS 3.5 ÜST")),
       ah05: formatOdds(getMarket("AH -0.5")),
-      mainPick: getMarket("MS 2.5 ÜST")?.probability > 55 ? "MS 2.5 ÜST" : "KG VAR",
-      alternative: getMarket("MS 1.5 ÜST")?.probability > 70 ? "MS 1.5 ÜST" : "İY 0.5 ÜST",
-      livePick: match.status === "LIVE" ? "MS 2.5 ÜST" : "Maç canlı değil",
-      note: `Bet365 / Alternatif büro verisi kullanıldı. Form: Ev ${homeForm.avgGoalsFor?.toFixed(1) || 0} - Dep ${awayForm.avgGoalsFor?.toFixed(1) || 0}`
+      mainPick: scores.mainPick,
+      alternative: scores.alternative,
+      livePick: scores.livePick,
+      note: `Bet365 / Bürolar taranmıştır. Form Ortalaması: Ev ${homeForm.avgGoalsFor?.toFixed(1) || 0} - Dep ${awayForm.avgGoalsFor?.toFixed(1) || 0}`
     });
   } catch (e) {
     res.status(502).json({ error: "Analiz üretilemedi.", detail: e.message });
