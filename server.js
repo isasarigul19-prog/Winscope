@@ -27,6 +27,8 @@ app.use(express.static(path.join(ROOT, "public")));
 const providerCache = new Map();
 const providerInFlight = new Map();
 const archives = { analyses: [], coupons: [] };
+// Otomatik canlı tercihler için sonuç takibi (bellek tabanlı; kalıcı DB henüz bağlı değil).
+const livePredictionRecords = new Map();
 // Aynı kuponun art arda tıklama/yenilemelerde tekrar Telegram'a gitmesini önler.
 const telegramDeliveryCache = new Map();
 // Otomatik gönderimde aynı gün aynı maçı tekrar seçmemek için takip edilir.
@@ -990,6 +992,54 @@ app.post("/api/analyses/approve", (req, res) => {
 
 app.get("/api/archives", (_req, res) => res.json({ analyses: archives.analyses, coupons: archives.coupons }));
 
+// Canlı Tercih Sonuç Takibi arayüzünün beklediği JSON endpoint'i.
+app.get("/api/live-predictions/summary", async (_req, res) => {
+  try {
+    // Sonucu belli olmuş maçları API-Football'dan kontrol et; geçici API hataları kaydı bozmaz.
+    for (const record of livePredictionRecords.values()) {
+      if (record.status !== "pending" || !record.fixtureId) continue;
+      try {
+        const payload = await cachedProviderRequest(`prediction-result:${record.fixtureId}`, `/fixtures?id=${record.fixtureId}`, 60000);
+        const raw = payload.response?.[0];
+        if (!raw) continue;
+        const match = normalizeProviderMatch(raw);
+        if (match.status !== "FT") continue;
+        const h = Number(match.homeScore || 0), a = Number(match.awayScore || 0);
+        const ht = [match.htHomeScore, match.htAwayScore];
+        const total = h + a;
+        let won = null;
+        if (record.market === "KG VAR") won = h >= 1 && a >= 1;
+        else if (record.market === "EV 1.5 ÜST") won = h >= 2;
+        else if (record.market === "DEP 1.5 ÜST") won = a >= 2;
+        else if (record.market === "MS 0.5 ÜST") won = total >= 1;
+        else if (record.market === "MS 1.5 ÜST") won = total >= 2;
+        else if (record.market === "MS 2.5 ÜST") won = total >= 3;
+        else if (record.market === "MS 3.5 ÜST") won = total >= 4;
+        else if (record.market === "İY 0.5 ÜST" && ht.every(v => v != null)) won = Number(ht[0]) + Number(ht[1]) >= 1;
+        else if (record.market === "İY 1.5 ÜST" && ht.every(v => v != null)) won = Number(ht[0]) + Number(ht[1]) >= 2;
+        if (won !== null) {
+          record.status = won ? "won" : "lost";
+          record.actualScore = `${h}-${a}`;
+          record.finishedAt = new Date().toISOString();
+        }
+      } catch (error) {
+        console.warn(`[PREDICTION RESULT] ${record.fixtureId}: ${error.message}`);
+      }
+    }
+    const results = [...livePredictionRecords.values()].sort((a,b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+    const won = results.filter(p => p.status === "won").length;
+    const lost = results.filter(p => p.status === "lost").length;
+    const pending = results.filter(p => p.status === "pending").length;
+    const settled = won + lost;
+    res.json({ total: results.length, pending, won, lost,
+      winRate: settled ? Math.round(won / settled * 1000) / 10 : null,
+      lossRate: settled ? Math.round(lost / settled * 1000) / 10 : null,
+      persistentStorage: false, results: results.slice(0, 100) });
+  } catch (error) {
+    res.status(500).json({ error: `Canlı tercih sonuçları okunamadı: ${error.message}` });
+  }
+});
+
 app.get("/api/match/:id/stats", async (req, res) => {
   try {
     const payload = await cachedProviderRequest(`stats:${req.params.id}`, `/fixtures/statistics?fixture=${encodeURIComponent(req.params.id)}`, 30000);
@@ -1012,7 +1062,16 @@ async function runAutomaticLivePick() {
     const date = turkeyDateString();
     const result = await createCouponByMode(date, "live", { automatic: true });
     if (result.status === "READY" && result.telegram?.sent) {
-      console.log(`[AUTO LIVE] Telegram'a tek canlı tercih gönderildi: ${result.picks?.[0]?.home} - ${result.picks?.[0]?.away}`);
+      const p = result.picks?.[0];
+      if (p?.fixtureId && p?.market) {
+        const key = `${Number(p.fixtureId)}:${p.market}:${p.minute ?? ""}:${p.currentScore ?? ""}`;
+        if (!livePredictionRecords.has(key)) livePredictionRecords.set(key, {
+          fixtureId: Number(p.fixtureId), home: p.home, away: p.away, league: p.league,
+          market: p.market, scoreAtSignal: p.currentScore || "0-0", minute: p.minute ?? null,
+          status: "pending", actualScore: null, createdAt: new Date().toISOString()
+        });
+      }
+      console.log(`[AUTO LIVE] Telegram'a tek canlı tercih gönderildi: ${p?.home} - ${p?.away}`);
     } else {
       console.log(`[AUTO LIVE] Gönderilecek uygun tek tercih yok veya gönderim başarısız: ${result.message || result.telegram?.reason || result.telegram?.error || result.status}`);
     }
