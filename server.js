@@ -1216,6 +1216,48 @@ async function liveCouponHandler(_req, res) {
     error: "Canlı analiz şimdilik kapalı. Canlı maçlar yalnızca listelenir; analiz maç önü oranlarıyla yapılır."
   });
 }
+
+// Canlı maç başına gol odaklı analiz: skor/dakika, canlı istatistik ve varsa canlı oran.
+app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Geçersiz maç numarası." });
+    const [fixturePayload, preOddsPayload, liveOddsPayload, statsPayload] = await Promise.all([
+      cachedProviderRequest(`live-goal-fixture:${id}`, `/fixtures?id=${id}`, 8000),
+      cachedProviderRequest(`odds-fixture:${id}`, `/odds?fixture=${id}`, 90000).catch(() => ({ response: [] })),
+      cachedProviderRequest(`odds-live-fixture:${id}`, `/odds/live?fixture=${id}`, 10000).catch(() => ({ response: [] })),
+      cachedProviderRequest(`stats:${id}`, `/fixtures/statistics?fixture=${id}`, 12000).catch(() => ({ response: [] }))
+    ]);
+    const row = fixturePayload.response?.[0];
+    if (!row) return res.status(404).json({ error: "Maç verisi bulunamadı." });
+    const fixture = normalizeProviderMatch(row);
+    if (fixture.status !== "LIVE") return res.status(409).json({ error: "Bu maç şu anda canlı görünmüyor. Canlı maç listesini yenile." });
+    const prematchOddsRow = (preOddsPayload.response || []).find(x => Number(x.fixture?.id) === id) || null;
+    const liveOddsRow = (liveOddsPayload.response || []).find(x => Number(x.fixture?.fixture?.id ?? x.fixture?.id ?? x.fixtureId) === id) || null;
+    const stats = liveStatsMetrics(statsPayload.response || [], fixture);
+    const statsPublic = { shotsOnTarget: stats.shotsOnTarget, totalShots: stats.totalShots, corners: stats.corners, pressure: Number(Number(stats.pressure || 0).toFixed(1)) };
+    if (!stats.available) return res.json({ success:true, fixtureId:id, minute:fixture.minute, currentScore:`${fixture.homeScore}-${fixture.awayScore}`, mainPick:null, status:"NO_LIVE_STATS", note:"İki takım için kullanılabilir canlı şut istatistiği gelmedi. Veri uydurmamak için gol tercihi üretilmedi." });
+    const [homeForm, awayForm] = await Promise.all([fetchTeamRecentForm(fixture.homeId, fixture.id), fetchTeamRecentForm(fixture.awayId, fixture.id)]);
+    if (!homeForm.available || !awayForm.available) return res.json({
+      success:true, fixtureId:id, minute:fixture.minute, currentScore:`${fixture.homeScore}-${fixture.awayScore}`,
+      mainPick:null, status:"NO_FORM", note:"Son 5 tamamlanmış maç form verisi eksik. Doğrulanmamış gol tercihi üretilmedi.", stats:statsPublic
+    });
+    const chosen = chooseSupportedMarket(liveOddsRow, "live", fixture, {home:homeForm,away:awayForm}, stats, prematchOddsRow);
+    if (!chosen || chosen.oddsTiming === "scenario-estimate" || !Number.isFinite(Number(chosen.probability))) return res.json({
+      success:true, fixtureId:id, minute:fixture.minute, currentScore:`${fixture.homeScore}-${fixture.awayScore}`,
+      mainPick:null, status:"NO_SIGNAL", note:"Dakika, skor, canlı istatistik ve gol piyasaları arasında yeterince güçlü ortak sinyal bulunamadı. Tercih zorlanmadı.",
+      oddsBasis:liveOddsRow?"Canlı oran verisi mevcut":prematchOddsRow?"Canlı oran yok; maç önü oranı mevcut":"Oran verisi yok", stats:statsPublic
+    });
+    return res.json({
+      success:true, fixtureId:id, home:fixture.home, away:fixture.away, minute:fixture.minute,
+      currentScore:`${fixture.homeScore}-${fixture.awayScore}`, mainPick:chosen.market, status:"READY",
+      oddsTiming:chosen.oddsTiming==="live"?"CANLI ORAN":"MAÇ ÖNÜ ORANI (CANLI ORAN YOK)",
+      source:chosen.bookmaker||"Kaynak belirtilmedi", stats:statsPublic,
+      note:"Skor, dakika, canlı istatistik, piyasa olasılığı ve son 5 maç formu birlikte değerlendirildi. Garanti değildir."
+    });
+  } catch (e) { res.status(502).json({ error:"Canlı gol analizi yapılamadı.", detail:e.message }); }
+});
+
 app.get("/api/coupon/live-best", liveCouponHandler);
 app.get("/api/coupon/live", liveCouponHandler);
 app.get("/api/live-combo", liveCouponHandler);
