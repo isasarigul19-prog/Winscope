@@ -73,7 +73,7 @@ if (databasePool) {
         goalTrackedFixtures.set(id, { home: row.home_team, away: row.away_team, league: row.league_name, sourceLabel: row.source_label, baselineScore: row.last_score });
         goalScoreCache.set(id, row.last_score);
       }
-      console.log(`[Archive] PostgreSQL arşivi yüklendi: analyses=${archives.analyses.length}, coupons=${archives.coupons.length}`);
+      console.log(`[Archive] PostgreSQL arşivi yüklendi.`);
     } catch (error) {
       console.error(`[Archive] PostgreSQL başlatılamadı: ${error.message}`);
     }
@@ -91,14 +91,9 @@ async function saveArchiveItem(category, payload) {
   }
 }
 
-const telegramDeliveryCache = new Map();
-const autoSentFixtureKeys = new Set();
 const telegramSentFixtureIds = new Set();
-let autoLiveTaskInFlight = false;
-let autoPrematchTaskInFlight = false;
 const goalTrackedFixtures = new Map();
 const goalScoreCache = new Map();
-let goalScanInFlight = false;
 let providerQueue = Promise.resolve();
 let lastProviderRequestAt = 0;
 let providerCooldownUntil = 0;
@@ -110,7 +105,7 @@ async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
   const cached = providerCache.get(cacheKey);
   if (cached && now - cached.at < ttlMs) return cached.payload;
   if (providerInFlight.has(cacheKey)) return providerInFlight.get(cacheKey);
-  if (!API_KEY) throw new Error("Render Environment Variables içinde API_FOOTBALL_KEY eksik.");
+  if (!API_KEY) throw new Error("API_FOOTBALL_KEY eksik.");
 
   const task = providerQueue.then(async () => {
     const secondCheck = providerCache.get(cacheKey);
@@ -124,10 +119,8 @@ async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
     });
     const raw = await response.text();
     let payload;
-    try { payload = raw ? JSON.parse(raw) : {}; } catch { throw new Error("API-Football geçerli JSON döndürmedi."); }
-    if (!response.ok || payload.errors?.length) {
-      throw new Error(`API-Football hatası: ${response.status}`);
-    }
+    try { payload = raw ? JSON.parse(raw) : {}; } catch { throw new Error("API geçerli JSON döndürmedi."); }
+    if (!response.ok) throw new Error(`API hatası: ${response.status}`);
     providerCache.set(cacheKey, { at: Date.now(), payload });
     return payload;
   });
@@ -157,63 +150,65 @@ function normalizeProviderMatch(match) {
   };
 }
 
-function bookmakerRows(oddsRow) {
-  if (!oddsRow) return [];
-  if (Array.isArray(oddsRow.bookmakers) && oddsRow.bookmakers.length) return oddsRow.bookmakers;
-  return [];
-}
-
+// 🟢 BET365 ÖNCELİKLİ BÜRO ORAN AYIKLAYICI
 function oddsForFixture(oddsRow) {
-  const markets = new Map();
-  const add = (book, key, side, odd) => {
-    if (!Number.isFinite(odd) || odd <= 1.01) return;
-    const mapKey = `${book}|${key}`;
-    if (!markets.has(mapKey)) markets.set(mapKey, { market: key, bookmaker: book, over: null, under: null, yes: null, no: null, home: null, draw: null, away: null });
-    markets.get(mapKey)[side] = odd;
-  };
-  for (const bookmaker of bookmakerRows(oddsRow)) {
-    const book = String(bookmaker.name || "API-Football");
-    for (const bet of (bookmaker.bets || [])) {
-      const name = String(bet.name || "").toLowerCase();
-      const isHalf = /first half|1st half|half time/.test(name);
-      const isBtts = /both teams to score|btts/.test(name);
-      const isHandicap = /asian handicap|handicap/.test(name);
-      const isWinner = /match winner|1x2|full time result|1st half result/.test(name) && !isHandicap;
-      
-      for (const value of (bet.values || [])) {
-        const label = String(value.value ?? value.name ?? "").toLowerCase();
-        const odd = Number(value.odd);
-        if (!Number.isFinite(odd) || odd <= 1.01) continue;
+  if (!oddsRow || !Array.isArray(oddsRow.bookmakers)) return [];
+  
+  // Önce Bet365'i ara, yoksa ilk bulunan büroyu seç
+  let selectedBookmaker = oddsRow.bookmakers.find(b => /bet365/i.test(b.name || ""));
+  if (!selectedBookmaker && oddsRow.bookmakers.length > 0) {
+    selectedBookmaker = oddsRow.bookmakers[0];
+  }
+  if (!selectedBookmaker) return [];
 
-        if (isHandicap && label.includes("-0.5")) {
-          if (/home|1/.test(label)) add(book, "AH -0.5", "home", odd);
-          else if (/away|2/.test(label)) add(book, "AH -0.5", "away", odd);
-          continue;
-        }
-        if (isWinner) {
-          const key = isHalf ? "İY 1X2" : "MS 1X2";
-          if (/^home|1$/.test(label)) add(book, key, "home", odd);
-          else if (/^draw|x$/.test(label)) add(book, key, "draw", odd);
-          else if (/^away|2$/.test(label)) add(book, key, "away", odd);
-          continue;
-        }
-        if (isBtts) {
-          if (/yes/.test(label)) add(book, "KG VAR", "yes", odd);
-          else if (/no/.test(label)) add(book, "KG VAR", "no", odd);
-          continue;
-        }
-        const lineMatch = label.match(/over\s*([0-9]+[.,][0-9]+)/) || label.match(/([0-9]+[.,][0-9]+)/);
-        if (lineMatch) {
-          const n = Number(lineMatch[1].replace(',', '.'));
-          const side = label.includes("over") ? "over" : label.includes("under") ? "under" : null;
-          if (side) {
-            let key = isHalf ? `İY ${n} ÜST` : `MS ${n} ÜST`;
-            add(book, key, side, odd);
-          }
+  const markets = new Map();
+  const add = (key, side, odd) => {
+    if (!Number.isFinite(odd) || odd <= 1.01) return;
+    if (!markets.has(key)) markets.set(key, { market: key, over: null, under: null, yes: null, no: null, home: null, draw: null, away: null });
+    markets.get(key)[side] = odd;
+  };
+
+  for (const bet of (selectedBookmaker.bets || [])) {
+    const name = String(bet.name || "").toLowerCase();
+    const isHalf = /first half|1st half|half time/.test(name);
+    const isBtts = /both teams to score|btts/.test(name);
+    const isHandicap = /asian handicap|handicap/.test(name);
+    const isWinner = /match winner|1x2|full time result|1st half result/.test(name) && !isHandicap;
+
+    for (const value of (bet.values || [])) {
+      const label = String(value.value ?? value.name ?? "").toLowerCase();
+      const odd = Number(value.odd);
+      if (!Number.isFinite(odd) || odd <= 1.01) continue;
+
+      if (isHandicap && label.includes("-0.5")) {
+        if (/home|1/.test(label)) add("AH -0.5", "home", odd);
+        else if (/away|2/.test(label)) add("AH -0.5", "away", odd);
+        continue;
+      }
+      if (isWinner) {
+        const key = isHalf ? "İY 1X2" : "MS 1X2";
+        if (/^home|1$/.test(label)) add(key, "home", odd);
+        else if (/^draw|x$/.test(label)) add(key, "draw", odd);
+        else if (/^away|2$/.test(label)) add(key, "away", odd);
+        continue;
+      }
+      if (isBtts) {
+        if (/yes/.test(label)) add("KG VAR", "yes", odd);
+        else if (/no/.test(label)) add("KG VAR", "no", odd);
+        continue;
+      }
+      const lineMatch = label.match(/over\s*([0-9]+[.,][0-9]+)/) || label.match(/([0-9]+[.,][0-9]+)/);
+      if (lineMatch) {
+        const n = Number(lineMatch[1].replace(',', '.'));
+        const side = label.includes("over") ? "over" : label.includes("under") ? "under" : null;
+        if (side) {
+          let key = isHalf ? `İY ${n} ÜST` : `MS ${n} ÜST`;
+          add(key, side, odd);
         }
       }
     }
   }
+
   const candidates = [];
   for (const item of markets.values()) {
     let pct = null;
@@ -224,7 +219,7 @@ function oddsForFixture(oddsRow) {
       pct = 100 * (1 / item.home) / sum;
     }
     const odd = item.over || item.yes || item.home;
-    candidates.push({ market: item.market, odd, probability: pct, bookmaker: item.bookmaker, homeOdd: item.home, drawOdd: item.draw, awayOdd: item.away });
+    candidates.push({ market: item.market, odd, probability: pct, bookmaker: selectedBookmaker.name, homeOdd: item.home, drawOdd: item.draw, awayOdd: item.away });
   }
   return candidates;
 }
@@ -279,11 +274,8 @@ function scorePrediction(match, homeForm, awayForm) {
   };
 }
 
-// Telegram Bildirim Fonksiyonu
 async function sendTelegram(text) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    return { sent: false, reason: "Telegram token veya chat id eksik." };
-  }
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return { sent: false };
   try {
     const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST",
@@ -292,70 +284,33 @@ async function sendTelegram(text) {
     });
     const data = await res.json();
     return { sent: data.ok };
-  } catch (e) {
-    return { sent: false, error: e.message };
-  }
+  } catch { return { sent: false }; }
 }
 
-// Kupon Üretici Endpoint Mantıkları
 async function createCouponByMode(date, mode = "prematch") {
   const isLive = mode === "live";
   const url = isLive ? "/fixtures?live=all" : `/fixtures?date=${encodeURIComponent(date)}&timezone=Europe/Istanbul`;
   const payload = await cachedProviderRequest(`coupon-${mode}-${date}`, url, isLive ? 15000 : 60000);
   const matches = (payload.response || []).map(normalizeProviderMatch).filter(m => isLive ? m.status === "LIVE" : m.status === "NS");
 
-  if (!matches.length) {
-    return { status: "NO_MATCHES", picks: [], message: "Uygun maç bulunamadı." };
-  }
+  if (!matches.length) return { status: "NO_MATCHES", picks: [], message: "Uygun maç bulunamadı." };
 
   const picks = [];
   const limit = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
-
   for (const m of matches.slice(0, limit)) {
-    picks.push({
-      fixtureId: m.id,
-      league: m.league,
-      home: m.home,
-      away: m.away,
-      market: mode === "surprise" ? "MS 1.5 ÜST" : "MS 2.5 ÜST",
-      currentScore: `${m.homeScore}-${m.awayScore}`,
-      minute: m.minute
-    });
+    picks.push({ fixtureId: m.id, league: m.league, home: m.home, away: m.away, market: "MS 2.5 ÜST", currentScore: `${m.homeScore}-${m.awayScore}`, minute: m.minute });
   }
 
-  const coupon = {
-    draftId: `coupon-${Date.now()}`,
-    date: date || new Date().toISOString().slice(0,10),
-    type: mode,
-    status: "READY",
-    picks,
-    message: `${mode.toUpperCase()} kuponu başarıyla oluşturuldu.`
-  };
-
-  // Telegram'a otomatik gönder
-  const msgText = `🎯 WINSCOPE KUPON (${mode.toUpperCase()})\n` + picks.map(p => `${p.home} - ${p.away} | Tercih: ${p.market}`).join('\n');
-  coupon.telegram = await sendTelegram(msgText);
-
+  const coupon = { draftId: `coupon-${Date.now()}`, date: date || new Date().toISOString().slice(0,10), type: mode, status: "READY", picks };
+  await sendTelegram(`🎯 WINSCOPE KUPON (${mode.toUpperCase()})\n` + picks.map(p => `${p.home} - ${p.away}`).join('\n'));
   archives.coupons.unshift(coupon);
   await saveArchiveItem("coupon", coupon);
-
   return coupon;
 }
 
-app.get("/api/coupon/best", async (req, res) => {
-  try { res.json(await createCouponByMode(String(req.query.date || ""), "prematch")); }
-  catch (e) { res.status(502).json({ status: "ERROR", error: e.message }); }
-});
-
-app.get("/api/coupon/surprise", async (req, res) => {
-  try { res.json(await createCouponByMode(String(req.query.date || ""), "surprise")); }
-  catch (e) { res.status(502).json({ status: "ERROR", error: e.message }); }
-});
-
-app.get("/api/coupon/live-best", async (req, res) => {
-  try { res.json(await createCouponByMode(String(req.query.date || ""), "live")); }
-  catch (e) { res.status(502).json({ status: "ERROR", error: e.message }); }
-});
+app.get("/api/coupon/best", async (req, res) => { res.json(await createCouponByMode(String(req.query.date || ""), "prematch")); });
+app.get("/api/coupon/surprise", async (req, res) => { res.json(await createCouponByMode(String(req.query.date || ""), "surprise")); });
+app.get("/api/coupon/live-best", async (req, res) => { res.json(await createCouponByMode(String(req.query.date || ""), "live")); });
 
 app.get("/api/match/:id/analyze", async (req, res) => {
   try {
@@ -363,7 +318,6 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     const row = payload.response?.[0];
     if (!row) return res.status(404).json({ error: "Maç verisi bulunamadı." });
     const match = normalizeProviderMatch(row);
-    const isLive = match.status === "LIVE";
 
     const [prematchOddsPayload, homeForm, awayForm] = await Promise.all([
       cachedProviderRequest(`odds-fixture:${match.id}`, `/odds?fixture=${match.id}`, 90000).catch(() => ({ response: [] })),
@@ -376,8 +330,8 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     const scores = scorePrediction(match, homeForm, awayForm);
 
     const getMarket = (key) => oddsList.find(o => o.market === key);
-    const formatOdds = (item) => item ? `Oran: ${item.odd || '—'} (%${item.probability ? item.probability.toFixed(0) : '—'})` : "Veri Yok";
-    const format1X2 = (item) => item && item.homeOdd ? `1: ${item.homeOdd} | X: ${item.drawOdd} | 2: ${item.awayOdd}` : "Veri Yok";
+    const formatOdds = (item) => item ? `Oran: ${item.odd || '—'} (%${item.probability ? item.probability.toFixed(0) : '—'}) [${item.bookmaker}]` : "Veri Yok";
+    const format1X2 = (item) => item && item.homeOdd ? `1: ${item.homeOdd} | X: ${item.drawOdd} | 2: ${item.awayOdd} [${item.bookmaker}]` : "Veri Yok";
 
     res.json({
       fixtureId: match.id,
@@ -395,8 +349,8 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       ah05: formatOdds(getMarket("AH -0.5")),
       mainPick: getMarket("MS 2.5 ÜST")?.probability > 55 ? "MS 2.5 ÜST" : "KG VAR",
       alternative: getMarket("MS 1.5 ÜST")?.probability > 70 ? "MS 1.5 ÜST" : "İY 0.5 ÜST",
-      livePick: isLive ? (match.homeScore + match.awayScore >= 2 ? "MS 3.5 ÜST" : "MS 2.5 ÜST") : "Maç canlı değil",
-      note: `Analiz tamamlandı. Ev Sahibi Form: ${homeForm.available ? homeForm.avgGoalsFor.toFixed(1) + ' Gol/Maç' : 'Veri Yok'}, Deplasman Form: ${awayForm.available ? awayForm.avgGoalsFor.toFixed(1) + ' Gol/Maç' : 'Veri Yok'}`
+      livePick: match.status === "LIVE" ? "MS 2.5 ÜST" : "Maç canlı değil",
+      note: `Bet365 / Alternatif büro verisi kullanıldı. Form: Ev ${homeForm.avgGoalsFor?.toFixed(1) || 0} - Dep ${awayForm.avgGoalsFor?.toFixed(1) || 0}`
     });
   } catch (e) {
     res.status(502).json({ error: "Analiz üretilemedi.", detail: e.message });
@@ -406,18 +360,8 @@ app.get("/api/match/:id/analyze", async (req, res) => {
 app.get("/api/live", async (_req, res) => {
   try {
     const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 20000);
-    const matches = (payload.response || []).map(normalizeProviderMatch);
-    res.json({ source: "API-Football", results: matches.length, matches, fetchedAt: new Date().toISOString() });
-  } catch (e) { res.status(502).json({ error: "Canlı maçlar alınamadı", detail: e.message, matches: [] }); }
+    res.json({ matches: (payload.response || []).map(normalizeProviderMatch) });
+  } catch { res.json({ matches: [] }); }
 });
 
-app.get("/api/fixtures", async (req, res) => {
-  const date = String(req.query.date || "");
-  try {
-    const payload = await cachedProviderRequest(`fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 60000);
-    const matches = (payload.response || []).map(normalizeProviderMatch);
-    res.json({ source: "API-Football", results: matches.length, matches });
-  } catch (e) { res.status(502).json({ error: "Bülten alınamadı", detail: e.message, matches: [] }); }
-});
-
-app.listen(PORT, () => console.log(`WinScope server running on port ${PORT}`));
+app.get("/api/fixtures
