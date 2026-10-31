@@ -150,7 +150,7 @@ function normalizeProviderMatch(match) {
   };
 }
 
-// 🟢 BET365 ÖNCELİKLİ VE Kapsamlı ORAN AYIKLAYICI
+// BET365 ÖNCELİKLİ ORAN AYIKLAYICI
 function oddsForFixture(oddsRow) {
   if (!oddsRow || !Array.isArray(oddsRow.bookmakers)) return [];
   let selectedBookmaker = oddsRow.bookmakers.find(b => /bet365/i.test(b.name || ""));
@@ -237,11 +237,11 @@ async function fetchTeamRecentForm(teamId, fixtureId) {
 
 function factorial(n) { let out = 1; for (let i = 2; i <= n; i++) out *= i; return out; }
 
-// 🟢 SKOR VE TERCİH MOTORU (TUTARLI VE ÇAKIŞMASIZ)
-function scorePrediction(match, homeForm, awayForm, oddsList) {
+// 🟢 SKOR VE TERCİH SENKRONİZASYON MOTORU (ÇAKIŞMAYI ÖNLER)
+function scorePrediction(match, homeForm, awayForm) {
   const hNow = Number(match.homeScore || 0), aNow = Number(match.awayScore || 0);
   const live = match.status === "LIVE";
-  if (match.status === "FT") return { halfTimeScore: `${match.htHomeScore ?? "?"}-${match.htAwayScore ?? "?"}`, fullTimeScore: `${hNow}-${aNow}`, mainPick: "MS 2.5 ÜST", alternative: "MS 1.5 ÜST", livePick: "Maç Bitti" };
+  if (match.status === "FT") return { halfTimeScore: `${match.htHomeScore ?? "?"}-${match.htAwayScore ?? "?"}`, fullTimeScore: `${hNow}-${aNow}`, mainPick: "Maç Bitti", alternative: "Maç Bitti", livePick: "Maç Bitti" };
 
   let lambdaHome = homeForm?.available ? (homeForm.avgGoalsFor + (awayForm?.avgGoalsAgainst || 1)) / 2 : 1.35;
   let lambdaAway = awayForm?.available ? (awayForm.avgGoalsFor + (homeForm?.avgGoalsAgainst || 1)) / 2 : 1.05;
@@ -255,8 +255,8 @@ function scorePrediction(match, homeForm, awayForm, oddsList) {
 
   const pmf = (k, l) => Math.exp(-l) * Math.pow(l, k) / factorial(k);
   let bestProb = -1, bestH = 0, bestA = 0;
-  for (let h = 0; h <= 4; h++) {
-    for (let a = 0; a <= 4; a++) {
+  for (let h = 0; h <= 3; h++) {
+    for (let a = 0; a <= 3; a++) {
       const p = pmf(h, lambdaHome) * pmf(a, lambdaAway);
       if (p > bestProb) { bestProb = p; bestH = h; bestA = a; }
     }
@@ -268,34 +268,31 @@ function scorePrediction(match, homeForm, awayForm, oddsList) {
   const htA = live && match.minute >= 45 ? (match.htAwayScore ?? aNow) : Math.min(ftA, Math.round(ftA * 0.45));
 
   const totalGoalsForecast = ftH + ftA;
-  
-  // Oran listesinden en mantıklı tercihleri filtrele
-  const hasMarket = (mName) => oddsList.some(o => o.market === mName);
-  
-  let mainPick = hasMarket("MS 2.5 ÜST") ? "MS 2.5 ÜST" : "KG VAR";
-  let alternative = hasMarket("MS 1.5 ÜST") ? "MS 1.5 ÜST" : "İY 0.5 ÜST";
-  let livePick = "MS 1.5 ÜST";
+  const isBtts = ftH > 0 && ftA > 0;
+
+  // 🟢 KESİN UYUM KURALI: Tercihler asla skor tahminiyle çelişemez!
+  let mainPick, alternative, livePick;
 
   if (totalGoalsForecast >= 3) {
     mainPick = "MS 2.5 ÜST";
-    alternative = "KG VAR";
-  } else if (totalGoalsForecast >= 2) {
+    alternative = isBtts ? "KG VAR" : "MS 3.5 ÜST";
+  } else if (totalGoalsForecast === 2) {
     mainPick = "MS 1.5 ÜST";
-    alternative = "MS 2.5 ÜST";
+    alternative = isBtts ? "KG VAR" : "MS 2.5 ÜST (Sınır)";
   } else {
     mainPick = "MS 1.5 ÜST";
-    alternative = "İY 0.5 ÜST";
+    alternative = "MS 0.5 ÜST";
   }
 
   if (live) {
     const currentTotal = hNow + aNow;
-    if (currentTotal === 0) {
-      livePick = match.minute > 60 ? "MS 1.5 ÜST" : "İY 0.5 ÜST";
+    if (totalGoalsForecast > currentTotal) {
+      livePick = `MS ${currentTotal + 1}.5 ÜST`;
     } else {
-      livePick = "MS " + (currentTotal + 1) + ".5 ÜST";
+      livePick = currentTotal === 0 ? "İY 0.5 ÜST" : "MS " + currentTotal + ".5 ÜST";
     }
   } else {
-    livePick = "Maç Önü Analiz";
+    livePick = "Maç Önü Oran Analizi";
   }
 
   return {
@@ -316,93 +313,4 @@ async function sendTelegram(text) {
       body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text })
     });
     const data = await res.json();
-    return { sent: data.ok };
-  } catch { return { sent: false }; }
-}
-
-async function createCouponByMode(date, mode = "prematch") {
-  const isLive = mode === "live";
-  const url = isLive ? "/fixtures?live=all" : `/fixtures?date=${encodeURIComponent(date)}&timezone=Europe/Istanbul`;
-  const payload = await cachedProviderRequest(`coupon-${mode}-${date}`, url, isLive ? 15000 : 60000);
-  const matches = (payload.response || []).map(normalizeProviderMatch).filter(m => isLive ? m.status === "LIVE" : m.status === "NS");
-
-  if (!matches.length) return { status: "NO_MATCHES", picks: [], message: "Uygun maç bulunamadı." };
-
-  const picks = [];
-  const limit = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
-  for (const m of matches.slice(0, limit)) {
-    picks.push({ fixtureId: m.id, league: m.league, home: m.home, away: m.away, market: "MS 2.5 ÜST", currentScore: `${m.homeScore}-${m.awayScore}`, minute: m.minute });
-  }
-
-  const coupon = { draftId: `coupon-${Date.now()}`, date: date || new Date().toISOString().slice(0,10), type: mode, status: "READY", picks };
-  await sendTelegram(`🎯 WINSCOPE KUPON (${mode.toUpperCase()})\n` + picks.map(p => `${p.home} - ${p.away}`).join('\n'));
-  archives.coupons.unshift(coupon);
-  await saveArchiveItem("coupon", coupon);
-  return coupon;
-}
-
-app.get("/api/coupon/best", async (req, res) => { res.json(await createCouponByMode(String(req.query.date || ""), "prematch")); });
-app.get("/api/coupon/surprise", async (req, res) => { res.json(await createCouponByMode(String(req.query.date || ""), "surprise")); });
-app.get("/api/coupon/live-best", async (req, res) => { res.json(await createCouponByMode(String(req.query.date || ""), "live")); });
-
-app.get("/api/match/:id/analyze", async (req, res) => {
-  try {
-    const payload = await cachedProviderRequest(`fixture:${req.params.id}`, `/fixtures?id=${encodeURIComponent(req.params.id)}`, 15000);
-    const row = payload.response?.[0];
-    if (!row) return res.status(404).json({ error: "Maç verisi bulunamadı." });
-    const match = normalizeProviderMatch(row);
-
-    const [prematchOddsPayload, homeForm, awayForm] = await Promise.all([
-      cachedProviderRequest(`odds-fixture:${match.id}`, `/odds?fixture=${match.id}`, 90000).catch(() => ({ response: [] })),
-      fetchTeamRecentForm(match.homeId, match.id),
-      fetchTeamRecentForm(match.awayId, match.id)
-    ]);
-
-    const prematchRow = (prematchOddsPayload.response || []).find(x => Number(x.fixture?.id) === match.id) || null;
-    const oddsList = oddsForFixture(prematchRow);
-    const scores = scorePrediction(match, homeForm, awayForm, oddsList);
-
-    const getMarket = (key) => oddsList.find(o => o.market === key);
-    const formatOdds = (item) => item ? `Oran: ${item.odd || '—'} (%${item.probability ? item.probability.toFixed(0) : '—'}) [${item.bookmaker}]` : "Veri Yok";
-    const format1X2 = (item) => item && item.homeOdd ? `1: ${item.homeOdd} | X: ${item.drawOdd} | 2: ${item.awayOdd} [${item.bookmaker}]` : "Veri Yok";
-
-    res.json({
-      fixtureId: match.id,
-      matchStatus: match.status,
-      halfTimeScore: scores.halfTimeScore,
-      fullTimeScore: scores.fullTimeScore,
-      iy1x2: format1X2(getMarket("İY 1X2")),
-      ms1x2: format1X2(getMarket("MS 1X2")),
-      iy05: formatOdds(getMarket("İY 0.5 ÜST")),
-      iy15: formatOdds(getMarket("İY 1.5 ÜST")),
-      btts: formatOdds(getMarket("KG VAR")),
-      ms15: formatOdds(getMarket("MS 1.5 ÜST")),
-      ms25: formatOdds(getMarket("MS 2.5 ÜST")),
-      ms35: formatOdds(getMarket("MS 3.5 ÜST")),
-      ah05: formatOdds(getMarket("AH -0.5")),
-      mainPick: scores.mainPick,
-      alternative: scores.alternative,
-      livePick: scores.livePick,
-      note: `Bet365 / Bürolar taranmıştır. Form Ortalaması: Ev ${homeForm.avgGoalsFor?.toFixed(1) || 0} - Dep ${awayForm.avgGoalsFor?.toFixed(1) || 0}`
-    });
-  } catch (e) {
-    res.status(502).json({ error: "Analiz üretilemedi.", detail: e.message });
-  }
-});
-
-app.get("/api/live", async (_req, res) => {
-  try {
-    const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 20000);
-    res.json({ matches: (payload.response || []).map(normalizeProviderMatch) });
-  } catch { res.json({ matches: [] }); }
-});
-
-app.get("/api/fixtures", async (req, res) => {
-  const date = String(req.query.date || "");
-  try {
-    const payload = await cachedProviderRequest(`fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 60000);
-    res.json({ matches: (payload.response || []).map(normalizeProviderMatch) });
-  } catch { res.json({ matches: [] }); }
-});
-
-app.listen(PORT, () => console.log(`WinScope running on port ${PORT}`));
+    return { sent:
