@@ -150,11 +150,8 @@ function normalizeProviderMatch(match) {
   };
 }
 
-// 🟢 BET365 ÖNCELİKLİ BÜRO ORAN AYIKLAYICI
 function oddsForFixture(oddsRow) {
   if (!oddsRow || !Array.isArray(oddsRow.bookmakers)) return [];
-  
-  // Önce Bet365'i ara, yoksa ilk bulunan büroyu seç
   let selectedBookmaker = oddsRow.bookmakers.find(b => /bet365/i.test(b.name || ""));
   if (!selectedBookmaker && oddsRow.bookmakers.length > 0) {
     selectedBookmaker = oddsRow.bookmakers[0];
@@ -364,4 +361,12 @@ app.get("/api/live", async (_req, res) => {
   } catch { res.json({ matches: [] }); }
 });
 
-app.get("/api/fixtures
+app.get("/api/fixtures", async (req, res) => {
+  const date = String(req.query.date || "");
+  try {
+    const payload = await cachedProviderRequest(`fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 60000);
+    res.json({ matches: (payload.response || []).map(normalizeProviderMatch) });
+  } catch { res.json({ matches: [] }); }
+});
+
+app.listen(PORT, () => console.log(`WinScope running on port ${PORT}`));
