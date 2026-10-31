@@ -50,6 +50,18 @@ button{cursor:pointer}.primary,.active{background:var(--pink);border-color:var(-
     </div>
     <div id="couponResult" class="small" style="margin-top:12px"></div>
   </section>
+  <section class="panel" id="livePredictionPanel">
+    <div class="head"><h3 style="margin:2px 0 10px">📊 Canlı Tercih Sonuç Takibi</h3><button id="refreshLivePredictions">Yenile</button></div>
+    <div class="grid" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px">
+      <div class="group"><div class="gt">Toplam tercih</div><strong id="lpTotal">—</strong></div>
+      <div class="group"><div class="gt">Bekleyen</div><strong id="lpPending">—</strong></div>
+      <div class="group"><div class="gt">✅ Kazandı</div><strong id="lpWon">—</strong></div>
+      <div class="group"><div class="gt">❌ Kaybetti</div><strong id="lpLost">—</strong></div>
+    </div>
+    <div class="statline"><span>Kazanma yüzdesi</span><b id="lpWinRate">Henüz sonuç yok</b></div>
+    <div class="statline"><span>Kaybetme yüzdesi</span><b id="lpLossRate">Henüz sonuç yok</b></div>
+    <div id="lpResults" class="small" style="margin-top:8px">Canlı tercih sonuçları yükleniyor…</div>
+  </section>
   <div id="msg" class="small"></div>
   <section id="matches"><div class="empty">Maçlar yükleniyor…</div></section>
 </main>
@@ -124,12 +136,24 @@ function renderCoupon(d){
  if(!d.picks||!d.picks.length){box.innerHTML='<div class="err">Uygun maç/tercih bulunamadı.</div>';return}
  box.innerHTML=`<div class="head"><span>Kupon: <b>${esc(String(d.type||'maç önü').toUpperCase())}</b></span></div><div style="margin:10px 0">${d.picks.map(p=>`<div style="padding:7px;border-bottom:1px solid var(--line)"><b>${esc(p.home)} VS ${esc(p.away)}</b><br>Tercih: <u>${esc(p.market)}</u></div>`).join('')}</div>`;
 }
+async function loadLivePredictionSummary(){
+ try{
+  const r=await fetch('/api/live-predictions/summary'),j=await r.json();if(!r.ok)throw Error(j.error||'Takip yüklenemedi');
+  $('lpTotal').textContent=j.total??0;$('lpPending').textContent=j.pending??0;$('lpWon').textContent=j.won??0;$('lpLost').textContent=j.lost??0;
+  $('lpWinRate').textContent=j.winRate==null?'Henüz sonuç yok':`${j.winRate}%`;
+  $('lpLossRate').textContent=j.lossRate==null?'Henüz sonuç yok':`${j.lossRate}%`;
+  const list=j.results||[];
+  $('lpResults').innerHTML=list.length?list.slice(0,12).map(p=>`<div class="statteam"><b>${esc(p.home)} VS ${esc(p.away)}</b><br><span>Tercih: ${esc(p.market)} · ${esc(p.scoreAtSignal||'—')} · ${esc(p.minute??'—')}'</span><br><span>Sonuç: ${p.status==='won'?'✅ Kazandı':p.status==='lost'?'❌ Kaybetti':'⏳ Bekliyor'}${p.actualScore?' · '+esc(p.actualScore):''}</span></div>`).join(''):'Henüz otomatik canlı tercih kaydı yok.';
+  if(!j.persistentStorage)$('lpResults').insertAdjacentHTML('beforeend','<div class="err" style="margin-top:6px">Uyarı: DATABASE_URL yok; sunucu yeniden başlarsa takip kayıtları kaybolabilir.</div>');
+ }catch(e){$('lpResults').innerHTML=`<span class="err">${esc(e.message)}</span>`}
+}
+$('refreshLivePredictions').onclick=loadLivePredictionSummary;
 $('refresh').onclick=live;$('bulletin').onclick=bulletin;$('searchMatch').onclick=searchMatch;
 $('matchSearch').addEventListener('keydown',e=>{if(e.key==='Enter')searchMatch()});
 $('clearMatchSearch').onclick=()=>{$('matchSearch').value='';$('matchSearchResult').textContent='Aramak için takım adını yaz.'};
 $('makeCoupon').onclick=async()=>{try{const r=await fetch('/api/coupon/best?date='+encodeURIComponent($('date').value));renderCoupon(await r.json())}catch(e){$('couponResult').textContent=e.message}};
 $('makeSurpriseCoupon').onclick=async()=>{try{const r=await fetch('/api/coupon/surprise?date='+encodeURIComponent($('date').value));renderCoupon(await r.json())}catch(e){$('couponResult').textContent=e.message}};
 $('filter').onchange=()=>renderList(currentList());
-const d=new Date();$('date').value=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;live();
+const d=new Date();$('date').value=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;live();loadLivePredictionSummary();setInterval(loadLivePredictionSummary,60000);
 </script>
 </body></html>
