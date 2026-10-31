@@ -37,7 +37,21 @@ button{cursor:pointer}.primary,.active{background:var(--pink);border-color:var(-
     <button class="primary" id="refresh">↻ Canlı maçlar</button>
     <input id="date" type="date">
     <button id="bulletin">Bülten</button>
+    <select id="filter"><option value="all">Tüm maçlar</option><option value="live">Canlı</option></select>
   </div>
+
+  <!-- KUPON PANELİ -->
+  <section class="panel" id="couponPanel">
+    <h3 style="margin:2px 0 10px">🎯 WINSCOPE KUPONLARI</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button id="makeCoupon" class="primary">⚽ Maç Önü Kuponu (En az 2 maç)</button>
+      <button id="makeSurpriseCoupon">🎲 10 Maçlık Kupon</button>
+      <button id="makeLiveBest" style="background:#42e6a0;color:#04191e;font-weight:900;border:none">⚡ Canlı En Güvenilir Tek Tercih</button>
+    </div>
+    <div id="couponResult" class="small" style="margin-top:12px"></div>
+  </section>
+
+  <div id="msg" class="small"></div>
   <section id="matches"><div class="empty">Maçlar yükleniyor…</div></section>
 </main>
 <script>
@@ -99,8 +113,41 @@ async function analyze(id){
   }catch(e){box.innerHTML=`<div class="small err">${esc(e.message)}</div>`;}
 }
 
+function renderCoupon(d){
+  const box=$('couponResult');
+  if(d.status==='ERROR'||d.error){box.innerHTML=`<div class="err"><b>${esc(d.error||'Kupon oluşturulamadı.')}</b></div>`;return;}
+  if(!d.picks||!d.picks.length){box.innerHTML=`<div class="err"><b>Yeterli maç bulunamadı.</b></div>`;return;}
+  box.innerHTML=`<div class="head"><span>Kupon Türü: <b>${esc(d.type.toUpperCase())}</b></span><span><b>TELEGRAM GÖNDERİLDİ</b></span></div>
+  <div style="margin:10px 0">${d.picks.map(p=>`<div style="padding:6px;border-bottom:1px solid var(--line)"><b>${esc(p.home)} vs ${esc(p.away)}</b> — Tercih: <u>${esc(p.market)}</u></div>`).join('')}</div>`;
+}
+
+async function makeCoupon(){
+  try{
+    let r=await fetch('/api/coupon/best?date='+encodeURIComponent($('date').value));
+    renderCoupon(await r.json());
+  }catch(e){$('couponResult').innerHTML=`<span class="err">${esc(e.message)}</span>`;}
+}
+
+async function makeSurpriseCoupon(){
+  try{
+    let r=await fetch('/api/coupon/surprise?date='+encodeURIComponent($('date').value));
+    renderCoupon(await r.json());
+  }catch(e){$('couponResult').innerHTML=`<span class="err">${esc(e.message)}</span>`;}
+}
+
+async function makeLiveBest(){
+  try{
+    let r=await fetch('/api/coupon/live-best');
+    renderCoupon(await r.json());
+  }catch(e){$('couponResult').innerHTML=`<span class="err">${esc(e.message)}</span>`;}
+}
+
 $('refresh').onclick=live;
 $('bulletin').onclick=bulletin;
+$('makeCoupon').onclick=makeCoupon;
+$('makeSurpriseCoupon').onclick=makeSurpriseCoupon;
+$('makeLiveBest').onclick=makeLiveBest;
+
 let d=new Date();
 $('date').value=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 live();
