@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WinScope | Canlı Gol Analizi</title>
+<title>WinScope | Otomatik Canlı Gol Alarmı</title>
 <style>
 :root{--bg:#04191e;--p:#08272d;--p2:#0c343b;--line:#15505a;--t:#f1fbfc;--m:#9bb9bf;--pink:#ff2f63;--green:#42e6a0}
 *{box-sizing:border-box}body{margin:0;background:linear-gradient(155deg,#031419,#073038 65%,#04191e);color:var(--t);font:14px system-ui,sans-serif}
@@ -27,7 +27,7 @@ button{cursor:pointer}.primary,.active{background:var(--pink);border-color:var(-
 </head>
 <body>
 <header>
-  <div><div class="logo">WINSCOPE <span>PREMATCH</span></div><div class="sub">Canlı maçlarda gol odaklı analiz · Oran değerleri arayüzde gösterilmez</div></div>
+  <div><div class="logo">WINSCOPE <span>LIVE GOAL</span></div><div class="sub">Canlı maçlarda gol odaklı analiz · Oran değerleri arayüzde gösterilmez</div></div>
   <div class="small" id="conn">BAĞLANIYOR</div>
 </header>
 <main>
@@ -52,6 +52,7 @@ button{cursor:pointer}.primary,.active{background:var(--pink);border-color:var(-
     <div id="couponResult" class="small" style="margin-top:12px"></div>
   </section>
   <div id="msg" class="small"></div>
+  <section class="panel" id="goalAlertsPanel"><div class="head"><b>⚡ Otomatik Gol Bildirimleri</b><span id="alertsUpdated">Kontrol ediliyor…</span></div><div id="goalAlerts" class="small" style="margin-top:10px">Canlı maçlar otomatik taranıyor. Gol fırsatı veya skor değişimi oluştuğunda burada görünecek.</div></section>
   <section class="panel hidden" id="trackingPanel"><div class="head"><b>📊 Tahmin Sonuç Takibi</b><button id="hideTracking">Kapat</button></div><div id="trackingResults" class="small">Sonuçlar yükleniyor…</div></section>
   <section id="matches"><div class="empty">Maçlar yükleniyor…</div></section>
 </main>
@@ -77,6 +78,19 @@ function card(m){
 }
 function currentList(){return $('filter').value==='live'?matches.filter(m=>String(m.status||'').toUpperCase()==='LIVE'):(viewMode==='live'?matches:bulletinMatches)}
 function renderList(list){$('matches').innerHTML=list.length?list.map(card).join(''):'<div class="empty">Maç bulunamadı.</div>'}
+function renderGoalAlerts(alerts){
+ const out=$('goalAlerts');
+ if(!Array.isArray(alerts)||!alerts.length){out.textContent='Henüz otomatik gol bildirimi yok. Canlı tarama arka planda sürüyor.';return}
+ out.innerHTML=alerts.slice(0,12).map(a=>{
+  const isGoal=a.type==='goal';
+  const detail=isGoal?`Skor: ${esc(a.previousScore)} → ${esc(a.currentScore)}`:`Tercih: <b>${esc(a.market||'')}</b> · ${esc(a.oddsTiming||'')}`;
+  return `<div style="padding:9px 0;border-bottom:1px solid var(--line)"><div style="display:flex;justify-content:space-between;gap:8px"><b>${isGoal?'⚽ GOL OLDU':'⚡ GOL FIRSATI'}</b><span>${esc(a.minute??'?')}'</span></div><div style="margin-top:4px;font-weight:750">${esc(a.home||'')} ${esc(a.currentScore||'')} ${esc(a.away||'')}</div><div>${esc(a.league||'')} · ${detail}</div></div>`
+ }).join('');
+}
+async function loadGoalAlerts(){
+ try{const r=await fetch('/api/live-goal-alerts');const j=await r.json();if(!r.ok)throw Error('Bildirimler alınamadı');renderGoalAlerts(j.alerts||[]);$('alertsUpdated').textContent='Güncellendi: '+new Intl.DateTimeFormat('tr-TR',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Istanbul'}).format(new Date())}
+ catch(e){$('alertsUpdated').textContent='Bağlantı bekleniyor'}
+}
 async function live(){
   viewMode='live';$('conn').textContent='MAÇLAR YÜKLENİYOR';
   try{const r=await fetch('/api/live');const j=await r.json();if(!r.ok)throw Error(j.error||'Canlı maçlar alınamadı');matches=j.matches||[];$('conn').textContent='SUNUCU BAĞLI';renderList(currentList())}
@@ -159,6 +173,7 @@ $('clearMatchSearch').onclick=()=>{$('matchSearch').value='';$('matchSearchResul
 $('makeCoupon').onclick=async()=>{try{const r=await fetch('/api/coupon/best?date='+encodeURIComponent($('date').value));renderCoupon(await r.json())}catch(e){$('couponResult').textContent=e.message}};
 $('makeSurpriseCoupon').onclick=async()=>{try{const r=await fetch('/api/coupon/surprise?date='+encodeURIComponent($('date').value));renderCoupon(await r.json())}catch(e){$('couponResult').textContent=e.message}};
 $('filter').onchange=()=>renderList(currentList());
-const d=new Date();$('date').value=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;live();
+const d=new Date();$('date').value=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;loadGoalAlerts();setInterval(loadGoalAlerts,30000);
+live();
 </script>
 </body></html>

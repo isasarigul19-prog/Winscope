@@ -103,7 +103,15 @@ let autoPrematchTaskInFlight = false;
 // Not: Bu izleme durumu bellektedir; süreç yeniden başlarsa kupon yeniden gönderilince takip tekrar kurulur.
 const goalTrackedFixtures = new Map();
 const goalScoreCache = new Map();
+const automaticGoalSignalCache = new Map();
+const automaticLiveAlerts = [];
 let goalScanInFlight = false;
+let autoGoalAnalysisInFlight = false;
+let liveScanOffset = 0;
+function rememberLiveAlert(alert) {
+  automaticLiveAlerts.unshift({ ...alert, id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, at: new Date().toISOString() });
+  if (automaticLiveAlerts.length > 40) automaticLiveAlerts.length = 40;
+}
 // API-Football plan limitine takılmamak için istekleri tek kuyruktan geçir.
 // 260 ms aralık yaklaşık 231 istek/dk ile 300/dk sınırının altında kalır.
 let providerQueue = Promise.resolve();
@@ -888,8 +896,7 @@ async function sendCouponAutomatically(coupon, chosen) {
         if (!fixtureId) continue;
         const score = String(p.currentScore || "0-0");
         goalTrackedFixtures.set(fixtureId, { home: p.home, away: p.away, league: p.league, sourceLabel, baselineScore: score });
-        // Kupon üretilirken bilinen skor başlangıç kabul edilir.
-        if (!goalScoreCache.has(fixtureId)) goalScoreCache.set(fixtureId, score);
+        // Skorun başlangıç değeri otomatik canlı taramanın ilk yanıtında alınır; böylece maç önü kuponu geçmiş golleri yanlışlıkla bildirmez.
       }
     }
     return result;
@@ -1185,6 +1192,10 @@ app.get("/api/live", async (_req, res) => {
   } catch (e) { res.status(502).json({ error: "Canlı maçlar alınamadı", detail: e.message, matches: [] }); }
 });
 
+app.get("/api/live-goal-alerts", (_req, res) => {
+  res.json({ alerts: automaticLiveAlerts.slice(0, 25), updatedAt: new Date().toISOString() });
+});
+
 app.get("/api/fixtures", async (req, res) => {
   const date = String(req.query.date || "");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "Tarih YYYY-MM-DD biçiminde olmalı." });
@@ -1376,39 +1387,107 @@ setTimeout(() => { void runAutomaticDailyCoupon(); }, 20000);
 // Otomatik canlı analiz devre dışı: yalnızca maç önü analizleri çalışır.
 setInterval(() => { void runAutomaticDailyCoupon(); }, 2 * 60 * 60 * 1000);
 
-// Her 60 saniyede bir Telegram'a gönderilmiş kupon maçlarının skor değişimini kontrol et.
-// Böylece gol alarmı yalnızca kupon mesajı atmakla kalmaz, maçtaki skor değişimini de bildirir.
+// Her 60 saniyede canlı maç skorları kontrol edilir. İlk görülmede başlangıç skoru kaydedilir;
+// sonraki değişiklikler gerçek gol bildirimi olarak WinScope ve Telegram'a iletilir.
 setInterval(async () => {
-  if (goalScanInFlight || goalTrackedFixtures.size === 0) return;
+  if (goalScanInFlight) return;
   goalScanInFlight = true;
   try {
-    const payload = await cachedProviderRequest("goalAlertLiveList", "/fixtures?live=all", 15000);
+    const payload = await cachedProviderRequest("goalAlertLiveList", "/fixtures?live=all", 12000);
     const liveMatches = (payload.response || []).map(normalizeProviderMatch);
-    const liveById = new Map(liveMatches.map(m => [Number(m.id), m]));
-    for (const [fixtureId, tracked] of goalTrackedFixtures.entries()) {
-      const match = liveById.get(fixtureId);
-      if (!match || match.status !== "LIVE") continue;
+    const liveIds = new Set(liveMatches.map(m => Number(m.id)));
+    for (const match of liveMatches) {
+      const fixtureId = Number(match.id);
+      if (!fixtureId) continue;
       const score = `${match.homeScore}-${match.awayScore}`;
-      const previous = goalScoreCache.get(fixtureId) ?? tracked.baselineScore ?? score;
-      if (score === previous) continue;
-      const message = `⚽ WINSCOPE GOOOOOL!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Skor değişti: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}'\n🎯 Takip nedeni: ${tracked.sourceLabel}`;
-      try {
-        const sent = await sendTelegram(message);
-        if (sent.sent) {
-          goalScoreCache.set(fixtureId, score);
-          tracked.baselineScore = score;
-          console.log(`[GOOOOL Alert OK] ${fixtureId} ${previous} -> ${score}`);
-        }
-      } catch (error) {
-        console.error(`[GOOOOL Alert Error] ${fixtureId}: ${error.message}`);
+      if (!goalScoreCache.has(fixtureId)) {
+        goalScoreCache.set(fixtureId, score);
+        continue;
       }
+      const previous = goalScoreCache.get(fixtureId);
+      if (score === previous) continue;
+      const alert = {
+        type: "goal", fixtureId, home: match.home, away: match.away, league: match.league,
+        minute: match.minute, previousScore: previous, currentScore: score,
+        title: "⚽ GOL OLDU", message: `${match.home} - ${match.away}: ${previous} → ${score}`
+      };
+      rememberLiveAlert(alert);
+      try {
+        await sendTelegram(`⚽ WINSCOPE GOL BİLDİRİMİ\n🏆 ${match.league || "Lig"}\n⚽ ${match.home} - ${match.away}\n📣 Skor: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}'`);
+        console.log(`[GOOOOL Alert OK] ${fixtureId} ${previous} -> ${score}`);
+      } catch (error) { console.error(`[GOOOOL Alert Error] ${fixtureId}: ${error.message}`); }
+      goalScoreCache.set(fixtureId, score);
+      const tracked = goalTrackedFixtures.get(fixtureId);
+      if (tracked) tracked.baselineScore = score;
+    }
+    // Maç bittiyse bellekten skor izlemesini temizle.
+    for (const fixtureId of goalScoreCache.keys()) {
+      if (!liveIds.has(Number(fixtureId))) goalScoreCache.delete(fixtureId);
     }
   } catch (error) {
     console.error(`[GOOOOL Scan Error] ${error.message}`);
-  } finally {
-    goalScanInFlight = false;
-  }
+  } finally { goalScanInFlight = false; }
 }, 60_000);
+
+// Otomatik gol fırsatı taraması: her turda en fazla 6 canlı maçı inceler; böylece API kotası korunur.
+// Sinyal yalnızca gerçek oran + canlı istatistik + son 5 maç formu mevcutsa ve yeterince güçlüyse gönderilir.
+async function runAutomaticLiveGoalAnalysis() {
+  if (autoGoalAnalysisInFlight) return;
+  autoGoalAnalysisInFlight = true;
+  try {
+    const payload = await cachedProviderRequest("autoLiveGoalList", "/fixtures?live=all", 12000);
+    const liveMatches = (payload.response || []).map(normalizeProviderMatch)
+      .filter(m => m.id && m.status === "LIVE" && Number(m.minute) >= 10 && Number(m.minute) <= 85);
+    if (!liveMatches.length) return;
+    const batchSize = Math.min(6, liveMatches.length);
+    const selected = [];
+    for (let i = 0; i < batchSize; i++) selected.push(liveMatches[(liveScanOffset + i) % liveMatches.length]);
+    liveScanOffset = (liveScanOffset + batchSize) % liveMatches.length;
+    for (const fixture of selected) {
+      const id = Number(fixture.id);
+      try {
+        const [preOddsPayload, liveOddsPayload, statsPayload] = await Promise.all([
+          cachedProviderRequest(`odds-fixture:${id}`, `/odds?fixture=${id}`, 90_000).catch(() => ({ response: [] })),
+          cachedProviderRequest(`odds-live-fixture:${id}`, `/odds/live?fixture=${id}`, 12_000).catch(() => ({ response: [] })),
+          cachedProviderRequest(`stats:${id}`, `/fixtures/statistics?fixture=${id}`, 12_000).catch(() => ({ response: [] }))
+        ]);
+        const stats = liveStatsMetrics(statsPayload.response || [], fixture);
+        if (!stats.available) continue;
+        const [homeForm, awayForm] = await Promise.all([
+          fetchTeamRecentForm(fixture.homeId, id), fetchTeamRecentForm(fixture.awayId, id)
+        ]);
+        if (!homeForm.available || !awayForm.available) continue;
+        const preOddsRow = (preOddsPayload.response || []).find(x => Number(x.fixture?.id) === id) || null;
+        const liveOddsRow = (liveOddsPayload.response || []).find(x => Number(x.fixture?.fixture?.id ?? x.fixture?.id ?? x.fixtureId) === id) || null;
+        const chosen = chooseSupportedMarket(liveOddsRow, "live", fixture, { home: homeForm, away: awayForm }, stats, preOddsRow);
+        if (!chosen || chosen.oddsTiming === "scenario-estimate" || !Number.isFinite(Number(chosen.probability))) continue;
+        const probability = Number(chosen.probability);
+        if (probability < 60 || (stats.shotsOnTarget < 2 && stats.totalShots < 8)) continue;
+        const score = `${fixture.homeScore}-${fixture.awayScore}`;
+        const key = `${id}|${score}|${chosen.market}`;
+        if (automaticGoalSignalCache.has(key)) continue;
+        automaticGoalSignalCache.set(key, Date.now());
+        const oddsTiming = chosen.oddsTiming === "live" ? "Canlı oran" : "Maç önü oranı (canlı oran yok)";
+        const alert = {
+          type: "opportunity", fixtureId: id, home: fixture.home, away: fixture.away, league: fixture.league,
+          minute: fixture.minute, currentScore: score, market: chosen.market, oddsTiming,
+          title: "⚡ GOL FIRSATI", message: `${fixture.home} - ${fixture.away}: ${chosen.market}`,
+          stats: { shotsOnTarget: stats.shotsOnTarget, totalShots: stats.totalShots, corners: stats.corners }
+        };
+        rememberLiveAlert(alert);
+        try {
+          await sendTelegram(`⚡ WINSCOPE GOL FIRSATI\n🏆 ${fixture.league || "Lig"}\n⚽ ${fixture.home} - ${fixture.away}\n📊 Skor: ${score} | Dakika: ${fixture.minute}'\n🎯 Tercih: ${chosen.market}\n📈 Dayanak: ${oddsTiming} + canlı istatistik + son 5 maç formu\n📊 Şut: ${stats.totalShots} | İsabetli şut: ${stats.shotsOnTarget} | Korner: ${stats.corners}\nNot: Tahmin kesinlik garantisi değildir.`);
+          console.log(`[AUTO GOAL SIGNAL OK] ${id} ${chosen.market} ${probability.toFixed(1)}%`);
+        } catch (error) { console.error(`[AUTO GOAL SIGNAL Telegram Error] ${id}: ${error.message}`); }
+      } catch (error) { console.warn(`[AUTO GOAL ANALYSIS] fixture=${id}: ${error.message}`); }
+    }
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    for (const [key, at] of automaticGoalSignalCache) if (at < cutoff) automaticGoalSignalCache.delete(key);
+  } catch (error) { console.error(`[AUTO GOAL ANALYSIS ERROR] ${error.message}`); }
+  finally { autoGoalAnalysisInFlight = false; }
+}
+setTimeout(() => { void runAutomaticLiveGoalAnalysis(); }, 25_000);
+setInterval(() => { void runAutomaticLiveGoalAnalysis(); }, 90_000);
 
 app.use("/api", (_req, res) => res.status(404).json({ error: "API uç noktası bulunamadı." }));
 async function settleApprovedPredictions() {
