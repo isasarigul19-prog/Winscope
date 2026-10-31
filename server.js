@@ -510,7 +510,7 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
       lambdaHome *= scale; lambdaAway *= scale;
     }
     if (lambdaHome == null || lambdaAway == null) {
-      return { halfTimeScore: "1-0 (senaryo tahmini)", fullTimeScore: "2-1 (senaryo tahmini)", scoreBasis: "Kullanılabilir gol oranı/form yok; düşük bilgiyle senaryo tahmini", scoreProbability: null };
+      return { halfTimeScore: "Hesaplanamadı", fullTimeScore: "Hesaplanamadı", scoreBasis: "Kullanılabilir gol oranı ve son 5 maç formu bulunmadığı için skor uydurulmadı", scoreProbability: null };
     }
   }
 
@@ -526,13 +526,20 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     // Market outcome probabilities gently re-rank scorelines; odds are not treated as certainty.
     const resultPrefix = "MS 1 ";
     const resultKey = finalH > finalA ? `${resultPrefix}HOME` : finalH < finalA ? `${resultPrefix}AWAY` : `${resultPrefix}DRAW`;
-    if (Number.isFinite(modelMarkets[resultKey])) probability *= Math.pow(Math.max(0.02, modelMarkets[resultKey]) / 0.333, 0.55);
-    if (Number.isFinite(modelMarkets["AH -0.5"])) probability *= Math.pow(Math.max(0.02, finalH > finalA ? modelMarkets["AH -0.5"] : 1 - modelMarkets["AH -0.5"]) / 0.5, 0.22);
-    if (Number.isFinite(modelMarkets["KG VAR"])) probability *= Math.pow(Math.max(0.02, (finalH > 0 && finalA > 0) ? modelMarkets["KG VAR"] : 1 - modelMarkets["KG VAR"]) / 0.5, 0.30);
-    for (const [marketKey, threshold] of [["MS 1.5 ÜST",2],["MS 2.5 ÜST",3],["MS 3.5 ÜST",4],["MS 5.5 ÜST",6]]) {
+    // Maç sonucu ve takım gol pazarları skor dağılımını gerçekten etkiler;
+    // yalnızca toplam gol/KG oranlarına bakmak 1-1 skorunu gereğinden fazla öne çıkarabilir.
+    if (Number.isFinite(modelMarkets[resultKey])) probability *= Math.pow(Math.max(0.02, modelMarkets[resultKey]) / 0.333, 0.85);
+    if (Number.isFinite(modelMarkets["AH -0.5"])) probability *= Math.pow(Math.max(0.02, finalH > finalA ? modelMarkets["AH -0.5"] : 1 - modelMarkets["AH -0.5"]) / 0.5, 0.18);
+    if (Number.isFinite(modelMarkets["KG VAR"])) probability *= Math.pow(Math.max(0.02, (finalH > 0 && finalA > 0) ? modelMarkets["KG VAR"] : 1 - modelMarkets["KG VAR"]) / 0.5, 0.42);
+    for (const [marketKey, threshold, weight] of [
+      ["EV 1.5 ÜST", 2, 0.45], ["DEP 1.5 ÜST", 2, 0.45],
+      ["MS 1.5 ÜST",2,0.30],["MS 2.5 ÜST",3,0.48],["MS 3.5 ÜST",4,0.30],["MS 5.5 ÜST",6,0.22]
+    ]) {
       if (Number.isFinite(modelMarkets[marketKey])) {
-        const hit = totalGoals >= threshold;
-        probability *= Math.pow(Math.max(0.02, hit ? modelMarkets[marketKey] : 1 - modelMarkets[marketKey]) / 0.5, marketKey === "MS 2.5 ÜST" ? 0.48 : 0.30);
+        const hit = marketKey === "EV 1.5 ÜST" ? finalH >= threshold
+          : marketKey === "DEP 1.5 ÜST" ? finalA >= threshold
+          : totalGoals >= threshold;
+        probability *= Math.pow(Math.max(0.02, hit ? modelMarkets[marketKey] : 1 - modelMarkets[marketKey]) / 0.5, weight);
       }
     }
     if (!best || probability > best.probability) best = { finalH, finalA, probability };
@@ -1226,12 +1233,12 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       // Canlı maçta İY SKOR alanı mevcut skoru kopyalamaz; scorePrediction tahminini gösterir.
       halfTimeScore:match.status==="FT"?`${match.htHomeScore??"?"}-${match.htAwayScore??"?"}`:scores.halfTimeScore,
       fullTimeScore:match.status==="FT"?`${match.homeScore}-${match.awayScore}`:scores.fullTimeScore,
-      livePick:isLive?(finalChoice ? `${finalChoice.market}${finalChoice.oddsTiming === "live" ? " (canlı oran)" : finalChoice.oddsTiming === "scenario-estimate" ? " (skor/dakika senaryosu)" : " (maç önü oranı; canlı oran yok)"}` : "MS 1.5 ÜST (skor/dakika senaryosu)"):"Maç canlı değil",
+      livePick:isLive?(finalChoice ? `${finalChoice.market}${finalChoice.oddsTiming === "live" ? " (canlı oran)" : finalChoice.oddsTiming === "scenario-estimate" ? " (skor/dakika senaryosu)" : " (maç önü oranı; canlı oran yok)"}` : "Desteklenen canlı tercih bulunamadı"):"Maç canlı değil",
       livePickBasis:isLive?(finalChoice ? (finalChoice.oddsTiming === "live" ? `Dayanak: ${finalChoice.bookmaker} gerçek canlı oranı + dakika/skor/canlı istatistik.` : finalChoice.oddsTiming === "scenario-estimate" ? "Dayanak: gerçek maç skoru, dakika ve varsa canlı istatistik; oran uydurulmadı." : `Dayanak: ${finalChoice.bookmaker} maç önü oranı + gerçek skor/dakika/canlı istatistik; canlı oran değildir.`) : "Dayanak: mevcut skor ve dakika senaryosu."):"Canlı maç başladığında değerlendirilir.",
       scoreBasis:scores.scoreBasis || "Skor tahmininde kullanılan kaynak bilgisi yok",
-      mainPick:finalChoice?.market || prematchChoice?.market || (isLive ? (total >= 2 ? "MS 2.5 ÜST" : "MS 1.5 ÜST") : "MS 2.5 ÜST"),
-      alternative:alternativeChoice?.market || scenarioAlternative?.market || (total >= 2 ? "MS 3.5 ÜST" : "KG VAR"),
-      surprise: "MS 3.5 ÜST",
+      mainPick:finalChoice?.market || prematchChoice?.market || "Piyasa verisiyle desteklenen tercih bulunamadı",
+      alternative:alternativeChoice?.market || scenarioAlternative?.market || "Desteklenen alternatif bulunamadı",
+      surprise: (activeChoice?.market && ["MS 3.5 ÜST", "KG VAR", "EV 1.5 ÜST", "DEP 1.5 ÜST"].find(m => m !== activeChoice.market && marketConsistentWithScore(m, scores))) || "Veriyle desteklenen sürpriz tercih bulunamadı",
       marketPercentages:analysisPercentages(prematchRow,homeForm,awayForm),
       note:finalChoice?`${finalChoice.bookmaker}; ${finalChoice.oddsTiming === "live" ? "gerçek canlı piyasa oranı" : finalChoice.oddsTiming === "scenario-estimate" ? "skor/dakika senaryosu" : "maç önü piyasa oranı"} değerlendirildi${isLive?`; canlı istatistik: ${stats.available ? `${stats.shotsOnTarget} isabetli şut, ${stats.totalShots} toplam şut, ${stats.corners} korner` : "sağlayıcı istatistiği mevcut değil"}`:""}.`: "Mevcut maç verileriyle senaryo tahmini üretildi.",
       oddsBasis:isLive && liveOddsRow ? "API-Football gerçek canlı oranı kullanıldı; oran değerleri arayüzde gösterilmez" : prematchRow ? (isLive ? "Gerçek canlı oran bulunamadı; yalnızca API-Football maç önü oranı mevcut" : "API-Football maç önü son mevcut oran kaydı; resmî kapanış olduğu garanti edilemez") : "Maç önü oranı bulunamadı; oran verisi kullanılmadı",
