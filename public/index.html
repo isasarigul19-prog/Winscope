@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WinScope | Maç Önü Analiz</title>
+<title>WinScope | Canlı Gol Analizi</title>
 <style>
 :root{--bg:#04191e;--p:#08272d;--p2:#0c343b;--line:#15505a;--t:#f1fbfc;--m:#9bb9bf;--pink:#ff2f63;--green:#42e6a0}
 *{box-sizing:border-box}body{margin:0;background:linear-gradient(155deg,#031419,#073038 65%,#04191e);color:var(--t);font:14px system-ui,sans-serif}
@@ -21,13 +21,13 @@ button{cursor:pointer}.primary,.active{background:var(--pink);border-color:var(-
 .table td:first-child{border-left:1px solid var(--line);border-radius:9px 0 0 9px;color:var(--m)}
 .table td:last-child{border-right:1px solid var(--line);border-radius:0 9px 9px 0;font-weight:800}
 .hidden{display:none!important}.empty{padding:18px;text-align:center;color:var(--m)}.err{color:#ff9baa}
-#matchSearch{flex:1;min-width:180px}.pill{display:inline-block;border:1px solid var(--line);border-radius:99px;padding:4px 8px;color:var(--green);font-size:11px}
+#matchSearch{flex:1;min-width:180px}.meta{margin-top:8px;color:var(--m);font-size:12px}.pill{display:inline-block;border:1px solid var(--line);border-radius:99px;padding:4px 8px;color:var(--green);font-size:11px}
 @media(max-width:500px){.team{font-size:14px}.score{font-size:22px}header{padding:12px}}
 </style>
 </head>
 <body>
 <header>
-  <div><div class="logo">WINSCOPE <span>PREMATCH</span></div><div class="sub">Canlı maçlar listelenir · Analiz yalnızca maç önü oranlarıyla yapılır</div></div>
+  <div><div class="logo">WINSCOPE <span>PREMATCH</span></div><div class="sub">Canlı maçlarda gol odaklı analiz · Oran değerleri arayüzde gösterilmez</div></div>
   <div class="small" id="conn">BAĞLANIYOR</div>
 </header>
 <main>
@@ -59,13 +59,20 @@ button{cursor:pointer}.primary,.active{background:var(--pink);border-color:var(-
 const $=x=>document.getElementById(x);
 let matches=[],bulletinMatches=[],viewMode='live';
 function esc(x){return String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function formatKickoff(value){
+  if(!value) return 'Saat bilgisi yok';
+  const d=new Date(value);
+  if(Number.isNaN(d.getTime())) return 'Saat bilgisi yok';
+  return new Intl.DateTimeFormat('tr-TR',{timeZone:'Europe/Istanbul',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(d)+' (TSİ)';
+}
 function card(m){
   const live=String(m.status||'').toUpperCase()==='LIVE';
   return `<article class="card" id="m${Number(m.id)}">
-    <div class="head"><span>${esc(m.country)} · ${esc(m.league)}</span><span>${live?'<span class="pill">CANLI · SADECE LİSTE</span>':esc(m.status||'MAÇ ÖNÜ')} ${m.minute!=null&&live?esc(m.minute)+"'":''}</span></div>
+    <div class="head"><span>${esc(m.country)} · ${esc(m.league)}</span><span>${live?'<span class="pill">CANLI MAÇ</span>':esc(m.status||'MAÇ ÖNÜ')} ${m.minute!=null&&live?esc(m.minute)+"'":''}</span></div>
     <div class="teams"><div class="team">${esc(m.home)}</div><div class="score">${live?`${esc(m.homeScore)} : ${esc(m.awayScore)}`:'VS'}</div><div class="team">${esc(m.away)}</div></div>
-    <div class="toolbar"><button class="primary" onclick="analyze(${Number(m.id)})">MAÇ ÖNÜ ANALİZİ</button></div>
-    <div id="a${Number(m.id)}"><div class="empty">Maç önü analizi için dokun.</div></div>
+    <div class="meta">🕒 ${esc(formatKickoff(m.fixtureDate))}</div>
+    <div class="toolbar"><button class="primary" onclick="analyze(${Number(m.id)},'${live?'live':'prematch'}')">${live?'⚽ CANLI GOL ANALİZİ':'MAÇ ÖNÜ ANALİZİ'}</button></div>
+    <div id="a${Number(m.id)}"><div class="empty">${live?'Canlı gol analizi için dokun.':'Maç önü analizi için dokun.'}</div></div>
   </article>`;
 }
 function currentList(){return $('filter').value==='live'?matches.filter(m=>String(m.status||'').toUpperCase()==='LIVE'):(viewMode==='live'?matches:bulletinMatches)}
@@ -91,10 +98,23 @@ async function searchMatch(){
   renderList(found);out.textContent=found.length?`${found.length} maç bulundu.`:'Eşleşen maç bulunamadı.';
  }catch(e){out.innerHTML=`<span class="err">${esc(e.message)}</span>`}
 }
-async function analyze(id){
- const box=$('a'+id);box.innerHTML='<div class="empty">Maç önü oranları ve takım formu değerlendiriliyor…</div>';
+async function analyze(id,mode='prematch'){
+ const box=$('a'+id);
+ box.innerHTML=`<div class="empty">${mode==='live'?'Canlı skor, istatistik ve gol piyasaları değerlendiriliyor…':'Maç önü oranları ve takım formu değerlendiriliyor…'}</div>`;
  try{
-  const r=await fetch(`/api/match/${id}/analyze`),j=await r.json();if(!r.ok)throw Error(j.error||'Analiz alınamadı');
+  const endpoint=mode==='live'?`/api/match/${id}/live-goal-analysis`:`/api/match/${id}/analyze`;
+  const r=await fetch(endpoint),j=await r.json();if(!r.ok)throw Error(j.error||'Analiz alınamadı');
+  if(mode==='live'){
+   const st=j.stats;
+   box.innerHTML=`<table class="table">
+    <tr><td>Analiz</td><td>Canlı gol odaklı</td></tr>
+    <tr><td>Mevcut durum</td><td>${esc(j.minute==null?'?':j.minute+"'")} · ${esc(j.currentScore||'—')}</td></tr>
+    <tr><td>Gol tercihi</td><td>${esc(j.mainPick||'Şimdilik uygun tercih yok')}</td></tr>
+    <tr><td>Oran kaynağı</td><td>${esc(j.oddsTiming||'Doğrulanmış sinyal yok')}</td></tr>
+    ${st?`<tr><td>İsabetli şut</td><td>${esc(st.shotsOnTarget)}</td></tr><tr><td>Toplam şut</td><td>${esc(st.totalShots)}</td></tr><tr><td>Korner</td><td>${esc(st.corners)}</td></tr><tr><td>Baskı göstergesi</td><td>${esc(st.pressure)}</td></tr>`:''}
+   </table><div class="small" style="margin-top:8px">${esc(j.note||'')}</div>`;
+   return;
+  }
   window.analysisPayloads=window.analysisPayloads||{};window.analysisPayloads[id]=j;
   box.innerHTML=`<table class="table">
    <tr><td>Analiz türü</td><td>Maç önü oranları (canlı oran yok)</td></tr>
