@@ -595,6 +595,33 @@ function marketConsistentWithScore(market, scoreObj) {
   return true;
 }
 
+function marketAlreadyAchieved(market, fixture) {
+  const m = String(market || "").toLocaleUpperCase("tr-TR");
+  const home = Number(fixture?.homeScore || 0);
+  const away = Number(fixture?.awayScore || 0);
+  const total = home + away;
+  // A live pick must predict a future event, never a market already settled by the current score.
+  if (m === "KG VAR" && home > 0 && away > 0) return true;
+  if (m === "KG YOK" && (home === 0 || away === 0)) return true;
+  if (m.includes("EV 1.5 ÜST") && home >= 2) return true;
+  if (m.includes("DEP 1.5 ÜST") && away >= 2) return true;
+  if (m.startsWith("İY ")) {
+    const htHome = fixture?.htHomeScore == null ? null : Number(fixture.htHomeScore);
+    const htAway = fixture?.htAwayScore == null ? null : Number(fixture.htAwayScore);
+    const minute = Number(fixture?.minute || 0);
+    if (minute >= 45) return true; // First-half markets cannot be a future live pick after halftime.
+    if (htHome != null && htAway != null) {
+      const htTotal = htHome + htAway;
+      const line = Number(m.match(/(\d+(?:[.,]\d+)?)\s*ÜST/)?.[1]?.replace(",", "."));
+      if (Number.isFinite(line) && htTotal > line) return true;
+    }
+    return false;
+  }
+  const over = m.match(/(?:MS )?(\d+(?:[.,]\d+)?)\s*ÜST/);
+  if (over) return total > Number(over[1].replace(",", "."));
+  return false;
+}
+
 function chooseFormFallbackMarket(mode, fixture, forms, excludeMarket = null) {
   // Fallback only when no usable market odds are available. It is explicitly labelled
   // as form-based, never presented as an odds-backed signal.
@@ -612,7 +639,8 @@ function chooseFormFallbackMarket(mode, fixture, forms, excludeMarket = null) {
   else allowed = total <= 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST"] : ["MS 2.5 ÜST", "MS 3.5 ÜST"];
   const thresholds = { "EV 1.5 ÜST": 45, "DEP 1.5 ÜST": 45, "MS 0.5 ÜST": 55, "MS 1.5 ÜST": 50, "MS 2.5 ÜST": 48, "MS 3.5 ÜST": 34, "KG VAR": 48, "İY 0.5 ÜST": 52, "İY 1.5 ÜST": 34 };
   const scoreObj = scorePrediction(fixture, forms.home, forms.away, null, null);
-  const candidates = allowed.filter(m => m !== excludeMarket && marketConsistentWithScore(m, scoreObj))
+  const candidates = allowed.filter(m => m !== excludeMarket && marketConsistentWithScore(m, scoreObj)
+      && !(live && marketAlreadyAchieved(m, fixture)))
     .map(m => ({ market: m, formPct: marketSupport(m, forms.home, forms.away), bookmaker: "Son 5 maç formu (oran bulunamadı)", oddsTiming: "form-fallback", probability: null }))
     .filter(x => x.formPct != null && x.formPct >= (thresholds[x.market] ?? 50))
     .sort((a,b) => b.formPct - a.formPct);
@@ -664,25 +692,18 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   }
 
   const h = forms.home, a = forms.away;
-  // Canlı analizde her market için önce gerçek canlı oranı kullan.
-  // Canlı cevapta yalnızca bazı marketler varsa, eksik marketleri maç önü oranıyla tamamla.
-  // Böylece canlı oranların bir kısmının gelmesi, kullanılabilir maç önü marketlerini
-  // yanlışlıkla tamamen devre dışı bırakmaz. Her seçim kendi oran zamanlamasını taşır.
+  // Canlı maçta önce gerçek /odds/live piyasasını kullan. Yalnızca bu uç nokta boşsa
+  // maç önü oranına düş; seçimin dayanağını oddsTiming ile açıkça işaretle.
   const liveMarketRows = live ? oddsForFixture(oddsRow || null) : [];
   const preMarkets = oddsForFixture(prematchOddsRow || (!live ? oddsRow : null) || null);
-  const predictedScores = scorePrediction(fixture, h, a, live && liveMarketRows.length ? oddsRow : null,
-    prematchOddsRow || (!live ? oddsRow : null) || null);
-  let mergedMarketRows;
-  if (live) {
-    const liveMarketNames = new Set(liveMarketRows.map(x => x.market));
-    mergedMarketRows = [
-      ...liveMarketRows.map(x => ({ ...x, oddsTiming: "live" })),
-      ...preMarkets.filter(x => !liveMarketNames.has(x.market)).map(x => ({ ...x, oddsTiming: "prematch" }))
-    ];
-  } else {
-    mergedMarketRows = preMarkets.map(x => ({ ...x, oddsTiming: "prematch" }));
-  }
-  const choices = mergedMarketRows.filter(x => allowed.includes(x.market) && x.market !== excludeMarket && marketConsistentWithScore(x.market, predictedScores));
+  // Initialize before scorePrediction reads it; otherwise live analysis throws a TDZ error.
+  const useLiveOdds = live && liveMarketRows.length > 0;
+  const predictedScores = scorePrediction(fixture, h, a, useLiveOdds ? oddsRow : null, prematchOddsRow || (!live ? oddsRow : null) || null);
+  const mergedMarketRows = (useLiveOdds ? liveMarketRows : preMarkets)
+    .map(x => ({ ...x, oddsTiming: useLiveOdds ? "live" : "prematch" }));
+  const choices = mergedMarketRows.filter(x => allowed.includes(x.market) && x.market !== excludeMarket
+    && marketConsistentWithScore(x.market, predictedScores)
+    && !(live && marketAlreadyAchieved(x.market, fixture)));
   const statsM = stats || { available: false, pressure: 0, home: {}, away: {} };
   const favorite = (() => {
     const winners = preMarkets.filter(x => x.market === "MS 1");
@@ -805,12 +826,14 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
 
   // Relaxed fallback: prefer a real bookmaker market consistent with score/minute.
   const fallback = choices
+    .filter(choice => !(live && marketAlreadyAchieved(choice.market, fixture)))
     .filter(choice => Number.isFinite(Number(choice.probability)) && Number(choice.probability) >= 35)
     .sort((x, y) => Number(y.probability) - Number(x.probability) || Number(x.rank || 9) - Number(y.rank || 9))[0];
   if (fallback) return { ...fallback, score: Number(fallback.probability), fallbackUsed: true };
 
   // No usable odds: provide an explicitly heuristic score/minute scenario, never fake odds.
-  const fallbackMarket = allowed.find(m => m !== excludeMarket && marketConsistentWithScore(m, predictedScores));
+  const fallbackMarket = allowed.find(m => m !== excludeMarket && marketConsistentWithScore(m, predictedScores)
+    && !(live && marketAlreadyAchieved(m, fixture)));
   if (fallbackMarket && (!live || minute >= 20)) {
     return { market: fallbackMarket, bookmaker: "Skor/dakika senaryosu", oddsTiming: "scenario-estimate",
       probability: null, formPct: null, score: 1, fallbackUsed: true };
@@ -1455,7 +1478,23 @@ app.get("/api/predictions/summary", async (_req, res) => {
 // Canlı tercih takip paneli: yalnızca Telegram'a gerçekten gönderilen canlı seçimleri sayar.
 app.get("/api/live-predictions/summary", async (_req, res) => {
   await archiveDatabaseReady;
-  const rows = livePredictionTracking;
+  let rows = livePredictionTracking;
+  let persistentStorage = Boolean(databasePool);
+  let storageError = null;
+  if (databasePool) {
+    try {
+      const result = await databasePool.query("SELECT * FROM winscope_live_predictions ORDER BY created_at DESC LIMIT 500");
+      rows = result.rows.map(row => ({
+        fixtureId:Number(row.fixture_id), home:row.home_team, away:row.away_team,
+        market:row.market, league:row.league, matchDate:row.match_date,
+        startScore:row.start_score, minute:row.minute, actualScore:row.actual_score,
+        outcome:row.outcome, settled:Boolean(row.settled_at), createdAt:row.created_at
+      }));
+    } catch (error) {
+      storageError = error.message;
+      console.error(`[Live tracking] Kalıcı kayıtlar okunamadı: ${error.message}`);
+    }
+  }
   const settled = rows.filter(x => x.settled && (x.outcome === "won" || x.outcome === "lost"));
   const won = settled.filter(x => x.outcome === "won").length;
   const lost = settled.filter(x => x.outcome === "lost").length;
@@ -1470,8 +1509,11 @@ app.get("/api/live-predictions/summary", async (_req, res) => {
       matchDate:x.matchDate, startScore:x.startScore, minute:x.minute, actualScore:x.actualScore,
       outcome:x.outcome, settled:x.settled, createdAt:x.createdAt
     })),
-    persistentStorage: Boolean(databasePool),
-    note: "Yalnızca Telegram'a gerçekten gönderilmiş canlı tercihler sayılır; maç bitince desteklenen pazarlar sonuçlandırılır."
+    persistentStorage,
+    storageError,
+    note: persistentStorage
+      ? "Canlı tercihler PostgreSQL'den okunur ve Render yeniden başlatılsa da korunur."
+      : "DATABASE_URL tanımlı değil; canlı tercih kayıtları Render yeniden başlatıldığında kaybolabilir. Kalıcı takip için PostgreSQL bağlantısı gerekir."
   });
 });
 
@@ -1558,7 +1600,7 @@ setInterval(async () => {
       const currentTotal = currentGoals[0] + currentGoals[1];
       const goalCancelled = currentTotal < previousTotal;
       const message = goalCancelled
-        ? `🚫 WINSCOPE GOL İPTALİ!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Gol iptal edildi: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}'\n🎯 Takip nedeni: ${tracked.sourceLabel}`
+        ? `🚫 WINSCOPE GOL İPTALİ!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Gol iptali / skor geri alındı: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}'\n🎯 Takip nedeni: ${tracked.sourceLabel}`
         : `⚽ WINSCOPE GOOOOOL!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Skor değişti: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}'\n🎯 Takip nedeni: ${tracked.sourceLabel}`;
       try {
         const sent = await sendTelegram(message);
