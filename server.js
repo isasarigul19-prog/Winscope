@@ -109,6 +109,8 @@ async function saveArchiveItem(category, payload) {
 const telegramDeliveryCache = new Map();
 // Otomatik gönderimde aynı gün aynı maçı tekrar seçmemek için takip edilir.
 const autoSentFixtureKeys = new Set();
+// Her otomatik canlı taramada farklı maç grubunu incele; API çağrı sayısını artırma.
+let autoLiveScanOffset = 0;
 // Fixture ID bazında tekrar engeli; PostgreSQL varsa sunucu yeniden başlasa da korunur.
 const telegramSentFixtureIds = new Set();
 let autoLiveTaskInFlight = false;
@@ -1014,16 +1016,27 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   const fixtureKey = isLiveMode ? "liveList" : `fixtures:${date}`;
   const fixturePayload = await cachedProviderRequest(fixtureKey, fixturePath, isLiveMode ? 60_000 : 60_000);
   const allFixtures = (fixturePayload.response || []).map(normalizeProviderMatch)
-    .filter(m => m.id && (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 25 && Number(m.minute || 0) <= 80 : m.status === "NS"));
+    .filter(m => m.id && (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 20 && Number(m.minute || 0) <= 85 : m.status === "NS"));
   // Büyük ligleri önceliklendir; aynı öncelikte erken başlayacak maçları öne al.
   allFixtures.sort((a, b) => automaticLeaguePriority(a) - automaticLeaguePriority(b) ||
     String(a.fixtureDate || "").localeCompare(String(b.fixtureDate || "")));
   // Otomatik tarama ilk birkaç maçla sınırlı kalmasın; API istek kuyruğu hız sınırını korur.
   // Maç önü havuzunu sabit 20/35 maçla kesme: bültenin tamamını oran eşleştirmesine al.
   // Canlı taramada API kotası ve hız için ayrı, sınırlı havuz kullanılır.
-  const fixtures = isLiveMode
-    ? allFixtures.slice(0, options.automatic ? 12 : 15)
-    : allFixtures;
+  let fixtures;
+  if (!isLiveMode) {
+    fixtures = allFixtures;
+  } else if (!options.automatic) {
+    fixtures = allFixtures.slice(0, 15);
+  } else {
+    // Sabit ilk 12 maçın sürekli seçilmesini önle: her taramada sonraki gruba geç.
+    // Grup başına limit aynı kaldığı için API isteği sayısı büyütülmez.
+    const batchSize = Math.min(12, allFixtures.length);
+    const start = allFixtures.length ? (autoLiveScanOffset % allFixtures.length) : 0;
+    fixtures = allFixtures.slice(start, start + batchSize);
+    if (fixtures.length < batchSize) fixtures = fixtures.concat(allFixtures.slice(0, batchSize - fixtures.length));
+    if (allFixtures.length > 0) autoLiveScanOffset = (start + batchSize) % allFixtures.length;
+  }
   if (!fixtures.length) return { draftId:`coupon-${Date.now()}`, date, type:mode, status:"NO_MATCHES", picks:[], message:isLiveMode ? "Şu anda uygun dakika aralığında canlı maç bulunamadı." : "Seçilen tarihte başlamamış maç bulunamadı." };
 
   const dateOdds = new Map();
