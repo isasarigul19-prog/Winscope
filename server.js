@@ -29,7 +29,6 @@ const providerCache = new Map();
 const providerInFlight = new Map();
 const archives = { analyses: [], coupons: [] };
 const predictionTracking = [];
-const livePredictionTracking = [];
 const { Pool } = pg;
 const databasePool = process.env.DATABASE_URL
   ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL) ? false : { rejectUnauthorized: false } })
@@ -57,24 +56,11 @@ if (databasePool) {
         coupon_type TEXT,
         sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`);
-      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_live_predictions (
-        fixture_id BIGINT PRIMARY KEY, home_team TEXT NOT NULL, away_team TEXT NOT NULL,
-        league TEXT, market TEXT NOT NULL, match_date TEXT, sent_minute INTEGER,
-        sent_score TEXT, status TEXT NOT NULL DEFAULT 'pending', actual_score TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), settled_at TIMESTAMPTZ
-      )`);
-      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_goal_tracking (
-        fixture_id BIGINT PRIMARY KEY, home_team TEXT NOT NULL, away_team TEXT NOT NULL,
-        league TEXT, source_label TEXT, baseline_score TEXT NOT NULL DEFAULT '0-0',
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )`);
-      const [analysisRows, couponRows, sentRows, predictionRows, livePredictionRows, goalTrackingRows] = await Promise.all([
+      const [analysisRows, couponRows, sentRows, predictionRows] = await Promise.all([
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'analysis' ORDER BY id DESC LIMIT 100"),
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'coupon' ORDER BY id DESC LIMIT 50"),
         databasePool.query("SELECT fixture_id FROM winscope_telegram_fixture_sent"),
-        databasePool.query("SELECT * FROM winscope_predictions ORDER BY created_at DESC LIMIT 500"),
-        databasePool.query("SELECT * FROM winscope_live_predictions ORDER BY created_at DESC LIMIT 500"),
-        databasePool.query("SELECT * FROM winscope_goal_tracking")
+        databasePool.query("SELECT * FROM winscope_predictions ORDER BY created_at DESC LIMIT 500")
       ]);
       archives.analyses = analysisRows.rows.map(row => row.payload);
       archives.coupons = couponRows.rows.map(row => row.payload);
@@ -85,19 +71,7 @@ if (databasePool) {
         matchDate:row.match_date, settled:Boolean(row.settled_at), createdAt:row.created_at
       })));
       for (const row of sentRows.rows) telegramSentFixtureIds.add(Number(row.fixture_id));
-      livePredictionTracking.push(...livePredictionRows.rows.map(row => ({
-        fixtureId:Number(row.fixture_id), home:row.home_team, away:row.away_team, league:row.league,
-        market:row.market, matchDate:row.match_date, minute:row.sent_minute, score:row.sent_score,
-        status:row.status, actualScore:row.actual_score, createdAt:row.created_at, settledAt:row.settled_at
-      })));
-      for (const row of goalTrackingRows.rows) {
-        const fixtureId = Number(row.fixture_id);
-        const tracked = { home:row.home_team, away:row.away_team, league:row.league,
-          sourceLabel:row.source_label || "Canlı tercih", baselineScore:row.baseline_score || "0-0" };
-        goalTrackedFixtures.set(fixtureId, tracked);
-        goalScoreCache.set(fixtureId, tracked.baselineScore);
-      }
-      console.log(`[Archive] PostgreSQL arşivi yüklendi: analyses=${archives.analyses.length}, coupons=${archives.coupons.length}, livePredictions=${livePredictionTracking.length}, goalTracked=${goalTrackedFixtures.size}`);
+      console.log(`[Archive] PostgreSQL arşivi yüklendi: analyses=${archives.analyses.length}, coupons=${archives.coupons.length}`);
     } catch (error) {
       console.error(`[Archive] PostgreSQL başlatılamadı; servis bellek içi arşivle devam edecek: ${error.message}`);
     }
@@ -326,6 +300,59 @@ function oddsForFixture(oddsRow) {
   return candidates.sort((a,b) => (/bet365/i.test(b.bookmaker)-/bet365/i.test(a.bookmaker)) || b.probability-a.probability || a.rank-b.rank);
 }
 
+function teamGoalAlternative(fixture, forms, stats, liveOddsRow, prematchOddsRow) {
+  if (!stats?.available || !forms?.home?.available || !forms?.away?.available) return null;
+  const preferredOdds = liveOddsRow && (liveOddsRow.response || []).length ? liveOddsRow : prematchOddsRow;
+  let homeAhOdd = null, awayAhOdd = null, oddsSource = null;
+  for (const book of bookmakerRows(preferredOdds)) {
+    for (const bet of (book.bets || [])) {
+      if (!/asian handicap|handicap/.test(String(bet.name || '').toLowerCase())) continue;
+      let h = null, a = null;
+      for (const value of (bet.values || [])) {
+        const label = String(value.value ?? value.name ?? '').toLowerCase().replace(/[−–—]/g, '-').trim();
+        const odd = Number(value.odd);
+        if (!Number.isFinite(odd) || odd <= 1.01) continue;
+        if (/(home|team 1|^1\b)/.test(label) && /-\s*0[.,]5/.test(label)) h = odd;
+        if (/(away|team 2|^2\b)/.test(label) && /\+\s*0[.,]5/.test(label)) a = odd;
+        // Some feeds put the selection name and handicap in separate fields.
+        if (/(home|team 1|^1\b)/.test(label) && /0[.,]5/.test(label) && !/[+-]\s*0[.,]5/.test(label)) h = odd;
+        if (/(away|team 2|^2\b)/.test(label) && /0[.,]5/.test(label) && !/[+-]\s*0[.,]5/.test(label)) a = odd;
+      }
+      if (h && a) { homeAhOdd = h; awayAhOdd = a; oddsSource = book.name || 'API-Football'; break; }
+    }
+    if (homeAhOdd && awayAhOdd) break;
+  }
+  const sidePressure = side => {
+    const x = stats[side] || {};
+    return Number(x.shotsOnTarget || 0) * 2.5 + Number(x.totalShots || 0) * 0.45 + Number(x.corners || 0) * 0.8;
+  };
+  const homePressure = sidePressure('home'), awayPressure = sidePressure('away');
+  const homeFormPct = Number(forms.home.teamGoalsOver05Pct ?? forms.home.teamGoalsOver15Pct ?? 0);
+  const awayFormPct = Number(forms.away.teamGoalsOver05Pct ?? forms.away.teamGoalsOver15Pct ?? 0);
+  let homeOddsPct = null, awayOddsPct = null;
+  if (homeAhOdd && awayAhOdd) {
+    const hi = 1 / homeAhOdd, ai = 1 / awayAhOdd, sum = hi + ai;
+    homeOddsPct = 100 * hi / sum; awayOddsPct = 100 * ai / sum;
+  }
+  // Team statistics are mandatory; odds and last-five scoring form confirm rather than invent the side.
+  let homeScore = homePressure * 0.45 + homeFormPct * 0.25;
+  let awayScore = awayPressure * 0.45 + awayFormPct * 0.25;
+  if (homeOddsPct != null && awayOddsPct != null) {
+    homeScore += homeOddsPct * 0.30;
+    awayScore += awayOddsPct * 0.30;
+  }
+  if (Math.abs(homeScore - awayScore) < 2.0) return {
+    market: null, pressureSide: 'Dengeli', basis: `Takım baskısı yakın; ev ${homePressure.toFixed(1)} / dep ${awayPressure.toFixed(1)}${homeOddsPct == null ? '' : `; AH -0.5 yönü ${homeOddsPct >= awayOddsPct ? 'ev' : 'dep'}`}`
+  };
+  const side = homeScore > awayScore ? 'home' : 'away';
+  const sideName = side === 'home' ? fixture.home : fixture.away;
+  const market = side === 'home' ? 'EV 0.5 ÜST' : 'DEP 0.5 ÜST';
+  const basisParts = [`takım baskısı ev ${homePressure.toFixed(1)} / dep ${awayPressure.toFixed(1)}`, `son 5 maç gol yüzdesi ev %${homeFormPct} / dep %${awayFormPct}`];
+  if (homeOddsPct != null) basisParts.push(`AH -0.5 yönü ${homeOddsPct >= awayOddsPct ? 'ev sahibi' : 'deplasman'} (${oddsSource})`);
+  else basisParts.push('AH -0.5 oranı bulunamadı; istatistik + form yönü');
+  return { market, pressureSide: side === 'home' ? 'Ev sahibi' : 'Deplasman', pressureTeam: sideName, basis: basisParts.join('; ') };
+}
+
 function marketSupport(market, homeForm, awayForm) {
   if (!homeForm?.available || !awayForm?.available) return null;
   const avg = (a,b) => a == null || b == null ? null : (Number(a)+Number(b))/2;
@@ -363,6 +390,7 @@ async function fetchTeamRecentForm(teamId, fixtureId) {
     const htVals = vals.filter(x => x.htTotal != null);
     return {
       available: true, sampleSize: rows.length,
+      teamGoalsOver05Pct: pct(x => x.gf >= 1),
       teamGoalsOver15Pct: pct(x => x.gf >= 2),
       goalsConcededPct: pct(x => x.ga > 0),
       over05Pct: pct(x => x.total >= 1), over15Pct: pct(x => x.total >= 2),
@@ -788,7 +816,12 @@ function couponMessage(coupon) {
   const lines = [heading, `Tarih: ${coupon.date || "Bugün"}`, ""];
   coupon.picks.forEach((p, i) => {
     lines.push(`${i + 1}. ${p.home} - ${p.away}`);
-    lines.push(`Tercih: ${p.market}`);
+    lines.push(`Ana tercih: ${p.market}`);
+    if (coupon.type === "live") {
+      lines.push(`Alternatif tercih: ${p.alternativeMarket || "Yeterli takım sinyali yok"}`);
+      lines.push(`Gol baskısı: ${p.pressureSide || "Belirlenemedi"}${p.pressureTeam ? ` (${p.pressureTeam})` : ""}`);
+      if (p.alternativeBasis) lines.push(`Takım yönü dayanağı: ${p.alternativeBasis}`);
+    }
     lines.push(`Lig: ${p.league}`);
     if (coupon.type === "live" || p.isLive) {
       if (p.minute != null) lines.push(`Dakika: ${p.minute}' | Skor: ${p.currentScore || "—"}`);
@@ -803,7 +836,7 @@ function couponMessage(coupon) {
     lines.push("");
   });
   if (coupon.type === "live") {
-    lines.push("Dayanak: yalnızca maç önü oranı kullanıldı; canlı oran kullanılmadı. Son 5 maç formu + canlı şut/korner baskısı + dakika/skor penceresi ayrıca değerlendirildi.");
+    lines.push("Dayanak: mevcutsa gerçek canlı oran; yoksa açıkça belirtilen maç önü oranı. Takım bazlı şut/korner baskısı + son 5 maç gol yüzdesi + AH -0.5 yönü (varsa) değerlendirildi.");
   }
   return lines.join("\n");
 }
@@ -891,37 +924,6 @@ async function sendCouponAutomatically(coupon, chosen) {
         goalTrackedFixtures.set(fixtureId, { home: p.home, away: p.away, league: p.league, sourceLabel, baselineScore: score });
         // Kupon üretilirken bilinen skor başlangıç kabul edilir.
         if (!goalScoreCache.has(fixtureId)) goalScoreCache.set(fixtureId, score);
-        if (databasePool) {
-          try {
-            await databasePool.query(`INSERT INTO winscope_goal_tracking(fixture_id,home_team,away_team,league,source_label,baseline_score)
-              VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(fixture_id) DO UPDATE SET home_team=EXCLUDED.home_team,
-              away_team=EXCLUDED.away_team,league=EXCLUDED.league,source_label=EXCLUDED.source_label,
-              baseline_score=CASE WHEN winscope_goal_tracking.baseline_score=EXCLUDED.baseline_score THEN winscope_goal_tracking.baseline_score ELSE winscope_goal_tracking.baseline_score END,
-              updated_at=NOW()`, [fixtureId, String(p.home || ""), String(p.away || ""), String(p.league || ""), sourceLabel, score]);
-          } catch (error) { console.warn(`[Goal tracking save] fixture=${fixtureId}: ${error.message}`); }
-        }
-        if (coupon.type === "live") {
-          const tracking = {
-            fixtureId, home:String(p.home || ""), away:String(p.away || ""), league:String(p.league || ""),
-            market:String(p.market || ""), matchDate:String(coupon.date || ""),
-            minute:Number(p.minute || 0), score, status:"pending", actualScore:null, createdAt:new Date().toISOString(), settledAt:null
-          };
-          const idx = livePredictionTracking.findIndex(x => x.fixtureId === fixtureId);
-          if (idx >= 0) livePredictionTracking[idx] = { ...livePredictionTracking[idx], ...tracking };
-          else livePredictionTracking.unshift(tracking);
-          if (databasePool) {
-            try {
-              await databasePool.query(`INSERT INTO winscope_live_predictions
-                (fixture_id,home_team,away_team,league,market,match_date,sent_minute,sent_score,status)
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,'pending')
-                ON CONFLICT(fixture_id) DO UPDATE SET home_team=EXCLUDED.home_team, away_team=EXCLUDED.away_team,
-                league=EXCLUDED.league, market=EXCLUDED.market, match_date=EXCLUDED.match_date,
-                sent_minute=EXCLUDED.sent_minute, sent_score=EXCLUDED.sent_score,
-                status=CASE WHEN winscope_live_predictions.status='pending' THEN 'pending' ELSE winscope_live_predictions.status END`,
-                [fixtureId, tracking.home, tracking.away, tracking.league, tracking.market, tracking.matchDate, tracking.minute, tracking.score]);
-            } catch (error) { console.error(`[Live prediction tracking save] fixture=${fixtureId}: ${error.message}`); }
-          }
-        }
       }
     }
     return result;
@@ -1020,10 +1022,14 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
         oddsBasis = chosen.oddsTiming === "live"
           ? `Gerçek canlı oran · ${chosen.bookmaker}`
           : `Canlı oran bulunamadı; maç önü oranı · ${chosen.bookmaker} (canlı oran değildir)`;
+        const alternative = teamGoalAlternative(fixture, {home:homeForm, away:awayForm}, stats, liveOddsRow, prematchOddsRow);
         candidates.push({
           fixtureId: fixture.id, league: fixture.league, country: fixture.country,
           home: fixture.home, away: fixture.away, fixtureDate: fixture.fixtureDate,
-          market: chosen.market, source: chosen.bookmaker, oddsTiming: chosen.oddsTiming,
+          market: chosen.market, alternativeMarket: alternative?.market || null,
+          pressureSide: alternative?.pressureSide || 'Belirlenemedi', pressureTeam: alternative?.pressureTeam || null,
+          alternativeBasis: alternative?.basis || 'Takım bazlı canlı istatistik veya son 5 maç verisi eksik; alternatif taraf uydurulmadı.',
+          source: chosen.bookmaker, oddsTiming: chosen.oddsTiming,
           internalOdd: chosen.odd, marketProbability: chosen.probability,
           formSupport: chosen.formPct, score: chosen.score,
           minute: fixture.minute, currentScore: `${fixture.homeScore}-${fixture.awayScore}`,
@@ -1304,8 +1310,12 @@ app.get("/api/coupon/surprise", async (req, res) => {
   catch (e) { res.status(502).json({ status: "ERROR", type: "surprise", picks: [], error: "10 maçlık sürpriz kupon oluşturulamadı.", detail: e.message }); }
 });
 async function liveCouponHandler(_req, res) {
-  try { res.json(await createCouponByMode(turkeyDateString(), "live")); }
-  catch (error) { res.status(502).json({ status:"ERROR", type:"live", picks:[], error:"Canlı analiz oluşturulamadı.", detail:error.message }); }
+  res.json({
+    status: "DISABLED",
+    type: "live",
+    picks: [],
+    error: "Canlı analiz şimdilik kapalı. Canlı maçlar yalnızca listelenir; analiz maç önü oranlarıyla yapılır."
+  });
 }
 app.get("/api/coupon/live-best", liveCouponHandler);
 app.get("/api/coupon/live", liveCouponHandler);
@@ -1363,19 +1373,12 @@ app.get("/api/predictions/summary", async (_req, res) => {
     results:settled.slice(0,100), note:"Yalnızca kullanıcı tarafından onaylanıp takip kaydına alınan analizler ölçülür." });
 });
 
-// Canlı otomatik tercihler için gerçek sonuç defteri; oran/sonuç uydurulmaz.
-app.get("/api/live-predictions/summary", async (_req, res) => {
-  await archiveDatabaseReady;
-  const rows = livePredictionTracking;
-  const won = rows.filter(x => x.status === "won").length;
-  const lost = rows.filter(x => x.status === "lost").length;
-  const pending = rows.filter(x => x.status === "pending").length;
-  const settled = won + lost;
-  res.json({ total: rows.length, pending, won, lost,
-    winRate: settled ? Math.round(100 * won / settled) : null,
-    lossRate: settled ? Math.round(100 * lost / settled) : null,
-    results: rows.slice(0, 100), persistentStorage: Boolean(databasePool),
-    note: databasePool ? "Canlı tercih kayıtları PostgreSQL'de saklanır." : "DATABASE_URL yok; kayıtlar yalnızca süreç belleğinde kalır." });
+// Compatibility endpoint expected by the current index.html live-pick tracking panel.
+// This version does not fabricate wins/losses: no dedicated live-pick settlement ledger exists in this file.
+app.get("/api/live-predictions/summary", (_req, res) => {
+  res.json({ total: 0, pending: 0, won: 0, lost: 0, winRate: null, lossRate: null,
+    results: [], persistentStorage: Boolean(databasePool),
+    note: "Canlı tercih sonuç defteri bu sürümde henüz oluşturulmadı; sonuçlar uydurulmaz." });
 });
 
 app.get("/api/archives", async (_req, res) => {
@@ -1434,9 +1437,8 @@ async function runAutomaticDailyCoupon() {
   }
 }
 
-// Render deploy/restart başına API kotası tüketmemek için açılışta kupon taraması yapılmaz.
-// Otomatik günün kuponu, servis kesintisiz 2 saat çalıştıktan sonra değerlendirilir.
-// Canlı tek tercih her 90 saniyede; maç önü kuponu iki saatte bir taranır.
+// Canlı tek tercih otomatik taraması: her 90 saniyede bir. Günün maç önü kuponu 2 saatte bir.
+setTimeout(() => { void runAutomaticLivePick(); }, 20000);
 setInterval(() => { void runAutomaticLivePick(); }, 90 * 1000);
 setInterval(() => { void runAutomaticDailyCoupon(); }, 2 * 60 * 60 * 1000);
 
@@ -1461,10 +1463,6 @@ setInterval(async () => {
         if (sent.sent) {
           goalScoreCache.set(fixtureId, score);
           tracked.baselineScore = score;
-          if (databasePool) {
-            try { await databasePool.query("UPDATE winscope_goal_tracking SET baseline_score=$2, updated_at=NOW() WHERE fixture_id=$1", [fixtureId, score]); }
-            catch (dbError) { console.warn(`[Goal tracking update] fixture=${fixtureId}: ${dbError.message}`); }
-          }
           console.log(`[GOOOOL Alert OK] ${fixtureId} ${previous} -> ${score}`);
         }
       } catch (error) {
@@ -1479,46 +1477,6 @@ setInterval(async () => {
 }, 60_000);
 
 app.use("/api", (_req, res) => res.status(404).json({ error: "API uç noktası bulunamadı." }));
-function evaluateLiveMarket(market, home, away) {
-  const m = String(market || "").toLocaleUpperCase("tr-TR").replace(/\s+/g, " ").trim();
-  const total = home + away;
-  let hit = null;
-  if (m.includes("KG VAR") || m.includes("KARŞILIKLI GOL VAR")) hit = home > 0 && away > 0;
-  else if (m.includes("KG YOK") || m.includes("KARŞILIKLI GOL YOK")) hit = home === 0 || away === 0;
-  else if (m.includes("EV 1.5 ÜST") || m.includes("EV SAHİBİ 1.5 ÜST")) hit = home >= 2;
-  else if (m.includes("EV 0.5 ÜST") || m.includes("EV SAHİBİ 0.5 ÜST")) hit = home >= 1;
-  else if (m.includes("DEP 1.5 ÜST") || m.includes("DEPLASMAN 1.5 ÜST")) hit = away >= 2;
-  else if (m.includes("DEP 0.5 ÜST") || m.includes("DEPLASMAN 0.5 ÜST")) hit = away >= 1;
-  else {
-    const over = m.match(/(?:MS )?(\d+(?:[.,]\d+)?)\s*ÜST/);
-    const under = m.match(/(?:MS )?(\d+(?:[.,]\d+)?)\s*ALT/);
-    if (over) hit = total > Number(over[1].replace(",", "."));
-    else if (under) hit = total < Number(under[1].replace(",", "."));
-  }
-  return hit;
-}
-
-async function settleLivePredictions() {
-  const pending = livePredictionTracking.filter(x => x.status === "pending").slice(0, 15);
-  for (const item of pending) {
-    try {
-      const payload = await cachedProviderRequest(`live-settle:${item.fixtureId}`, `/fixtures?id=${item.fixtureId}`, 5 * 60 * 1000);
-      const row = payload.response?.[0];
-      const status = String(row?.fixture?.status?.short || "").toUpperCase();
-      if (!row || !["FT", "AET", "PEN"].includes(status) || row.goals?.home == null || row.goals?.away == null) continue;
-      const home = Number(row.goals.home), away = Number(row.goals.away);
-      const result = evaluateLiveMarket(item.market, home, away);
-      if (result === null) { console.warn(`[Live prediction settlement] Desteklenmeyen market fixture=${item.fixtureId}: ${item.market}`); continue; }
-      item.actualScore = `${home}-${away}`;
-      item.status = result ? "won" : "lost";
-      item.settledAt = new Date().toISOString();
-      if (databasePool) await databasePool.query(`UPDATE winscope_live_predictions SET status=$2,actual_score=$3,settled_at=NOW() WHERE fixture_id=$1`, [item.fixtureId, item.status, item.actualScore]);
-      console.log(`[LIVE PREDICTION SETTLED] ${item.fixtureId} ${item.market} => ${item.status} (${item.actualScore})`);
-    } catch (error) { console.warn(`[Live prediction settlement] fixture=${item.fixtureId}: ${error.message}`); }
-  }
-}
-setInterval(() => { void settleLivePredictions(); }, 5 * 60 * 1000);
-
 async function settleApprovedPredictions() {
   if (!predictionTracking.some(x => !x.settled)) return;
   for (const item of predictionTracking.filter(x => !x.settled).slice(0, 20)) {
