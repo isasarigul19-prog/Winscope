@@ -843,19 +843,45 @@ function couponMessage(coupon) {
 
 
 async function getOddsForFixture(fixtureId, date) {
-  // Prefer date-level odds for the bulletin, then fall back to fixture-specific odds.
+  // Reuse date-level odds first, then query the exact fixture. Preserve errors so
+  // diagnostics can distinguish an unsupported/empty market from an API failure.
   let row = null;
+  const wantedId = Number(fixtureId);
   if (date) {
     try {
       const byDate = await cachedProviderRequest(`odds-date:${date}`, `/odds?date=${encodeURIComponent(date)}`, 90000);
-      row = (byDate.response || []).find(x => Number(x.fixture?.id) === Number(fixtureId)) || null;
+      row = (byDate.response || []).find(x => Number(x.fixture?.id) === wantedId) || null;
     } catch (e) {
-      console.warn("Date odds lookup failed:", e.message);
+      console.warn(`[Odds] date lookup failed date=${date}: ${e.message}`);
     }
   }
   if (!row) {
-    const byFixture = await cachedProviderRequest(`odds-fixture:${fixtureId}`, `/odds?fixture=${encodeURIComponent(fixtureId)}`, 90000);
-    row = (byFixture.response || []).find(x => Number(x.fixture?.id) === Number(fixtureId)) || null;
+    try {
+      const byFixture = await cachedProviderRequest(`odds-fixture:${wantedId}`, `/odds?fixture=${encodeURIComponent(wantedId)}`, 90000);
+      row = (byFixture.response || []).find(x => Number(x.fixture?.id) === wantedId) || null;
+    } catch (e) {
+      console.warn(`[Odds] fixture lookup failed fixture=${wantedId}: ${e.message}`);
+      throw e;
+    }
+  }
+  if (!row) console.warn(`[Odds] no prematch odds row returned for fixture=${wantedId} date=${date || "unknown"}`);
+  return row;
+}
+
+async function getFixtureForLiveAnalysis(fixtureId) {
+  // /fixtures?id= can briefly disagree with /fixtures?live=all. Trust the live
+  // list when it contains this fixture, avoiding a false NS response for a live match.
+  const payload = await cachedProviderRequest(`fixture:${fixtureId}`, `/fixtures?id=${encodeURIComponent(fixtureId)}`, 15000);
+  let row = (payload.response || []).find(x => Number(x.fixture?.id ?? x.id) === Number(fixtureId)) || null;
+  if (!row) return null;
+  if (normalizeProviderMatch(row).status !== "LIVE") {
+    try {
+      const livePayload = await cachedProviderRequest("liveList", "/fixtures?live=all", 60000);
+      const liveRow = (livePayload.response || []).find(x => Number(x.fixture?.id ?? x.id) === Number(fixtureId));
+      if (liveRow) row = liveRow;
+    } catch (e) {
+      console.warn(`[Live status] live-list verification failed fixture=${fixtureId}: ${e.message}`);
+    }
   }
   return row;
 }
@@ -1146,20 +1172,24 @@ app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
     if (!Number.isInteger(fixtureId) || fixtureId <= 0) {
       return res.status(400).json({ error: "Geçersiz maç kimliği." });
     }
-    const [fixturePayload, statsPayload, liveOddsPayload, prematchOddsPayload] = await Promise.all([
-      cachedProviderRequest(`fixture:${fixtureId}`, `/fixtures?id=${fixtureId}`, 15000),
-      cachedProviderRequest(`stats:${fixtureId}`, `/fixtures/statistics?fixture=${fixtureId}`, 15000).catch(() => ({ response: [] })),
-      cachedProviderRequest(`odds-live-fixture:${fixtureId}`, `/odds/live?fixture=${fixtureId}`, 10000).catch(() => ({ response: [] })),
-      cachedProviderRequest(`odds-fixture:${fixtureId}`, `/odds?fixture=${fixtureId}`, 90000).catch(() => ({ response: [] }))
+    const [row, statsPayload, liveOddsPayload] = await Promise.all([
+      getFixtureForLiveAnalysis(fixtureId),
+      cachedProviderRequest(`stats:${fixtureId}`, `/fixtures/statistics?fixture=${fixtureId}`, 15000).catch(e => {
+        console.warn(`[Live analysis] stats failed fixture=${fixtureId}: ${e.message}`); return { response: [] };
+      }),
+      cachedProviderRequest(`odds-live-fixture:${fixtureId}`, `/odds/live?fixture=${fixtureId}`, 10000).catch(e => {
+        console.warn(`[Live analysis] live odds failed fixture=${fixtureId}: ${e.message}`); return { response: [] };
+      })
     ]);
-    const row = fixturePayload.response?.[0];
+    let prematchOddsRow = null;
+    try { prematchOddsRow = await getOddsForFixture(fixtureId, row?.fixture?.date?.slice(0, 10)); }
+    catch (e) { console.warn(`[Live analysis] prematch odds failed fixture=${fixtureId}: ${e.message}`); }
     if (!row) return res.status(404).json({ error: "Maç verisi bulunamadı." });
     const fixture = normalizeProviderMatch(row);
     if (fixture.status !== "LIVE") {
       return res.status(409).json({ error: "Bu maç API tarafından canlı olarak işaretlenmiyor; canlı gol analizi yapılmadı." });
     }
     const liveOddsRow = (liveOddsPayload.response || []).find(x => Number(x.fixture?.fixture?.id ?? x.fixture?.id ?? x.fixtureId) === fixtureId) || null;
-    const prematchOddsRow = (prematchOddsPayload.response || []).find(x => Number(x.fixture?.id) === fixtureId) || null;
     const stats = liveStatsMetrics(statsPayload.response || [], fixture);
     if (!stats.available) {
       return res.json({ fixtureId, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute: fixture.minute,
@@ -1218,12 +1248,13 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       htAwayScore: null
     };
 
-    const [oddsPayload, homeForm, awayForm] = await Promise.all([
-      cachedProviderRequest(`odds-fixture:${match.id}`, `/odds?fixture=${match.id}`, 90000).catch(() => ({ response: [] })),
+    const [prematchRow, homeForm, awayForm] = await Promise.all([
+      getOddsForFixture(match.id, match.fixtureDate ? String(match.fixtureDate).slice(0, 10) : null).catch(e => {
+        console.warn(`[Prematch analysis] odds failed fixture=${match.id}: ${e.message}`); return null;
+      }),
       fetchTeamRecentForm(match.homeId, match.id),
       fetchTeamRecentForm(match.awayId, match.id)
     ]);
-    const prematchRow = (oddsPayload.response || []).find(x => Number(x.fixture?.id) === Number(match.id)) || null;
     const forms = { home: homeForm, away: awayForm };
     const scores = scorePrediction(prematchFixture, homeForm, awayForm, null, prematchRow);
 
