@@ -109,8 +109,6 @@ async function saveArchiveItem(category, payload) {
 const telegramDeliveryCache = new Map();
 // Otomatik gönderimde aynı gün aynı maçı tekrar seçmemek için takip edilir.
 const autoSentFixtureKeys = new Set();
-// Her otomatik canlı taramada farklı maç grubunu incele; API çağrı sayısını artırma.
-let autoLiveScanOffset = 0;
 // Fixture ID bazında tekrar engeli; PostgreSQL varsa sunucu yeniden başlasa da korunur.
 const telegramSentFixtureIds = new Set();
 let autoLiveTaskInFlight = false;
@@ -826,37 +824,43 @@ async function sendTelegram(text) {
 }
 
 function couponMessage(coupon) {
+  const isLive = coupon.type === "live";
   const heading = coupon.type === "surprise" ? "🎲 WINSCOPE MAÇ ÖNÜ SÜRPRİZ 10 MAÇ" :
-    coupon.type === "live" ? "⚡ WINSCOPE CANLI EN GÜVENİLİR TEK TERCİH" :
+    isLive ? "⚡ WINSCOPE CANLI TEK TERCİH" :
     "🎯 WINSCOPE MAÇ ÖNÜ KUPONU";
-  const lines = [heading, `Tarih: ${coupon.date || "Bugün"}`, ""];
+
+  // Canlı Telegram mesajını sade tut: tarih ve teknik dayanak metinleri gönderilmez.
+  const lines = [heading, ""];
   coupon.picks.forEach((p, i) => {
     lines.push(`${i + 1}. ${p.home} - ${p.away}`);
-    lines.push(`Ana tercih: ${p.market}`);
-    if (coupon.type === "live") {
-      lines.push(`Alternatif tercih: ${p.alternativeMarket || "Yeterli takım sinyali yok"}`);
-      lines.push(`Gol baskısı: ${p.pressureSide || "Belirlenemedi"}${p.pressureTeam ? ` (${p.pressureTeam})` : ""}`);
-      if (p.alternativeBasis) lines.push(`Takım yönü dayanağı: ${p.alternativeBasis}`);
-    }
-    lines.push(`Lig: ${p.league}`);
-    if (coupon.type === "live" || p.isLive) {
-      if (p.minute != null) lines.push(`Dakika: ${p.minute}' | Skor: ${p.currentScore || "—"}`);
-      if (p.source) lines.push(`Kaynak: ${p.source}`);
-      if (p.oddsBasis) lines.push(`Oran dayanağı: ${p.oddsBasis}`);
-      if (Array.isArray(p.statsSummary) && p.statsSummary.length) {
-        lines.push(`Canlı istatistik: ${p.statsSummary.join(" · ")}`);
+    lines.push(`🎯 Ana tercih: ${p.market}`);
+
+    if (isLive) {
+      if (p.alternativeMarket) lines.push(`🔁 Alternatif: ${p.alternativeMarket}`);
+      if (p.pressureSide) {
+        lines.push(`⚡ Gol baskısı: ${p.pressureSide}${p.pressureTeam ? ` (${p.pressureTeam})` : ""}`);
       }
-      if (p.marketProbability != null) lines.push(`Piyasa olasılığı: %${Number(p.marketProbability).toFixed(1)}`);
-      if (p.formSupport != null) lines.push(`Form desteği: %${Number(p.formSupport).toFixed(0)}`);
+    }
+
+    if (p.league) lines.push(`🏆 Lig: ${p.league}`);
+
+    if (isLive || p.isLive) {
+      if (p.minute != null) lines.push(`⏱️ ${p.minute}' | Skor: ${p.currentScore || "—"}`);
+      if (Array.isArray(p.statsSummary) && p.statsSummary.length) {
+        lines.push(`📊 Canlı istatistik: ${p.statsSummary.join(" · ")}`);
+      }
+      if (p.marketProbability != null) {
+        lines.push(`📈 Piyasa olasılığı: %${Number(p.marketProbability).toFixed(1)}`);
+      }
+      if (p.formSupport != null) {
+        lines.push(`📋 Form desteği: %${Number(p.formSupport).toFixed(0)}`);
+      }
     }
     lines.push("");
   });
-  if (coupon.type === "live") {
-    lines.push("Dayanak: mevcutsa gerçek canlı oran; yoksa açıkça belirtilen maç önü oranı. Takım bazlı şut/korner baskısı + son 5 maç gol yüzdesi + AH -0.5 yönü (varsa) değerlendirildi.");
-  }
-  return lines.join("\n");
-}
 
+  return lines.join("\n").trim();
+}
 
 async function getOddsForFixture(fixtureId, date) {
   // Reuse date-level odds first, then query the exact fixture. Preserve errors so
@@ -1016,27 +1020,16 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   const fixtureKey = isLiveMode ? "liveList" : `fixtures:${date}`;
   const fixturePayload = await cachedProviderRequest(fixtureKey, fixturePath, isLiveMode ? 60_000 : 60_000);
   const allFixtures = (fixturePayload.response || []).map(normalizeProviderMatch)
-    .filter(m => m.id && (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 20 && Number(m.minute || 0) <= 85 : m.status === "NS"));
+    .filter(m => m.id && (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 25 && Number(m.minute || 0) <= 80 : m.status === "NS"));
   // Büyük ligleri önceliklendir; aynı öncelikte erken başlayacak maçları öne al.
   allFixtures.sort((a, b) => automaticLeaguePriority(a) - automaticLeaguePriority(b) ||
     String(a.fixtureDate || "").localeCompare(String(b.fixtureDate || "")));
   // Otomatik tarama ilk birkaç maçla sınırlı kalmasın; API istek kuyruğu hız sınırını korur.
   // Maç önü havuzunu sabit 20/35 maçla kesme: bültenin tamamını oran eşleştirmesine al.
   // Canlı taramada API kotası ve hız için ayrı, sınırlı havuz kullanılır.
-  let fixtures;
-  if (!isLiveMode) {
-    fixtures = allFixtures;
-  } else if (!options.automatic) {
-    fixtures = allFixtures.slice(0, 15);
-  } else {
-    // Sabit ilk 12 maçın sürekli seçilmesini önle: her taramada sonraki gruba geç.
-    // Grup başına limit aynı kaldığı için API isteği sayısı büyütülmez.
-    const batchSize = Math.min(12, allFixtures.length);
-    const start = allFixtures.length ? (autoLiveScanOffset % allFixtures.length) : 0;
-    fixtures = allFixtures.slice(start, start + batchSize);
-    if (fixtures.length < batchSize) fixtures = fixtures.concat(allFixtures.slice(0, batchSize - fixtures.length));
-    if (allFixtures.length > 0) autoLiveScanOffset = (start + batchSize) % allFixtures.length;
-  }
+  const fixtures = isLiveMode
+    ? allFixtures.slice(0, options.automatic ? 12 : 15)
+    : allFixtures;
   if (!fixtures.length) return { draftId:`coupon-${Date.now()}`, date, type:mode, status:"NO_MATCHES", picks:[], message:isLiveMode ? "Şu anda uygun dakika aralığında canlı maç bulunamadı." : "Seçilen tarihte başlamamış maç bulunamadı." };
 
   const dateOdds = new Map();
@@ -1639,7 +1632,6 @@ async function settleApprovedPredictions() {
     } catch (error) { console.warn(`[Prediction settlement] fixture=${item.fixtureId}: ${error.message}`); }
   }
 }
-setInterval(() => { void settleApprovedPredictions(); }, 15 * 60 * 1000);
-setInterval(() => { void settleLivePredictions(); }, 15 * 60 * 1000);
+setInterval(() => { void settleApprovedPredictions(); }, 15 * 60 * 1000);\nsetInterval(() => { void settleLivePredictions(); }, 15 * 60 * 1000);
 
 app.listen(PORT, () => console.log(`WinScope server running on port ${PORT}`));
