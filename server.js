@@ -1634,6 +1634,7 @@ async function settleApprovedPredictions() {
     } catch (error) { console.warn(`[Prediction settlement] fixture=${item.fixtureId}: ${error.message}`); }
   }
 }
-setInterval(() => { void settleApprovedPredictions(); }, 15 * 60 * 1000);\nsetInterval(() => { void settleLivePredictions(); }, 15 * 60 * 1000);
+setInterval(() => { void settleApprovedPredictions(); }, 15 * 60 * 1000);
+setInterval(() => { void settleLivePredictions(); }, 15 * 60 * 1000);
 
 app.listen(PORT, () => console.log(`WinScope server running on port ${PORT}`));
