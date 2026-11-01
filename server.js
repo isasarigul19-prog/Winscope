@@ -1542,7 +1542,30 @@ setInterval(async () => {
       const score = `${match.homeScore}-${match.awayScore}`;
       const previous = goalScoreCache.get(fixtureId) ?? tracked.baselineScore ?? score;
       if (score === previous) continue;
-      const message = `⚽ WINSCOPE GOOOOOL!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Skor değişti: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}'\n🎯 Takip nedeni: ${tracked.sourceLabel}`;
+
+      // Skor gerilemesi, iptal edilen gol veya API'nin geçici eski skor dönüşü olabilir.
+      // Mevcut GOOOOL bildirimi korunur; gerileme ayrı ve doğrulanmış bildirimdir.
+      const previousParts = String(previous).match(/^(\\d+)-(\\d+)$/);
+      const currentParts = String(score).match(/^(\\d+)-(\\d+)$/);
+      if (!previousParts || !currentParts) continue;
+
+      const prevHome = Number(previousParts[1]);
+      const prevAway = Number(previousParts[2]);
+      const currHome = Number(currentParts[1]);
+      const currAway = Number(currentParts[2]);
+      const isScoreRegression = currHome < prevHome || currAway < prevAway ||
+        currHome + currAway < prevHome + prevAway;
+
+      if (isScoreRegression) {
+        // Aynı gerileme için tekrar tekrar Telegram mesajı göndermemek üzere cache'i güncelle.
+        goalScoreCache.set(fixtureId, score);
+        const cancelMessage = `🚫 WINSCOPE GOL İPTALİ!\\n🏆 ${match.league || tracked.league || "Lig"}\\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\\n📣 Skor değişti: ${previous} → ${score}\\n⏱️ Dakika: ${match.minute ?? "?"}'\\nℹ️ Not: Skor geriledi; resmî gol iptali ayrıca doğrulanmadı.`;
+        await sendTelegramMessage(cancelMessage);
+        console.log(`[GOOOOL Score Regression Notice] ${fixtureId}: ${previous} -> ${score}`);
+        continue;
+      }
+
+      const message = `⚽ WINSCOPE GOOOOOL!\\n🏆 ${match.league || tracked.league || "Lig"}\\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\\n📣 Skor değişti: ${previous} → ${score}\\n⏱️ Dakika: ${match.minute ?? "?"}'\\n🎯 Takip nedeni: ${tracked.sourceLabel}`;
       try {
         const sent = await sendTelegram(message);
         if (sent.sent) {
@@ -1626,7 +1649,6 @@ async function settleApprovedPredictions() {
     } catch (error) { console.warn(`[Prediction settlement] fixture=${item.fixtureId}: ${error.message}`); }
   }
 }
-setInterval(() => { void settleApprovedPredictions(); }, 15 * 60 * 1000);
-setInterval(() => { void settleLivePredictions(); }, 15 * 60 * 1000);
+setInterval(() => { void settleApprovedPredictions(); }, 15 * 60 * 1000);\nsetInterval(() => { void settleLivePredictions(); }, 15 * 60 * 1000);
 
 app.listen(PORT, () => console.log(`WinScope server running on port ${PORT}`));
