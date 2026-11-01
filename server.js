@@ -1339,8 +1339,8 @@ function turkeyDateString() {
 }
 
 async function runAutomaticLivePick() {
-  // Live analysis/notifications are disabled during pre-match-only testing.
-  return;
+  // Otomatik canlı tek tercih taraması aktiftir; uygun ve doğrulanmış tercih
+  // bulunursa createCouponByMode Telegram'a gönderir ve tekrar gönderimi engeller.
   if (autoLiveTaskInFlight) return;
   autoLiveTaskInFlight = true;
   try {
@@ -1376,9 +1376,11 @@ async function runAutomaticDailyCoupon() {
   }
 }
 
-// Render deploy/restart başına API kotası tüketmemek için açılışta kupon taraması yapılmaz.
-// Otomatik günün kuponu, servis kesintisiz 2 saat çalıştıktan sonra değerlendirilir.
-// Otomatik canlı analiz devre dışı: yalnızca maç önü analizleri çalışır.
+// Otomatik canlı tek tercih: her 90 saniyede bir tarama. Aynı maçın tekrar
+// gönderilmesi createCouponByMode içindeki fixture kayıtlarıyla engellenir.
+setInterval(() => { void runAutomaticLivePick(); }, 90 * 1000);
+
+// Günün maç önü kuponu iki saatte bir değerlendirilir.
 setInterval(() => { void runAutomaticDailyCoupon(); }, 2 * 60 * 60 * 1000);
 
 // Her 60 saniyede bir Telegram'a gönderilmiş kupon maçlarının skor değişimini kontrol et.
