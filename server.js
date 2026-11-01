@@ -664,15 +664,24 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   }
 
   const h = forms.home, a = forms.away;
-  // Canlı maçta önce gerçek /odds/live piyasasını kullan. Yalnızca bu uç nokta boşsa
-  // maç önü oranına düş; seçimin dayanağını oddsTiming ile açıkça işaretle.
+  // Canlı analizde her market için önce gerçek canlı oranı kullan.
+  // Canlı cevapta yalnızca bazı marketler varsa, eksik marketleri maç önü oranıyla tamamla.
+  // Böylece canlı oranların bir kısmının gelmesi, kullanılabilir maç önü marketlerini
+  // yanlışlıkla tamamen devre dışı bırakmaz. Her seçim kendi oran zamanlamasını taşır.
   const liveMarketRows = live ? oddsForFixture(oddsRow || null) : [];
   const preMarkets = oddsForFixture(prematchOddsRow || (!live ? oddsRow : null) || null);
-  // Initialize before scorePrediction reads it; otherwise live analysis throws a TDZ error.
-  const useLiveOdds = live && liveMarketRows.length > 0;
-  const predictedScores = scorePrediction(fixture, h, a, useLiveOdds ? oddsRow : null, prematchOddsRow || (!live ? oddsRow : null) || null);
-  const mergedMarketRows = (useLiveOdds ? liveMarketRows : preMarkets)
-    .map(x => ({ ...x, oddsTiming: useLiveOdds ? "live" : "prematch" }));
+  const predictedScores = scorePrediction(fixture, h, a, live && liveMarketRows.length ? oddsRow : null,
+    prematchOddsRow || (!live ? oddsRow : null) || null);
+  let mergedMarketRows;
+  if (live) {
+    const liveMarketNames = new Set(liveMarketRows.map(x => x.market));
+    mergedMarketRows = [
+      ...liveMarketRows.map(x => ({ ...x, oddsTiming: "live" })),
+      ...preMarkets.filter(x => !liveMarketNames.has(x.market)).map(x => ({ ...x, oddsTiming: "prematch" }))
+    ];
+  } else {
+    mergedMarketRows = preMarkets.map(x => ({ ...x, oddsTiming: "prematch" }));
+  }
   const choices = mergedMarketRows.filter(x => allowed.includes(x.market) && x.market !== excludeMarket && marketConsistentWithScore(x.market, predictedScores));
   const statsM = stats || { available: false, pressure: 0, home: {}, away: {} };
   const favorite = (() => {
@@ -1549,7 +1558,7 @@ setInterval(async () => {
       const currentTotal = currentGoals[0] + currentGoals[1];
       const goalCancelled = currentTotal < previousTotal;
       const message = goalCancelled
-        ? `🚫 WINSCOPE GOL İPTALİ!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Gol iptali / skor geri alındı: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}'\n🎯 Takip nedeni: ${tracked.sourceLabel}`
+        ? `🚫 WINSCOPE GOL İPTALİ!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Gol iptal edildi: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}'\n🎯 Takip nedeni: ${tracked.sourceLabel}`
         : `⚽ WINSCOPE GOOOOOL!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Skor değişti: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}'\n🎯 Takip nedeni: ${tracked.sourceLabel}`;
       try {
         const sent = await sendTelegram(message);
