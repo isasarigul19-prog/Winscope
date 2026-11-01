@@ -824,43 +824,37 @@ async function sendTelegram(text) {
 }
 
 function couponMessage(coupon) {
-  const isLive = coupon.type === "live";
   const heading = coupon.type === "surprise" ? "🎲 WINSCOPE MAÇ ÖNÜ SÜRPRİZ 10 MAÇ" :
-    isLive ? "⚡ WINSCOPE CANLI TEK TERCİH" :
+    coupon.type === "live" ? "⚡ WINSCOPE CANLI EN GÜVENİLİR TEK TERCİH" :
     "🎯 WINSCOPE MAÇ ÖNÜ KUPONU";
-
-  // Canlı Telegram mesajını sade tut: tarih ve teknik dayanak metinleri gönderilmez.
-  const lines = [heading, ""];
+  const lines = [heading, `Tarih: ${coupon.date || "Bugün"}`, ""];
   coupon.picks.forEach((p, i) => {
     lines.push(`${i + 1}. ${p.home} - ${p.away}`);
-    lines.push(`🎯 Ana tercih: ${p.market}`);
-
-    if (isLive) {
-      if (p.alternativeMarket) lines.push(`🔁 Alternatif: ${p.alternativeMarket}`);
-      if (p.pressureSide) {
-        lines.push(`⚡ Gol baskısı: ${p.pressureSide}${p.pressureTeam ? ` (${p.pressureTeam})` : ""}`);
-      }
+    lines.push(`Ana tercih: ${p.market}`);
+    if (coupon.type === "live") {
+      lines.push(`Alternatif tercih: ${p.alternativeMarket || "Yeterli takım sinyali yok"}`);
+      lines.push(`Gol baskısı: ${p.pressureSide || "Belirlenemedi"}${p.pressureTeam ? ` (${p.pressureTeam})` : ""}`);
+      if (p.alternativeBasis) lines.push(`Takım yönü dayanağı: ${p.alternativeBasis}`);
     }
-
-    if (p.league) lines.push(`🏆 Lig: ${p.league}`);
-
-    if (isLive || p.isLive) {
-      if (p.minute != null) lines.push(`⏱️ ${p.minute}' | Skor: ${p.currentScore || "—"}`);
+    lines.push(`Lig: ${p.league}`);
+    if (coupon.type === "live" || p.isLive) {
+      if (p.minute != null) lines.push(`Dakika: ${p.minute}' | Skor: ${p.currentScore || "—"}`);
+      if (p.source) lines.push(`Kaynak: ${p.source}`);
+      if (p.oddsBasis) lines.push(`Oran dayanağı: ${p.oddsBasis}`);
       if (Array.isArray(p.statsSummary) && p.statsSummary.length) {
-        lines.push(`📊 Canlı istatistik: ${p.statsSummary.join(" · ")}`);
+        lines.push(`Canlı istatistik: ${p.statsSummary.join(" · ")}`);
       }
-      if (p.marketProbability != null) {
-        lines.push(`📈 Piyasa olasılığı: %${Number(p.marketProbability).toFixed(1)}`);
-      }
-      if (p.formSupport != null) {
-        lines.push(`📋 Form desteği: %${Number(p.formSupport).toFixed(0)}`);
-      }
+      if (p.marketProbability != null) lines.push(`Piyasa olasılığı: %${Number(p.marketProbability).toFixed(1)}`);
+      if (p.formSupport != null) lines.push(`Form desteği: %${Number(p.formSupport).toFixed(0)}`);
     }
     lines.push("");
   });
-
-  return lines.join("\n").trim();
+  if (coupon.type === "live") {
+    lines.push("Dayanak: mevcutsa gerçek canlı oran; yoksa açıkça belirtilen maç önü oranı. Takım bazlı şut/korner baskısı + son 5 maç gol yüzdesi + AH -0.5 yönü (varsa) değerlendirildi.");
+  }
+  return lines.join("\n");
 }
+
 
 async function getOddsForFixture(fixtureId, date) {
   // Reuse date-level odds first, then query the exact fixture. Preserve errors so
@@ -1548,6 +1542,25 @@ setInterval(async () => {
       const score = `${match.homeScore}-${match.awayScore}`;
       const previous = goalScoreCache.get(fixtureId) ?? tracked.baselineScore ?? score;
       if (score === previous) continue;
+
+      // API geçici olarak eski skoru döndürürse yanlış GOOOOL alarmı gönderme.
+      // Skor gerilemesinde son doğru skor saklanır; yeni skorla üzerine yazılmaz.
+      const previousParts = String(previous).match(/^(\d+)-(\d+)$/);
+      const currentParts = String(score).match(/^(\d+)-(\d+)$/);
+      if (!previousParts || !currentParts) {
+        console.warn(`[GOOOOL Score Invalid] ${fixtureId}: ${previous} -> ${score}`);
+        continue;
+      }
+      const prevHome = Number(previousParts[1]);
+      const prevAway = Number(previousParts[2]);
+      const currHome = Number(currentParts[1]);
+      const currAway = Number(currentParts[2]);
+      if (currHome < prevHome || currAway < prevAway ||
+          (currHome + currAway) <= (prevHome + prevAway)) {
+        console.warn(`[GOOOOL Score Regression Ignored] ${fixtureId}: ${previous} -> ${score}`);
+        continue;
+      }
+
       const message = `⚽ WINSCOPE GOOOOOL!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Skor değişti: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}'\n🎯 Takip nedeni: ${tracked.sourceLabel}`;
       try {
         const sent = await sendTelegram(message);
