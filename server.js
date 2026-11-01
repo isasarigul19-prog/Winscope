@@ -1072,8 +1072,69 @@ app.get("/api/health", (_req, res) => res.json({
   ok: true, apiKeyConfigured: Boolean(API_KEY),
   telegramConfigured: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
   databaseConfigured: Boolean(databasePool),
-  provider: "API-Football", oddsPolicy: "prematch-only; live-analysis-disabled", oddsValuesHidden: true
+  provider: "API-Football", oddsPolicy: "pre-match odds for pre-match analysis; live endpoint checks live odds first", oddsValuesHidden: true
 }));
+
+// Compatibility route used by the current index.html live-goal button.
+// It performs a real live-data check and never invents odds or statistics.
+app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
+  try {
+    const fixtureId = Number(req.params.id);
+    if (!Number.isInteger(fixtureId) || fixtureId <= 0) {
+      return res.status(400).json({ error: "Geçersiz maç kimliği." });
+    }
+    const [fixturePayload, statsPayload, liveOddsPayload, prematchOddsPayload] = await Promise.all([
+      cachedProviderRequest(`fixture:${fixtureId}`, `/fixtures?id=${fixtureId}`, 15000),
+      cachedProviderRequest(`stats:${fixtureId}`, `/fixtures/statistics?fixture=${fixtureId}`, 15000).catch(() => ({ response: [] })),
+      cachedProviderRequest(`odds-live-fixture:${fixtureId}`, `/odds/live?fixture=${fixtureId}`, 10000).catch(() => ({ response: [] })),
+      cachedProviderRequest(`odds-fixture:${fixtureId}`, `/odds?fixture=${fixtureId}`, 90000).catch(() => ({ response: [] }))
+    ]);
+    const row = fixturePayload.response?.[0];
+    if (!row) return res.status(404).json({ error: "Maç verisi bulunamadı." });
+    const fixture = normalizeProviderMatch(row);
+    if (fixture.status !== "LIVE") {
+      return res.status(409).json({ error: "Bu maç API tarafından canlı olarak işaretlenmiyor; canlı gol analizi yapılmadı." });
+    }
+    const liveOddsRow = (liveOddsPayload.response || []).find(x => Number(x.fixture?.fixture?.id ?? x.fixture?.id ?? x.fixtureId) === fixtureId) || null;
+    const prematchOddsRow = (prematchOddsPayload.response || []).find(x => Number(x.fixture?.id) === fixtureId) || null;
+    const stats = liveStatsMetrics(statsPayload.response || [], fixture);
+    if (!stats.available) {
+      return res.json({ fixtureId, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute: fixture.minute,
+        mainPick: null, alternative: null, oddsTiming: liveOddsRow ? "live" : "unavailable", stats: null,
+        oddsBasis: "Canlı istatistikler API tarafından sağlanmadı.",
+        note: "Canlı istatistikler eksik olduğu için tercih zorlanmadı." });
+    }
+    if (!fixture.homeId || !fixture.awayId) {
+      return res.json({ fixtureId, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute: fixture.minute,
+        mainPick: null, alternative: null, oddsTiming: liveOddsRow ? "live" : "unavailable",
+        stats: { totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners, pressure: Number(stats.pressure.toFixed(1)) },
+        oddsBasis: "Takım kimlikleri bulunamadı.", note: "Takım formu doğrulanamadığı için tercih zorlanmadı." });
+    }
+    const [homeForm, awayForm] = await Promise.all([
+      fetchTeamRecentForm(fixture.homeId, fixture.id), fetchTeamRecentForm(fixture.awayId, fixture.id)
+    ]);
+    if (!homeForm.available || !awayForm.available) {
+      return res.json({ fixtureId, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute: fixture.minute,
+        mainPick: null, alternative: null, oddsTiming: liveOddsRow ? "live" : "unavailable",
+        stats: { totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners, pressure: Number(stats.pressure.toFixed(1)) },
+        oddsBasis: "Son 5 maç form verisi eksik.", note: "Form verisi doğrulanamadığı için tercih zorlanmadı." });
+    }
+    const chosen = chooseSupportedMarket(liveOddsRow, "live", fixture, { home: homeForm, away: awayForm }, stats, prematchOddsRow);
+    const alternative = chosen ? chooseSupportedMarket(liveOddsRow, "live", fixture, { home: homeForm, away: awayForm }, stats, prematchOddsRow, chosen.market) : null;
+    const oddsTiming = chosen?.oddsTiming || (liveOddsRow ? "live" : (prematchOddsRow ? "prematch" : "unavailable"));
+    const oddsBasis = chosen
+      ? (chosen.oddsTiming === "live" ? `Gerçek canlı oran · ${chosen.bookmaker}` : `Canlı oran bulunamadı; maç önü oranı yedek olarak kullanıldı · ${chosen.bookmaker}`)
+      : (liveOddsRow ? "Canlı oran var ancak dakika/skor/form/istatistik eşiklerini geçen market yok." : "Kullanılabilir canlı oran bulunamadı; eşikleri geçen doğrulanmış tercih yok.");
+    res.json({ fixtureId, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute: fixture.minute,
+      mainPick: chosen?.market || null, alternative: alternative?.market || null, oddsTiming,
+      stats: { totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners, pressure: Number(stats.pressure.toFixed(1)) },
+      oddsBasis, note: chosen ? "Canlı skor, mevcut istatistikler, son 5 maç formu ve mevcut market verisi değerlendirildi. Ham oranlar gösterilmez." : "Güvenilir tercih eşiği karşılanmadığı için seçim zorlanmadı." });
+  } catch (error) {
+    const message = String(error?.message || error);
+    const limited = /429|rate.?limit|quota|istek sınırı/i.test(message);
+    res.status(limited ? 429 : 502).json({ error: limited ? "API kotası/sınırı nedeniyle canlı analiz şu an alınamıyor." : "Canlı gol analizi alınamadı.", detail: message });
+  }
+});
 
 app.get("/api/match/:id/analyze", async (req, res) => {
   try {
@@ -1247,6 +1308,14 @@ app.get("/api/predictions/summary", async (_req, res) => {
     exactHalfTime:exactHTRows.filter(x=>x.exactHT===true).length,
     exactHalfTimeRate:exactHTRows.length?Math.round(100*exactHTRows.filter(x=>x.exactHT===true).length/exactHTRows.length):null,
     results:settled.slice(0,100), note:"Yalnızca kullanıcı tarafından onaylanıp takip kaydına alınan analizler ölçülür." });
+});
+
+// Compatibility endpoint expected by the current index.html live-pick tracking panel.
+// This version does not fabricate wins/losses: no dedicated live-pick settlement ledger exists in this file.
+app.get("/api/live-predictions/summary", (_req, res) => {
+  res.json({ total: 0, pending: 0, won: 0, lost: 0, winRate: null, lossRate: null,
+    results: [], persistentStorage: Boolean(databasePool),
+    note: "Canlı tercih sonuç defteri bu sürümde henüz oluşturulmadı; sonuçlar uydurulmaz." });
 });
 
 app.get("/api/archives", async (_req, res) => {
