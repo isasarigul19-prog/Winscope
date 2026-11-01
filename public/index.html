@@ -74,8 +74,8 @@ function card(m){
   return `<article class="card" id="m${Number(m.id)}">
     <div class="head"><span>${esc(m.country)} · ${esc(m.league)}</span><span>${live?'<span class="pill">CANLI MAÇ</span>':esc(m.status||'MAÇ ÖNÜ')} ${m.minute!=null&&live?esc(m.minute)+"'":''}</span></div>
     <div class="teams"><div class="team">${esc(m.home)}</div><div class="score">${live?`${esc(m.homeScore)} : ${esc(m.awayScore)}`:'VS'}</div><div class="team">${esc(m.away)}</div></div>
+    <div id="a${Number(m.id)}"><div class="empty">${live?"Canlı gol analizi için aşağıdaki butona dokun.":"Maç önü analizi için aşağıdaki butona dokun."}</div></div>
     <div class="toolbar"><button class="primary" onclick="analyze(${Number(m.id)},${live})">${live?"⚽ CANLI GOL ANALİZİ":"MAÇ ÖNÜ ANALİZİ"}</button></div>
-    <div id="a${Number(m.id)}"><div class="empty">${live?"Canlı gol analizi için dokun.":"Maç önü analizi için dokun."}</div></div>
   </article>`;
 }
 function currentList(){return $('filter').value==='live'?matches.filter(m=>String(m.status||'').toUpperCase()==='LIVE'):(viewMode==='live'?matches:bulletinMatches)}
@@ -110,14 +110,14 @@ async function analyze(id,isLive=false){
   if(isLive){
    const stats=j.stats||{};
    const result=j.mainPick?`<table class="table">
-    <tr><td>Analiz türü</td><td>Canlı gol analizi</td></tr>
+    <tr><td>CANLI TERCİH</td><td><strong>${esc(j.mainPick)}</strong></td></tr>
     <tr><td>SKOR / DAKİKA</td><td>${esc(j.currentScore||'—')} · ${esc(j.minute??'—')}'</td></tr>
-    <tr><td>CANLI TERCİH</td><td>${esc(j.mainPick)}</td></tr>
     <tr><td>ORAN KAYNAĞI</td><td>${esc(j.oddsTiming||'Belirtilmedi')}</td></tr>
     <tr><td>ŞUT / İSABET</td><td>${esc(stats.totalShots??'—')} / ${esc(stats.shotsOnTarget??'—')}</td></tr>
     <tr><td>KORNER / BASKI</td><td>${esc(stats.corners??'—')} / ${esc(stats.pressure??'—')}</td></tr>
+    <tr><td>ANALİZ TÜRÜ</td><td>Canlı gol analizi</td></tr>
    </table><div class="small" style="margin-top:8px">${esc(j.note||'')}</div>`:
-   `<table class="table"><tr><td>Analiz türü</td><td>Canlı gol analizi</td></tr><tr><td>SKOR / DAKİKA</td><td>${esc(j.currentScore||'—')} · ${esc(j.minute??'—')}'</td></tr><tr><td>CANLI TERCİH</td><td>Bu turda güçlü tercih bulunmadı</td></tr><tr><td>ORAN DURUMU</td><td>${esc(j.oddsBasis||j.oddsTiming||'Canlı market doğrulanamadı')}</td></tr></table><div class="small" style="margin-top:8px">${esc(j.note||'Canlı veri yeterli değil; tercih zorlanmadı.')}</div>`;
+   `<table class="table"><tr><td>CANLI TERCİH</td><td>Bu turda güçlü tercih bulunmadı</td></tr><tr><td>SKOR / DAKİKA</td><td>${esc(j.currentScore||'—')} · ${esc(j.minute??'—')}'</td></tr><tr><td>ORAN DURUMU</td><td>${esc(j.oddsBasis||j.oddsTiming||'Canlı market doğrulanamadı')}</td></tr><tr><td>ANALİZ TÜRÜ</td><td>Canlı gol analizi</td></tr></table><div class="small" style="margin-top:8px">${esc(j.note||'Canlı veri yeterli değil; tercih zorlanmadı.')}</div>`;
    box.innerHTML=result;return;
   }
   box.innerHTML=`<table class="table">
