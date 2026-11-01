@@ -1542,25 +1542,6 @@ setInterval(async () => {
       const score = `${match.homeScore}-${match.awayScore}`;
       const previous = goalScoreCache.get(fixtureId) ?? tracked.baselineScore ?? score;
       if (score === previous) continue;
-
-      // API geçici olarak eski skoru döndürürse yanlış GOOOOL alarmı gönderme.
-      // Skor gerilemesinde son doğru skor saklanır; yeni skorla üzerine yazılmaz.
-      const previousParts = String(previous).match(/^(\d+)-(\d+)$/);
-      const currentParts = String(score).match(/^(\d+)-(\d+)$/);
-      if (!previousParts || !currentParts) {
-        console.warn(`[GOOOOL Score Invalid] ${fixtureId}: ${previous} -> ${score}`);
-        continue;
-      }
-      const prevHome = Number(previousParts[1]);
-      const prevAway = Number(previousParts[2]);
-      const currHome = Number(currentParts[1]);
-      const currAway = Number(currentParts[2]);
-      if (currHome < prevHome || currAway < prevAway ||
-          (currHome + currAway) <= (prevHome + prevAway)) {
-        console.warn(`[GOOOOL Score Regression Ignored] ${fixtureId}: ${previous} -> ${score}`);
-        continue;
-      }
-
       const message = `⚽ WINSCOPE GOOOOOL!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Skor değişti: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}'\n🎯 Takip nedeni: ${tracked.sourceLabel}`;
       try {
         const sent = await sendTelegram(message);
@@ -1645,6 +1626,7 @@ async function settleApprovedPredictions() {
     } catch (error) { console.warn(`[Prediction settlement] fixture=${item.fixtureId}: ${error.message}`); }
   }
 }
-setInterval(() => { void settleApprovedPredictions(); }, 15 * 60 * 1000);\nsetInterval(() => { void settleLivePredictions(); }, 15 * 60 * 1000);
+setInterval(() => { void settleApprovedPredictions(); }, 15 * 60 * 1000);
+setInterval(() => { void settleLivePredictions(); }, 15 * 60 * 1000);
 
 app.listen(PORT, () => console.log(`WinScope server running on port ${PORT}`));
