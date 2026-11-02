@@ -1014,7 +1014,7 @@ async function sendCouponAutomatically(coupon, chosen) {
                   `INSERT INTO winscope_live_predictions(fixture_id,home_team,away_team,market,league,match_date,start_score,minute)
                    VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(fixture_id) DO NOTHING`,
                   [trackedLive.fixtureId,trackedLive.home,trackedLive.away,trackedLive.market,trackedLive.league,
-                   /^\d{4}-\d{2}-\d{2}$/.test(trackedLive.matchDate) ? trackedLive.matchDate : null,
+                   /^\\d{4}-\\d{2}-\\d{2}$/.test(trackedLive.matchDate) ? trackedLive.matchDate : null,
                    trackedLive.startScore,trackedLive.minute]
                 );
               } catch (error) { console.error(`[Live tracking] fixture=${fixtureId}: ${error.message}`); }
@@ -1039,49 +1039,35 @@ function automaticLeaguePriority(match) {
   return 4;
 }
 
-async function ensureLivePredictionTracked(pick, matchDate) {
+async function trackLivePrediction(pick, matchDate) {
   const fixtureId = Number(pick?.fixtureId);
-  if (!Number.isInteger(fixtureId) || fixtureId <= 0 || !pick?.market) {
-    console.warn(`[Live tracking] Kayıt atlandı: fixtureId veya market eksik (fixture=${pick?.fixtureId ?? "?"})`);
-    return false;
-  }
-
+  if (!Number.isInteger(fixtureId) || fixtureId <= 0 || !pick?.market) return false;
   await archiveDatabaseReady;
   let tracked = livePredictionTracking.find(x => Number(x.fixtureId) === fixtureId);
   if (!tracked) {
     tracked = {
-      fixtureId,
-      home: String(pick.home || ""),
-      away: String(pick.away || ""),
-      market: String(pick.market),
-      league: String(pick.league || ""),
+      fixtureId, home: String(pick.home || ""), away: String(pick.away || ""),
+      market: String(pick.market), league: String(pick.league || ""),
       matchDate: String(matchDate || turkeyDateString()),
       startScore: String(pick.currentScore || "0-0"),
       minute: Number.isFinite(Number(pick.minute)) ? Number(pick.minute) : null,
-      actualScore: null,
-      outcome: null,
-      settled: false,
-      createdAt: new Date().toISOString()
+      actualScore: null, outcome: null, settled: false, createdAt: new Date().toISOString()
     };
     livePredictionTracking.unshift(tracked);
     if (livePredictionTracking.length > 500) livePredictionTracking.length = 500;
   }
-
   if (!databasePool) {
-    console.warn(`[Live tracking] fixture=${fixtureId} belleğe yazıldı; DATABASE_URL olmadığı için kalıcı değil.`);
+    console.warn(`[Live tracking] fixture=${fixtureId}: DATABASE_URL yok; kayıt yalnızca bellekte.`);
     return true;
   }
-
   try {
     const dateValue = /^\d{4}-\d{2}-\d{2}$/.test(String(matchDate || "")) ? matchDate : null;
     const result = await databasePool.query(
-      `INSERT INTO winscope_live_predictions
-        (fixture_id,home_team,away_team,market,league,match_date,start_score,minute)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8)
-       ON CONFLICT(fixture_id) DO NOTHING`,
+      `INSERT INTO winscope_live_predictions(fixture_id,home_team,away_team,market,league,match_date,start_score,minute)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(fixture_id) DO NOTHING`,
       [fixtureId, tracked.home, tracked.away, tracked.market, tracked.league, dateValue, tracked.startScore, tracked.minute]
     );
-    console.log(`[Live tracking] fixture=${fixtureId} kayıt doğrulandı; inserted=${result.rowCount || 0}`);
+    console.log(`[Live tracking] fixture=${fixtureId}; dbInserted=${result.rowCount || 0}`);
     return true;
   } catch (error) {
     console.error(`[Live tracking] PostgreSQL yazma hatası fixture=${fixtureId}: ${error.message}`);
@@ -1104,7 +1090,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   // Maç önü havuzunu sabit 20/35 maçla kesme: bültenin tamamını oran eşleştirmesine al.
   // Canlı taramada API kotası ve hız için ayrı, sınırlı havuz kullanılır.
   const fixtures = isLiveMode
-    ? allFixtures.slice(0, options.automatic ? 12 : 15)
+    ? allFixtures.slice(0, options.automatic ? 3 : 8)
     : allFixtures;
   if (!fixtures.length) return { draftId:`coupon-${Date.now()}`, date, type:mode, status:"NO_MATCHES", picks:[], message:isLiveMode ? "Şu anda uygun dakika aralığında canlı maç bulunamadı." : "Seçilen tarihte başlamamış maç bulunamadı." };
 
@@ -1150,9 +1136,9 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
       let marketOddsRow = null, prematchOddsRow = null, oddsBasis = "";
       if (isLiveMode) {
         const [prePayload, liveOddsPayload, statsPayload, homeForm, awayForm] = await Promise.all([
-          cachedProviderRequest(`odds-fixture:${fixture.id}`, `/odds?fixture=${fixture.id}`, 90000).catch(()=>({response:[]})),
-          cachedProviderRequest(`odds-live-fixture:${fixture.id}`, `/odds/live?fixture=${fixture.id}`, 10000).catch(()=>({response:[]})),
-          cachedProviderRequest(`stats:${fixture.id}`, `/fixtures/statistics?fixture=${fixture.id}`, 15000),
+          cachedProviderRequest(`odds-fixture:${fixture.id}`, `/odds?fixture=${fixture.id}`, 6 * 60 * 60 * 1000).catch(()=>({response:[]})),
+          cachedProviderRequest(`odds-live-fixture:${fixture.id}`, `/odds/live?fixture=${fixture.id}`, 60_000).catch(()=>({response:[]})),
+          cachedProviderRequest(`stats:${fixture.id}`, `/fixtures/statistics?fixture=${fixture.id}`, 60_000),
           fetchTeamRecentForm(fixture.homeId, fixture.id),
           fetchTeamRecentForm(fixture.awayId, fixture.id)
         ]);
@@ -1238,13 +1224,8 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   archives.coupons.unshift(archiveCoupon);
   archives.coupons=archives.coupons.slice(0,50);
   await saveArchiveItem("coupon", archiveCoupon);
-
-  // Canlı tercih, Telegram tekrar filtresinden bağımsız olarak takip tablosuna yazılır.
-  // Böylece Telegram'a daha önce gönderilmiş maç tekrar engellense bile takip boş kalmaz.
-  if (isLiveMode) {
-    await ensureLivePredictionTracked(publicPicks[0], date);
-  }
-
+  // Sonuç takibi Telegram gönderiminden bağımsızdır; Telegram tekrarı engellense de kayıt açılır.
+  if (isLiveMode && publicPicks[0]) await trackLivePrediction(publicPicks[0], date);
   // Onay butonu olmadan, kupon başarıyla üretildiğinde Telegram'a otomatik gönder.
   coupon.telegram = await sendCouponAutomatically(coupon, chosen);
   return coupon;
@@ -1630,9 +1611,10 @@ async function runAutomaticDailyCoupon() {
   }
 }
 
-// Canlı tek tercih otomatik taraması: her 90 saniyede bir. Günün maç önü kuponu 2 saatte bir.
+// Kota koruması: otomatik canlı tarama 5 dakikada bir ve en fazla 3 aday maç.
+// Canlı istatistik/oran kısa süre önbelleğe alınır; maç önü oranı 6 saat kullanılır.
 setTimeout(() => { void runAutomaticLivePick(); }, 20000);
-setInterval(() => { void runAutomaticLivePick(); }, 90 * 1000);
+setInterval(() => { void runAutomaticLivePick(); }, 5 * 60 * 1000);
 setInterval(() => { void runAutomaticDailyCoupon(); }, 2 * 60 * 60 * 1000);
 
 // Her 60 saniyede bir Telegram'a gönderilmiş kupon maçlarının skor değişimini kontrol et.
