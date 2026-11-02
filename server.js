@@ -57,6 +57,18 @@ if (databasePool) {
         coupon_type TEXT,
         sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`);
+      // Telegram tekrar engeli artık maç + kupon türü + market bazındadır.
+      // Eski fixture-only tablo korunur; geçmiş kayıtlar silinmez veya yanlışlıkla
+      // farklı marketlerin gönderimini engellemez.
+      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_telegram_delivery_sent (
+        fixture_id BIGINT NOT NULL,
+        coupon_type TEXT NOT NULL,
+        market TEXT NOT NULL,
+        match_date DATE,
+        telegram_message_id BIGINT,
+        sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (fixture_id, coupon_type, market)
+      )`);
       await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_live_predictions (
         prediction_id BIGSERIAL PRIMARY KEY,
         fixture_id BIGINT NOT NULL, home_team TEXT NOT NULL, away_team TEXT NOT NULL,
@@ -79,7 +91,7 @@ if (databasePool) {
       const [analysisRows, couponRows, sentRows, predictionRows, livePredictionRows] = await Promise.all([
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'analysis' ORDER BY id DESC LIMIT 100"),
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'coupon' ORDER BY id DESC LIMIT 50"),
-        databasePool.query("SELECT fixture_id FROM winscope_telegram_fixture_sent"),
+        databasePool.query("SELECT fixture_id, coupon_type, market, match_date FROM winscope_telegram_delivery_sent"),
         databasePool.query("SELECT * FROM winscope_predictions ORDER BY created_at DESC LIMIT 500"),
         databasePool.query("SELECT * FROM winscope_live_predictions ORDER BY created_at DESC LIMIT 500")
       ]);
@@ -97,7 +109,13 @@ if (databasePool) {
         minute:row.minute, actualScore:row.actual_score, outcome:row.outcome,
         settled:Boolean(row.settled_at), createdAt:row.created_at
       })));
-      for (const row of sentRows.rows) telegramSentFixtureIds.add(Number(row.fixture_id));
+      for (const row of sentRows.rows) {
+        telegramSentKeys.add(telegramDeliveryKey(row.fixture_id, row.coupon_type, row.market));
+        if (row.coupon_type && row.match_date) {
+          const matchDate = row.match_date instanceof Date ? row.match_date.toISOString().slice(0, 10) : String(row.match_date).slice(0, 10);
+          autoSentFixtureKeys.add(autoLivePickKey(row.coupon_type, matchDate, { fixtureId: row.fixture_id, market: row.market }));
+        }
+      }
       console.log(`[Archive] PostgreSQL arşivi yüklendi: analyses=${archives.analyses.length}, coupons=${archives.coupons.length}`);
     } catch (error) {
       console.error(`[Archive] PostgreSQL başlatılamadı; servis bellek içi arşivle devam edecek: ${error.message}`);
@@ -122,8 +140,15 @@ async function saveArchiveItem(category, payload) {
 const telegramDeliveryCache = new Map();
 // Otomatik gönderimde aynı gün aynı maçı tekrar seçmemek için takip edilir.
 const autoSentFixtureKeys = new Set();
-// Fixture ID bazında tekrar engeli; PostgreSQL varsa sunucu yeniden başlasa da korunur.
-const telegramSentFixtureIds = new Set();
+// Aynı maçın farklı pazarlarını ayrı bildirimler olarak izler.
+// PostgreSQL varsa sunucu yeniden başlasa da tekrar engeli korunur.
+const telegramSentKeys = new Set();
+function telegramDeliveryKey(fixtureId, couponType, market) {
+  return `${Number(fixtureId)}|${String(couponType || "")}|${String(market || "").trim().toLocaleLowerCase("tr-TR")}`;
+}
+function autoLivePickKey(mode, date, pick) {
+  return `${mode}|${date}|${Number(pick.fixtureId)}|${String(pick.market || "").trim().toLocaleLowerCase("tr-TR")}`;
+}
 let autoLiveTaskInFlight = false;
 let autoPrematchTaskInFlight = false;
 // Telegram'a gönderilmiş kuponlardaki maçlar için gol/skor değişimi takibi.
@@ -867,7 +892,7 @@ async function sendTelegram(text) {
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok || !result.ok) throw new Error(result.description || `Telegram HTTP ${response.status}`);
-  return { sent: true };
+  return { sent: true, messageId: result.result?.message_id ?? null };
 }
 
 function couponMessage(coupon) {
@@ -959,26 +984,29 @@ function rankSingleMatchChoices(choices, mode = "prematch") {
 async function sendCouponAutomatically(coupon, chosen) {
   await archiveDatabaseReady;
   const originalPicks = coupon.picks || [];
-  const alreadySent = new Set(telegramSentFixtureIds);
+  const alreadySent = new Set(telegramSentKeys);
   if (databasePool && originalPicks.length) {
     try {
       const ids = originalPicks.map(p => Number(p.fixtureId)).filter(Boolean);
       if (ids.length) {
-        const rows = await databasePool.query("SELECT fixture_id FROM winscope_telegram_fixture_sent WHERE fixture_id = ANY($1::bigint[])", [ids]);
-        for (const row of rows.rows) alreadySent.add(Number(row.fixture_id));
+        const rows = await databasePool.query(
+          "SELECT fixture_id, coupon_type, market FROM winscope_telegram_delivery_sent WHERE fixture_id = ANY($1::bigint[])", [ids]
+        );
+        for (const row of rows.rows) alreadySent.add(telegramDeliveryKey(row.fixture_id, row.coupon_type, row.market));
       }
     } catch (error) { console.warn(`[Telegram] Tekrar kontrolü DB'de yapılamadı: ${error.message}`); }
   }
-  const remainingPicks = originalPicks.filter(p => !Number(p.fixtureId) || !alreadySent.has(Number(p.fixtureId)));
-  if (!remainingPicks.length) return { sent: true, duplicateSuppressed: true, message: "Bu maçlar daha önce Telegram'a gönderildi; tekrar gönderilmedi." };
-  const remainingIds = new Set(remainingPicks.map(p => Number(p.fixtureId)).filter(Boolean));
+  const remainingPicks = originalPicks.filter(p => !Number(p.fixtureId) ||
+    !alreadySent.has(telegramDeliveryKey(p.fixtureId, coupon.type, p.market)));
+  if (!remainingPicks.length) return { sent: false, duplicateSuppressed: true, reason: "Bu maç ve tercih pazarı daha önce gönderilmiş; tekrar gönderilmedi." };
+  const remainingKeys = new Set(remainingPicks.map(p => telegramDeliveryKey(p.fixtureId, coupon.type, p.market)));
   coupon = { ...coupon, picks: remainingPicks };
-  chosen = (chosen || []).filter(p => !Number(p.fixtureId) || remainingIds.has(Number(p.fixtureId)));
+  chosen = (chosen || []).filter(p => !Number(p.fixtureId) || remainingKeys.has(telegramDeliveryKey(p.fixtureId, coupon.type, p.market)));
   const signature = `${coupon.date}|${coupon.type}|${chosen.map(p => `${p.fixtureId}:${p.market}`).sort().join(",")}`;
   const now = Date.now();
   for (const [key, at] of telegramDeliveryCache) if (now - at > 24 * 60 * 60 * 1000) telegramDeliveryCache.delete(key);
   if (telegramDeliveryCache.has(signature)) {
-    return { sent: true, duplicateSuppressed: true, message: "Bu kupon daha önce Telegram'a gönderildi; tekrar gönderilmedi." };
+    return { sent: false, duplicateSuppressed: true, reason: "Bu kupon imzası daha önce gönderilmiş; tekrar gönderilmedi." };
   }
   try {
     const result = await sendTelegram(couponMessage(coupon));
@@ -987,18 +1015,22 @@ async function sendCouponAutomatically(coupon, chosen) {
       if (telegramDeliveryCache.size > 500) telegramDeliveryCache.delete(telegramDeliveryCache.keys().next().value);
       if (coupon.autoGenerated) {
         for (const p of (coupon.picks || [])) {
-          if (p.fixtureId) autoSentFixtureKeys.add(`${coupon.type}|${coupon.date}|${Number(p.fixtureId)}`);
+          if (p.fixtureId) autoSentFixtureKeys.add(autoLivePickKey(coupon.type, coupon.date, p));
         }
       }
       for (const p of (coupon.picks || [])) {
         const fixtureId = Number(p.fixtureId);
         if (!fixtureId) continue;
-        telegramSentFixtureIds.add(fixtureId);
+        const deliveryKey = telegramDeliveryKey(fixtureId, coupon.type, p.market);
+        telegramSentKeys.add(deliveryKey);
         if (databasePool) {
           try {
             await databasePool.query(
-              "INSERT INTO winscope_telegram_fixture_sent(fixture_id, match_date, coupon_type) VALUES ($1, $2::date, $3) ON CONFLICT (fixture_id) DO NOTHING",
-              [fixtureId, /^\d{4}-\d{2}-\d{2}$/.test(String(coupon.date || "")) ? coupon.date : null, coupon.type]
+              `INSERT INTO winscope_telegram_delivery_sent(fixture_id, coupon_type, market, match_date, telegram_message_id)
+               VALUES ($1, $2, $3, $4::date, $5) ON CONFLICT (fixture_id, coupon_type, market) DO NOTHING`,
+              [fixtureId, coupon.type, String(p.market || ""),
+               /^\d{4}-\d{2}-\d{2}$/.test(String(coupon.date || "")) ? coupon.date : null,
+               result.messageId]
             );
           } catch (error) { console.warn(`[Telegram] Tekrar kaydı saklanamadı fixture=${fixtureId}: ${error.message}`); }
         }
@@ -1108,7 +1140,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   for (const fixture of fixturesToAnalyze) {
     // Yeterli sayıda yeni, doğrulanmış aday oluştuğunda gereksiz API çağrılarını kes.
     const uniqueCandidateCount = options.automatic
-      ? candidates.filter(p => !autoSentFixtureKeys.has(`${mode}|${date}|${Number(p.fixtureId)}`)).length
+      ? candidates.filter(p => !autoSentFixtureKeys.has(autoLivePickKey(mode, date, p))).length
       : candidates.length;
     if (uniqueCandidateCount >= targetPicks) break;
     analyzedFixtures++;
@@ -1180,7 +1212,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   }
   // Otomatik gönderimlerde aynı gün daha önce gönderilmiş maçları yeniden seçme.
   const availableCandidates = options.automatic
-    ? candidates.filter(p => !autoSentFixtureKeys.has(`${mode}|${date}|${Number(p.fixtureId)}`))
+    ? candidates.filter(p => !autoSentFixtureKeys.has(autoLivePickKey(mode, date, p)))
     : candidates;
   rejected.duplicate = candidates.length - availableCandidates.length;
   console.log(`[COUPON SCAN ${mode.toUpperCase()}] date=${date} live=${isLiveMode} fixtures=${allFixtures.length} prioritized=${fixtures.length} analyzed=${analyzedFixtures} candidates=${candidates.length} available=${availableCandidates.length} rejected=${JSON.stringify(rejected)} errors=${errors.length}`);
@@ -1540,10 +1572,12 @@ async function runAutomaticLivePick() {
   try {
     const date = turkeyDateString();
     const result = await createCouponByMode(date, "live", { automatic: true });
-    if (result.status === "READY" && result.telegram?.sent) {
-      console.log(`[AUTO LIVE] Telegram'a tek canlı tercih gönderildi: ${result.picks?.[0]?.home} - ${result.picks?.[0]?.away}`);
+    if (result.status === "READY" && result.telegram?.sent && !result.telegram?.duplicateSuppressed) {
+      console.log(`[AUTO LIVE] Telegram kabul etti message_id=${result.telegram.messageId ?? "bilinmiyor"}: ${result.picks?.[0]?.home} - ${result.picks?.[0]?.away}`);
+    } else if (result.telegram?.duplicateSuppressed) {
+      console.log(`[AUTO LIVE] Tekrar engellendi; yeni Telegram mesajı gönderilmedi: ${result.telegram.reason || "aynı maç/pazar daha önce gönderilmiş"}`);
     } else {
-      console.log(`[AUTO LIVE] Gönderilecek uygun tek tercih yok veya gönderim başarısız: ${result.message || result.telegram?.reason || result.telegram?.error || result.status}`);
+      console.log(`[AUTO LIVE] Telegram bildirimi gönderilmedi: ${result.message || result.telegram?.reason || result.telegram?.error || result.status}`);
     }
   } catch (error) {
     console.error(`[AUTO LIVE ERROR] ${error.message}`);
@@ -1674,7 +1708,6 @@ async function settleApprovedPredictions() {
     } catch (error) { console.warn(`[Prediction settlement] fixture=${item.fixtureId}: ${error.message}`); }
   }
 }
-setInterval(() => { void settleApprovedPredictions(); }, 15 * 60 * 1000);
-setInterval(() => { void settleLivePredictions(); }, 15 * 60 * 1000);
+setInterval(() => { void settleApprovedPredictions(); }, 15 * 60 * 1000);\nsetInterval(() => { void settleLivePredictions(); }, 15 * 60 * 1000);
 
 app.listen(PORT, () => console.log(`WinScope server running on port ${PORT}`));
