@@ -1272,12 +1272,28 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
         const liveOddsRow = (liveOddsPayload.response || []).find(row=>Number(row.fixture?.fixture?.id ?? row.fixture?.id ?? row.fixtureId)===fixture.id) || null;
         // Canlı tercih için yalnızca gerçek canlı oranı kabul et; maç önü oranı canlı oran yerine geçmez.
         marketOddsRow = liveOddsRow;
-        const statsRows = statsPayload.response || [];
+        const statsRows = Array.isArray(statsPayload?.response) ? statsPayload.response : [];
         const stats = liveStatsMetrics(statsRows, fixture);
         if (!marketOddsRow) { rejected.noOdds++; continue; }
         if (!stats.available) {
           rejected.noStats++;
-          console.warn(`[LIVE STATS MISSING] ${JSON.stringify({match:`${fixture.home} - ${fixture.away}`, fixtureId:fixture.id, minute:fixture.minute, score:`${fixture.homeScore}-${fixture.awayScore}`, ...stats.diagnostic})}`);
+          // Keep this compact: it distinguishes provider-side empty data from a
+          // response-shape/team-matching problem without logging credentials.
+          console.warn(`[LIVE STATS API RESPONSE] ${JSON.stringify({
+            match: `${fixture.home} - ${fixture.away}`,
+            fixtureId: fixture.id,
+            leagueId: fixture.leagueId ?? null,
+            season: fixture.season ?? null,
+            minute: fixture.minute,
+            score: `${fixture.homeScore}-${fixture.awayScore}`,
+            httpPayloadPresent: Boolean(statsPayload),
+            results: statsPayload?.results ?? null,
+            providerErrors: statsPayload?.errors ?? null,
+            responseIsArray: Array.isArray(statsPayload?.response),
+            responseLength: statsRows.length,
+            firstRowKeys: statsRows[0] && typeof statsRows[0] === "object" ? Object.keys(statsRows[0]).slice(0, 12) : [],
+            ...stats.diagnostic
+          })}`);
           continue;
         }
         if (!homeForm.available || !awayForm.available) { rejected.noForm++; continue; }
