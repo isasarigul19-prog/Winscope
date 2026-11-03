@@ -669,7 +669,7 @@ function chooseFormFallbackMarket(mode, fixture, forms, excludeMarket = null) {
   let allowed;
   if (!live) allowed = ["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR", "MS 1.5 ÜST"];
   else if (minute < 33) allowed = total === 0 ? ["İY 0.5 ÜST"] : ["İY 1.5 ÜST", "MS 1.5 ÜST"];
-  else if (minute < 45) allowed = total === 0 ? ["MS 1.5 ÜST"] : ["MS 1.5 ÜST", "KG VAR", "MS 2.5 ÜST"];
+  else if (minute < 45) allowed = total === 0 ? ["MS 1.5 ÜST"] : total === 1 ? ["İY 1.5 ÜST"] : ["MS 2.5 ÜST", "KG VAR"];
   else if (minute < 66) allowed = total === 0 ? ["MS 0.5 ÜST", "MS 1.5 ÜST"] : total === 1 ? ["MS 1.5 ÜST", "KG VAR"] : ["MS 2.5 ÜST", "KG VAR"];
   else if (minute <= 75) allowed = total <= 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST", "KG VAR"] : ["MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
   else allowed = total <= 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST"] : ["MS 2.5 ÜST", "MS 3.5 ÜST"];
@@ -716,10 +716,10 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     else if (total === 1) allowed = ["İY 1.5 ÜST"];
     else allowed = ["İY 1.5 ÜST"];
   } else if (minute >= 33 && minute < 45) {
-    // Tek gol varsa MS 1.5 ÜST otomatik seçilmez: pazar zaten çok kısa fiyatlı olabilir.
-    // MS 2.5 ancak canlı baskı + form + maç önü pazar desteği birlikte yeterliyse değerlendirilir.
+    // 33–44: 0-0 ise maçta en az 2 gol hedefleyen MS 1.5; tek gol varsa ilk yarı bitmeden İY 1.5.
+    // İY marketi yalnızca skor/dakika ve oran-form-istatistik eşikleri de uygunsa seçilebilir.
     if (total === 0) allowed = ["MS 1.5 ÜST"];
-    else if (total === 1) allowed = ["MS 2.5 ÜST", "KG VAR"];
+    else if (total === 1) allowed = ["İY 1.5 ÜST"];
     else allowed = ["MS 2.5 ÜST", "KG VAR"];
   } else if (minute >= 45 && minute < 55) {
     if (total === 0) allowed = ["MS 0.5 ÜST", "MS 1.5 ÜST"];
@@ -887,20 +887,8 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   }
   if (ranked[0]) return ranked[0];
 
-  // Relaxed fallback: prefer a real bookmaker market consistent with score/minute.
-  const fallback = choices
-    .filter(choice => (!live || !liveMarketAlreadySettled(choice.market, fixture)) && Number.isFinite(Number(choice.probability)) && Number(choice.probability) >= 35)
-    .sort((x, y) => Number(y.probability) - Number(x.probability) || Number(x.rank || 9) - Number(y.rank || 9))[0];
-  if (fallback) return { ...fallback, score: Number(fallback.probability), fallbackUsed: true };
-
-  // No usable odds: provide an explicitly heuristic score/minute scenario, never fake odds.
-  const fallbackMarket = allowed.find(m => m !== excludeMarket &&
-    (!live || !liveMarketAlreadySettled(m, fixture)) &&
-    (live || marketConsistentWithScore(m, predictedScores)));
-  if (fallbackMarket && (!live || minute >= 20)) {
-    return { market: fallbackMarket, bookmaker: "Skor/dakika senaryosu", oddsTiming: "scenario-estimate",
-      probability: null, formPct: null, score: 1, fallbackUsed: true };
-  }
+  // Bilerek zayıf fallback yok: eşik, form ve (canlıda) istatistik desteği yoksa
+  // tercih üretilmez. Böylece düşük olasılıklı pazarlar yalnızca "bir tercih çıksın" diye seçilmez.
   return null;
 }
 
@@ -1102,6 +1090,36 @@ async function sendCouponAutomatically(coupon, chosen) {
   }
 }
 
+// Yalnızca ana ligler ve başlıca UEFA turnuvaları kullanıcıya gösterilir.
+// Bu filtre loglama, API kota koruması ve veritabanı izleme akışlarına dokunmaz.
+function isMajorLeague(match) {
+  const normalize = value => String(value || "").toLocaleLowerCase("tr-TR")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/ı/g, "i").trim();
+  const league = normalize(match?.league);
+  const country = normalize(match?.country);
+
+  // Genç, kadın, rezerv ve B/II takımlarını ana lig adlarıyla eşleşseler bile dışarıda tut.
+  if (/\b(u\s*[- ]?1[789]|u\s*[- ]?2[013]|under\s*1[789]|under\s*2[013])\b|reserve|youth|women|ladies|kadin|\b(ii|b)\b/.test(league)) return false;
+
+  // Bilerek dar tutuldu: genel "Super League" / "Championship" ifadeleri
+  // farklı ülkelerdeki alt ligleri yanlışlıkla içeri almamalı.
+  if (league.includes("premier league") && country === "england") return true;
+  if (league === "la liga" && country === "spain") return true;
+  if (league === "serie a" && country === "italy") return true;
+  if (league === "bundesliga" && country === "germany") return true;
+  if (league === "ligue 1" && country === "france") return true;
+  if ((league === "super lig" || league === "super league") && ["turkey", "turkiye"].includes(country)) return true;
+  if (league === "eredivisie" && country === "netherlands") return true;
+  if ((league === "primeira liga" || league === "liga portugal") && country === "portugal") return true;
+  if (league === "championship" && country === "england") return true;
+  if (/^(uefa )?champions league$/.test(league)) return true;
+  if (/^(uefa )?europa league$/.test(league)) return true;
+  if (/^(uefa )?conference league$/.test(league)) return true;
+  if (league === "mls" || league === "major league soccer") return true;
+  if ((league === "serie a" || /^(serie a brazil|brasileirao serie a)$/.test(league)) && country === "brazil") return true;
+  return false;
+}
+
 function automaticLeaguePriority(match) {
   const league = String(match.league || "").toLowerCase();
   const country = String(match.country || "").toLowerCase();
@@ -1118,7 +1136,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   const fixtureKey = isLiveMode ? "liveList" : `fixtures:${date}`;
   const fixturePayload = await cachedProviderRequest(fixtureKey, fixturePath, isLiveMode ? 60_000 : 60_000);
   const allFixtures = (fixturePayload.response || []).map(normalizeProviderMatch)
-    .filter(m => m.id && (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 25 && Number(m.minute || 0) <= 80 : m.status === "NS"));
+    .filter(m => m.id && isMajorLeague(m) && (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 25 && Number(m.minute || 0) <= 80 : m.status === "NS"));
   // Büyük ligleri önceliklendir; aynı öncelikte erken başlayacak maçları öne al.
   allFixtures.sort((a, b) => automaticLeaguePriority(a) - automaticLeaguePriority(b) ||
     String(a.fixtureDate || "").localeCompare(String(b.fixtureDate || "")));
@@ -1246,7 +1264,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   if (!chosen.length || (mode === "prematch" && chosen.length < 2)) {
     const needed = mode === "prematch" ? 2 : 1;
     return {draftId:`coupon-${Date.now()}`,date,type:mode,status:"NO_MATCHES",picks:[],
-      message:`Maç önü oranı + son 5 maç formu${isLiveMode ? " + canlı istatistik" : ""} eşiklerini geçen yeterli maç yok (gereken: ${needed}). Kupon zorlanmadı.`,
+      message:`Ana lig filtresi, gerçek oran kaydı ve son 5 maç formu${isLiveMode ? " + canlı istatistik" : ""} eşiklerini geçen yeterli maç yok (gereken: ${needed}). Zayıf tercih zorlanmadı.`,
       detail:`Fikstür: ${allFixtures.length}; oran sayfasından eşleşen: ${dateOdds.size}; form/statistik için incelenen: ${fixturesToAnalyze.length}; aday: ${candidates.length}; elenme: oran=${rejected.noOdds}, form=${rejected.noForm}, canlı-istatistik=${rejected.noStats}, piyasa-sinyali=${rejected.noSignal}, API-hatası=${rejected.apiErrors}, tekrar=${rejected.duplicate}. ${errors.slice(0,2).join(" | ")}`};
   }
   // internalOdd / score iç skorlama; canlı kupon Telegram'da olasılık + form + dk/skor gösterilsin.
@@ -1455,7 +1473,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
 app.get("/api/live", async (_req, res) => {
   try {
     const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 60_000);
-    const matches = (payload.response || []).map(normalizeProviderMatch);
+    const matches = (payload.response || []).map(normalizeProviderMatch).filter(isMajorLeague);
     res.json({ source: "API-Football", results: matches.length, matches, fetchedAt: new Date().toISOString() });
   } catch (e) { res.status(502).json({ error: "Canlı maçlar alınamadı", detail: e.message, matches: [] }); }
 });
@@ -1465,7 +1483,8 @@ app.get("/api/fixtures", async (req, res) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "Tarih YYYY-MM-DD biçiminde olmalı." });
   try {
     const payload = await cachedProviderRequest(`fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 60000);
-    const matches = (payload.response || []).map(normalizeProviderMatch);
+    const matches = (payload.response || []).map(normalizeProviderMatch)
+      .filter(m => isMajorLeague(m) && m.id && m.status === "NS" && m.home && m.away);
     res.json({ source: "API-Football", results: matches.length, matches });
   } catch (e) { res.status(502).json({ error: "Bülten alınamadı", detail: e.message, matches: [] }); }
 });
