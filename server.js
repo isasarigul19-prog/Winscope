@@ -903,7 +903,19 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     // Prefer probability supported by both market and form, while rewarding genuine price value;
     // never choose a long price merely because the odds are high.
     const valueBonus = valueEdge == null ? 0 : Math.max(-8, Math.min(8, valueEdge * 0.45));
-    const score = choice.probability * 0.62 + (formPct == null ? 0 : formPct * 0.20) + liveBonus + valueBonus
+    // Araştırma temelli sıralama: piyasa olasılığı ana dayanak, son-5 form destekleyici,
+    // canlı baskı ise yalnızca canlı maçlarda ek kanıt. Bu bir kazanma garantisi değil;
+    // ağırlıklar başlangıç ayarıdır ve sonuçlarla kalibre edilmelidir.
+    const pressureConfidence = live
+      ? Math.max(0, Math.min(100,
+          Number(statsM.pressure || 0) * 2.6 +
+          Number(statsM.shotsOnTarget || 0) * 4 +
+          Math.min(8, Number(statsM.corners || 0) * 1.5)))
+      : 0;
+    const score = Number(choice.probability || 0) * 0.60
+      + (formPct == null ? 0 : Number(formPct) * 0.25)
+      + (live ? pressureConfidence * 0.15 : 0)
+      + liveBonus * 0.20 + valueBonus
       - (live && choice.market === "MS 3.5 ÜST" ? Math.max(0, minute - 65) * 0.4 : 0);
     return {
       ...choice,
@@ -1189,6 +1201,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   }
   const candidates = [], errors = [];
   const rejected = { noOdds: 0, noIds: 0, noForm: 0, noStats: 0, noMarket: 0, noSignal: 0, apiErrors: 0, duplicate: 0 };
+  const liveNoSignalDetails = [];
   let fixturesToAnalyze = fixtures;
   if (!isLiveMode) {
     const withBulkOdds = fixtures.filter(f => dateOdds.has(f.id));
@@ -1228,7 +1241,22 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
         if (!stats.available) { rejected.noStats++; continue; }
         if (!homeForm.available || !awayForm.available) { rejected.noForm++; continue; }
         const chosen = chooseSupportedMarket(liveOddsRow, mode, fixture, {home:homeForm,away:awayForm}, stats, prematchOddsRow);
-        if (!chosen) { rejected.noSignal++; continue; }
+        if (!chosen) {
+          rejected.noSignal++;
+          const availableMarkets = oddsForFixture(liveOddsRow).map(x => x.market);
+          liveNoSignalDetails.push({
+            match: `${fixture.home} - ${fixture.away}`,
+            minute: fixture.minute,
+            score: `${fixture.homeScore}-${fixture.awayScore}`,
+            liveMarkets: [...new Set(availableMarkets)].slice(0, 12),
+            pressure: Number(stats.pressure || 0),
+            shotsOnTarget: Number(stats.shotsOnTarget || 0),
+            totalShots: Number(stats.totalShots || 0),
+            corners: Number(stats.corners || 0),
+            reason: availableMarkets.length ? "canli_pazar_var_ama_esik_veya_dakika_skor_kurali_gecmedi" : "canli_oran_yanitinda_desteklenen_pazar_yok"
+          });
+          continue;
+        }
         oddsBasis = chosen.oddsTiming === "live"
           ? `Gerçek canlı oran · ${chosen.bookmaker}`
           : `Canlı oran bulunamadı; maç önü oranı · ${chosen.bookmaker} (canlı oran değildir)`;
@@ -1280,7 +1308,10 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
     ? candidates.filter(p => !autoSentFixtureKeys.has(autoLivePickKey(mode, date, p)))
     : candidates;
   rejected.duplicate = candidates.length - availableCandidates.length;
-  console.log(`[COUPON SCAN ${mode.toUpperCase()}] date=${date} live=${isLiveMode} fixtures=${allFixtures.length} prioritized=${fixtures.length} analyzed=${analyzedFixtures} candidates=${candidates.length} available=${availableCandidates.length} rejected=${JSON.stringify(rejected)} oddsPolicy=${isLiveMode ? "live-odds-only" : "prematch-odds-only"} seasonStats=home-away-blend youthReserveWomen=excluded oddsPagesMax=50 errors=${errors.length}`);
+  console.log(`[COUPON SCAN ${mode.toUpperCase()}] date=${date} live=${isLiveMode} fixtures=${allFixtures.length} prioritized=${fixtures.length} analyzed=${analyzedFixtures} candidates=${candidates.length} available=${availableCandidates.length} rejected=${JSON.stringify(rejected)} oddsPolicy=${isLiveMode ? "live-odds-only" : "prematch-odds-only"} model=market60-form25-livePressure15 seasonStats=home-away-blend youthReserveWomen=excluded oddsPagesMax=50 errors=${errors.length}`);
+  if (isLiveMode && liveNoSignalDetails.length) {
+    console.log(`[LIVE SIGNAL DIAGNOSTICS] ${JSON.stringify(liveNoSignalDetails.slice(0, 8))}`);
+  }
   availableCandidates.sort((a,b)=>b.score-a.score || b.formSupport-a.formSupport || a.internalOdd-b.internalOdd);
   const count = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
   const chosen = availableCandidates.slice(0,count);
