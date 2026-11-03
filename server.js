@@ -72,7 +72,7 @@ if (databasePool) {
       await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_live_predictions (
         prediction_id BIGSERIAL PRIMARY KEY,
         fixture_id BIGINT NOT NULL, home_team TEXT NOT NULL, away_team TEXT NOT NULL,
-        market TEXT NOT NULL, league TEXT, match_date TEXT, start_score TEXT, minute INTEGER,
+        market TEXT NOT NULL, signal_key TEXT NOT NULL, league TEXT, match_date TEXT, start_score TEXT, minute INTEGER,
         actual_score TEXT, outcome TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         settled_at TIMESTAMPTZ
       )`);
@@ -84,6 +84,7 @@ if (databasePool) {
         ADD COLUMN IF NOT EXISTS home_team TEXT,
         ADD COLUMN IF NOT EXISTS away_team TEXT,
         ADD COLUMN IF NOT EXISTS market TEXT,
+        ADD COLUMN IF NOT EXISTS signal_key TEXT,
         ADD COLUMN IF NOT EXISTS league TEXT,
         ADD COLUMN IF NOT EXISTS match_date TEXT,
         ADD COLUMN IF NOT EXISTS start_score TEXT,
@@ -92,6 +93,12 @@ if (databasePool) {
         ADD COLUMN IF NOT EXISTS outcome TEXT,
         ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
         ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ`);
+      // Existing databases may already have signal_key as NOT NULL. Backfill old rows
+      // before enforcing the constraint so tracking writes never fail on a missing key.
+      await databasePool.query(`UPDATE winscope_live_predictions
+        SET signal_key = COALESCE(NULLIF(signal_key, ''), fixture_id::TEXT || ':' || COALESCE(market, 'unknown'))
+        WHERE signal_key IS NULL OR signal_key = ''`);
+      await databasePool.query(`ALTER TABLE winscope_live_predictions ALTER COLUMN signal_key SET NOT NULL`);
       // Migrate older installs where fixture_id was the primary key so one match can
       // store multiple distinct markets without losing existing tracking rows.
       await databasePool.query(`ALTER TABLE winscope_live_predictions ADD COLUMN IF NOT EXISTS prediction_id BIGSERIAL`);
@@ -1075,9 +1082,10 @@ async function sendCouponAutomatically(coupon, chosen) {
             if (databasePool) {
               try {
                 await databasePool.query(
-                  `INSERT INTO winscope_live_predictions(fixture_id,home_team,away_team,market,league,match_date,start_score,minute)
-                   VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(fixture_id,market) DO NOTHING`,
-                  [trackedLive.fixtureId,trackedLive.home,trackedLive.away,trackedLive.market,trackedLive.league,
+                  `INSERT INTO winscope_live_predictions(fixture_id,home_team,away_team,market,signal_key,league,match_date,start_score,minute)
+                   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(fixture_id,market) DO NOTHING`,
+                  [trackedLive.fixtureId,trackedLive.home,trackedLive.away,trackedLive.market,
+                   `${trackedLive.fixtureId}:${trackedLive.market}`,trackedLive.league,
                    /^\\d{4}-\\d{2}-\\d{2}$/.test(trackedLive.matchDate) ? trackedLive.matchDate : null,
                    trackedLive.startScore,trackedLive.minute]
                 );
