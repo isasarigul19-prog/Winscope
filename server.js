@@ -256,6 +256,7 @@ function normalizeProviderMatch(match) {
   else if (["NS", "TBD", "PST", "CANC", "ABD", "AWD", "WO"].includes(status)) status = status === "NS" ? "NS" : status;
   return {
     id: idNum, homeId: Number(match.teams?.home?.id) || null, awayId: Number(match.teams?.away?.id) || null,
+    leagueId: Number(match.league?.id) || null, season: Number(match.league?.season) || null,
     league: String(leagueName), country: String(countryName),
     minute: match.fixture?.status?.elapsed ?? match.minute ?? null, status,
     home: String(homeName), away: String(awayName),
@@ -445,7 +446,29 @@ function marketSupport(market, homeForm, awayForm) {
   return null;
 }
 
-async function fetchTeamRecentForm(teamId, fixtureId) {
+async function fetchTeamSeasonGoals(teamId, leagueId, season, venue) {
+  if (!teamId || !leagueId || !season || !['home', 'away'].includes(venue)) return null;
+  try {
+    // Team-season stats change slowly; cache them for 12 hours to conserve API quota.
+    const payload = await cachedProviderRequest(
+      `team-season:${teamId}:${leagueId}:${season}`,
+      `/teams/statistics?team=${encodeURIComponent(teamId)}&league=${encodeURIComponent(leagueId)}&season=${encodeURIComponent(season)}`,
+      12 * 60 * 60 * 1000
+    );
+    const data = payload.response || {};
+    const played = Number(data.fixtures?.played?.[venue] || 0);
+    const avgFor = Number(data.goals?.for?.average?.[venue]);
+    const avgAgainst = Number(data.goals?.against?.average?.[venue]);
+    if (played < 5 || !Number.isFinite(avgFor) || !Number.isFinite(avgAgainst)) return null;
+    return { played, avgGoalsFor: avgFor, avgGoalsAgainst: avgAgainst };
+  } catch (e) {
+    // Season stats are supplementary: an endpoint failure must not break the existing form analysis.
+    console.warn(`[Team season stats] team=${teamId} league=${leagueId} season=${season}: ${e.message}`);
+    return null;
+  }
+}
+
+async function fetchTeamRecentForm(teamId, fixtureId, leagueId = null, season = null, venue = null) {
   if (!teamId) return { available: false, sampleSize: 0 };
   try {
     const payload = await cachedProviderRequest(`form:${teamId}`, `/fixtures?team=${teamId}&last=10`, 6 * 60 * 60 * 1000);
@@ -465,6 +488,12 @@ async function fetchTeamRecentForm(teamId, fixtureId) {
         htTotal: hth == null || hta == null ? null : Number(hth)+Number(hta) };
     });
     const htVals = vals.filter(x => x.htTotal != null);
+    const recentAvgGoalsFor = Number((vals.reduce((sum,x)=>sum+x.gf,0)/vals.length).toFixed(2));
+    const recentAvgGoalsAgainst = Number((vals.reduce((sum,x)=>sum+x.ga,0)/vals.length).toFixed(2));
+    const seasonStats = await fetchTeamSeasonGoals(teamId, leagueId, season, venue);
+    // Blend the recent five-match form with the team's home/away season rate.
+    // Recent form carries more weight (70%) so the season average stabilizes rather than overrides it.
+    const blend = (recent, seasonal) => seasonal == null ? recent : Number((recent * 0.70 + seasonal * 0.30).toFixed(2));
     return {
       available: true, sampleSize: rows.length,
       teamGoalsOver05Pct: pct(x => x.gf >= 1),
@@ -475,9 +504,12 @@ async function fetchTeamRecentForm(teamId, fixtureId) {
       bttsPct: pct(x => x.btts),
       htOver05Pct: htVals.length ? Math.round(100 * htVals.filter(x=>x.htTotal>=1).length / htVals.length) : null,
       htOver15Pct: htVals.length ? Math.round(100 * htVals.filter(x=>x.htTotal>=2).length / htVals.length) : null,
-      avgGoalsFor: Number((vals.reduce((sum,x)=>sum+x.gf,0)/vals.length).toFixed(2)),
-      avgGoalsAgainst: Number((vals.reduce((sum,x)=>sum+x.ga,0)/vals.length).toFixed(2)),
-      avgTotalGoals: Number((vals.reduce((sum,x)=>sum+x.total,0)/vals.length).toFixed(2)),
+      avgGoalsFor: blend(recentAvgGoalsFor, seasonStats?.avgGoalsFor),
+      avgGoalsAgainst: blend(recentAvgGoalsAgainst, seasonStats?.avgGoalsAgainst),
+      recentAvgGoalsFor, recentAvgGoalsAgainst,
+      seasonAvgGoalsFor: seasonStats?.avgGoalsFor ?? null,
+      seasonAvgGoalsAgainst: seasonStats?.avgGoalsAgainst ?? null,
+      seasonMatches: seasonStats?.played ?? null,
       matches: rows.map(r=>({score:`${r.goals.home}-${r.goals.away}`, halftimeScore:r.score?.halftime?.home==null?null:`${r.score.halftime.home}-${r.score.halftime.away}`}))
     };
   } catch (e) {
@@ -1101,6 +1133,12 @@ async function sendCouponAutomatically(coupon, chosen) {
   }
 }
 
+
+function isExcludedAnalysisCompetition(match) {
+  const text = `${match.league || ""} ${match.country || ""}`.toLowerCase();
+  return /\b(women|woman|ladies|feminine|youth|reserve|reserves|u(?:16|17|18|19|20|21|23)|under[- ]?(?:16|17|18|19|20|21|23)|academy|junior|development league|premier league 2)\b/.test(text);
+}
+
 function automaticLeaguePriority(match) {
   const league = String(match.league || "").toLowerCase();
   const country = String(match.country || "").toLowerCase();
@@ -1117,7 +1155,8 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   const fixtureKey = isLiveMode ? "liveList" : `fixtures:${date}`;
   const fixturePayload = await cachedProviderRequest(fixtureKey, fixturePath, isLiveMode ? 60_000 : 60_000);
   const allFixtures = (fixturePayload.response || []).map(normalizeProviderMatch)
-    .filter(m => m.id && (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 25 && Number(m.minute || 0) <= 80 : m.status === "NS"));
+    .filter(m => m.id && !isExcludedAnalysisCompetition(m) &&
+      (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 25 && Number(m.minute || 0) <= 80 : m.status === "NS"));
   // Büyük ligleri önceliklendir; aynı öncelikte erken başlayacak maçları öne al.
   allFixtures.sort((a, b) => automaticLeaguePriority(a) - automaticLeaguePriority(b) ||
     String(a.fixtureDate || "").localeCompare(String(b.fixtureDate || "")));
@@ -1137,8 +1176,8 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
       const first = await cachedProviderRequest(`odds-date:${date}:page:1`, `/odds?date=${encodeURIComponent(date)}&page=1`, 15 * 60 * 1000);
       for (const row of (first.response || [])) if (row.fixture?.id) dateOdds.set(Number(row.fixture.id), row);
       const reportedPages = Math.max(1, Number(first.paging?.total || 1));
-      const totalPages = Math.min(3, reportedPages);
-      if (reportedPages > totalPages) console.warn(`[Coupon] API kotası koruması: ${reportedPages} oran sayfasının ilk ${totalPages} sayfası kullanılıyor.`);
+      const totalPages = Math.min(50, reportedPages);
+      if (reportedPages > totalPages) console.warn(`[Coupon] Güvenlik sınırı: ${reportedPages} oran sayfasının ilk ${totalPages} sayfası kullanılıyor.`);
       for (let page = 2; page <= totalPages; page++) {
         const payload = await cachedProviderRequest(`odds-date:${date}:page:${page}`, `/odds?date=${encodeURIComponent(date)}&page=${page}`, 15 * 60 * 1000);
         for (const row of (payload.response || [])) if (row.fixture?.id) dateOdds.set(Number(row.fixture.id), row);
@@ -1174,8 +1213,8 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
           cachedProviderRequest(`odds-fixture:${fixture.id}`, `/odds?fixture=${fixture.id}`, 90000).catch(()=>({response:[]})),
           cachedProviderRequest(`odds-live-fixture:${fixture.id}`, `/odds/live?fixture=${fixture.id}`, 10000).catch(()=>({response:[]})),
           cachedProviderRequest(`stats:${fixture.id}`, `/fixtures/statistics?fixture=${fixture.id}`, 15000),
-          fetchTeamRecentForm(fixture.homeId, fixture.id),
-          fetchTeamRecentForm(fixture.awayId, fixture.id)
+          fetchTeamRecentForm(fixture.homeId, fixture.id, fixture.leagueId, fixture.season, "home"),
+          fetchTeamRecentForm(fixture.awayId, fixture.id, fixture.leagueId, fixture.season, "away")
         ]);
         prematchOddsRow = (prePayload.response || []).find(row=>Number(row.fixture?.id)===fixture.id) || null;
         const liveOddsRow = (liveOddsPayload.response || []).find(row=>Number(row.fixture?.fixture?.id ?? row.fixture?.id ?? row.fixtureId)===fixture.id) || null;
@@ -1217,7 +1256,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
         }
         if (!marketOddsRow) { rejected.noOdds++; continue; }
         if (!fixture.homeId || !fixture.awayId) { rejected.noIds++; continue; }
-        const [homeForm, awayForm] = await Promise.all([fetchTeamRecentForm(fixture.homeId,fixture.id),fetchTeamRecentForm(fixture.awayId,fixture.id)]);
+        const [homeForm, awayForm] = await Promise.all([fetchTeamRecentForm(fixture.homeId,fixture.id,fixture.leagueId,fixture.season,"home"),fetchTeamRecentForm(fixture.awayId,fixture.id,fixture.leagueId,fixture.season,"away")]);
         if (!homeForm.available || !awayForm.available) { rejected.noForm++; continue; }
         const chosen = chooseSupportedMarket(marketOddsRow, mode, fixture, {home:homeForm,away:awayForm}, null, marketOddsRow);
         if (!chosen) { rejected.noSignal++; continue; }
@@ -1238,7 +1277,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
     ? candidates.filter(p => !autoSentFixtureKeys.has(autoLivePickKey(mode, date, p)))
     : candidates;
   rejected.duplicate = candidates.length - availableCandidates.length;
-  console.log(`[COUPON SCAN ${mode.toUpperCase()}] date=${date} live=${isLiveMode} fixtures=${allFixtures.length} prioritized=${fixtures.length} analyzed=${analyzedFixtures} candidates=${candidates.length} available=${availableCandidates.length} rejected=${JSON.stringify(rejected)} errors=${errors.length}`);
+  console.log(`[COUPON SCAN ${mode.toUpperCase()}] date=${date} live=${isLiveMode} fixtures=${allFixtures.length} prioritized=${fixtures.length} analyzed=${analyzedFixtures} candidates=${candidates.length} available=${availableCandidates.length} rejected=${JSON.stringify(rejected)} seasonStats=home-away-blend youthReserveWomen=excluded oddsPagesMax=50 errors=${errors.length}`);
   availableCandidates.sort((a,b)=>b.score-a.score || b.formSupport-a.formSupport || a.internalOdd-b.internalOdd);
   const count = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
   const chosen = availableCandidates.slice(0,count);
@@ -1303,7 +1342,7 @@ app.get("/api/health", (_req, res) => res.json({
   ok: true, apiKeyConfigured: Boolean(API_KEY),
   telegramConfigured: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
   databaseConfigured: Boolean(databasePool),
-  provider: "API-Football", oddsPolicy: "pre-match odds for pre-match analysis; live endpoint checks live odds first", oddsValuesHidden: true
+  provider: "API-Football", oddsPolicy: "pre-match odds for pre-match analysis; live endpoint checks live odds first", teamFormPolicy: "last five completed matches plus cached league-season home/away goal averages", oddsValuesHidden: true
 }));
 
 // Compatibility route used by the current index.html live-goal button.
@@ -1346,7 +1385,7 @@ app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
         oddsBasis: "Takım kimlikleri bulunamadı.", note: "Takım formu doğrulanamadığı için tercih zorlanmadı." });
     }
     const [homeForm, awayForm] = await Promise.all([
-      fetchTeamRecentForm(fixture.homeId, fixture.id), fetchTeamRecentForm(fixture.awayId, fixture.id)
+      fetchTeamRecentForm(fixture.homeId, fixture.id, fixture.leagueId, fixture.season, "home"), fetchTeamRecentForm(fixture.awayId, fixture.id, fixture.leagueId, fixture.season, "away")
     ]);
     if (!homeForm.available || !awayForm.available) {
       return res.json({ fixtureId, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute: fixture.minute,
@@ -1394,8 +1433,8 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       getOddsForFixture(match.id, match.fixtureDate ? String(match.fixtureDate).slice(0, 10) : null).catch(e => {
         console.warn(`[Prematch analysis] odds failed fixture=${match.id}: ${e.message}`); return null;
       }),
-      fetchTeamRecentForm(match.homeId, match.id),
-      fetchTeamRecentForm(match.awayId, match.id)
+      fetchTeamRecentForm(match.homeId, match.id, match.leagueId, match.season, "home"),
+      fetchTeamRecentForm(match.awayId, match.id, match.leagueId, match.season, "away")
     ]);
     const forms = { home: homeForm, away: awayForm };
     const scores = scorePrediction(prematchFixture, homeForm, awayForm, null, prematchRow);
