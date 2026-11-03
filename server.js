@@ -76,10 +76,22 @@ if (databasePool) {
         actual_score TEXT, outcome TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         settled_at TIMESTAMPTZ
       )`);
-      // Eski PostgreSQL kurulumlarında tablo zaten varsa CREATE TABLE IF NOT EXISTS
-      // eksik sütunları eklemez. Şemayı veri silmeden ileri taşı.
+      // Backfill schema for databases created by older deployments. CREATE TABLE IF NOT EXISTS
+      // does not add columns to an existing table, which previously broke weekly tracking.
       await databasePool.query(`ALTER TABLE winscope_live_predictions
-        ADD COLUMN IF NOT EXISTS match_date TEXT`);
+        ADD COLUMN IF NOT EXISTS prediction_id BIGSERIAL,
+        ADD COLUMN IF NOT EXISTS fixture_id BIGINT,
+        ADD COLUMN IF NOT EXISTS home_team TEXT,
+        ADD COLUMN IF NOT EXISTS away_team TEXT,
+        ADD COLUMN IF NOT EXISTS market TEXT,
+        ADD COLUMN IF NOT EXISTS league TEXT,
+        ADD COLUMN IF NOT EXISTS match_date TEXT,
+        ADD COLUMN IF NOT EXISTS start_score TEXT,
+        ADD COLUMN IF NOT EXISTS minute INTEGER,
+        ADD COLUMN IF NOT EXISTS actual_score TEXT,
+        ADD COLUMN IF NOT EXISTS outcome TEXT,
+        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
+        ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ`);
       // Migrate older installs where fixture_id was the primary key so one match can
       // store multiple distinct markets without losing existing tracking rows.
       await databasePool.query(`ALTER TABLE winscope_live_predictions ADD COLUMN IF NOT EXISTS prediction_id BIGSERIAL`);
