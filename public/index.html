@@ -52,6 +52,7 @@ button{cursor:pointer}.primary,.active{background:var(--pink);border-color:var(-
   </section>
   <section class="panel" id="livePredictionPanel">
     <div class="head"><h3 style="margin:2px 0 10px">📊 Canlı Tercih Sonuç Takibi</h3><button id="refreshLivePredictions">Yenile</button></div>
+    <div class="toolbar" style="margin-top:0"><select id="lpPeriod" aria-label="Takip dönemi"><option value="week">Son 7 gün</option><option value="all">Tüm kayıtlar</option></select><span class="small" id="lpPeriodLabel">Son 7 gün</span></div>
     <div class="grid" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px">
       <div class="group"><div class="gt">Toplam tercih</div><strong id="lpTotal">—</strong></div>
       <div class="group"><div class="gt">Bekleyen</div><strong id="lpPending">—</strong></div>
@@ -138,16 +139,19 @@ function renderCoupon(d){
 }
 async function loadLivePredictionSummary(){
  try{
-  const r=await fetch('/api/live-predictions/summary'),j=await r.json();if(!r.ok)throw Error(j.error||'Takip yüklenemedi');
+  const period=$('lpPeriod')?.value||'week';
+  const r=await fetch('/api/live-predictions/summary?period='+encodeURIComponent(period)),j=await r.json();if(!r.ok)throw Error(j.error||'Takip yüklenemedi');
+  if($('lpPeriodLabel'))$('lpPeriodLabel').textContent=period==='week'?'Son 7 gün':'Tüm kayıtlar';
   $('lpTotal').textContent=j.total??0;$('lpPending').textContent=j.pending??0;$('lpWon').textContent=j.won??0;$('lpLost').textContent=j.lost??0;
   $('lpWinRate').textContent=j.winRate==null?'Henüz sonuç yok':`${j.winRate}%`;
   $('lpLossRate').textContent=j.lossRate==null?'Henüz sonuç yok':`${j.lossRate}%`;
   const list=j.results||[];
-  $('lpResults').innerHTML=list.length?list.slice(0,12).map(p=>`<div class="statteam"><b>${esc(p.home)} VS ${esc(p.away)}</b><br><span>Tercih: ${esc(p.market)} · ${esc(p.scoreAtSignal||'—')} · ${esc(p.minute??'—')}'</span><br><span>Sonuç: ${p.status==='won'?'✅ Kazandı':p.status==='lost'?'❌ Kaybetti':'⏳ Bekliyor'}${p.actualScore?' · '+esc(p.actualScore):''}</span></div>`).join(''):'Henüz otomatik canlı tercih kaydı yok.';
+  $('lpResults').innerHTML=list.length?list.slice(0,12).map(p=>`<div class="statteam"><b>${esc(p.home)} VS ${esc(p.away)}</b><br><span>Tercih: ${esc(p.market)} · ${esc(p.startScore||'—')} · ${esc(p.minute??'—')}'</span><br><span>Sonuç: ${p.outcome==='won'?'✅ Kazandı':p.outcome==='lost'?'❌ Kaybetti':'⏳ Bekliyor'}${p.actualScore?' · '+esc(p.actualScore):''}</span></div>`).join(''):'Henüz otomatik canlı tercih kaydı yok.';
   if(!j.persistentStorage)$('lpResults').insertAdjacentHTML('beforeend','<div class="err" style="margin-top:6px">Uyarı: DATABASE_URL yok; sunucu yeniden başlarsa takip kayıtları kaybolabilir.</div>');
  }catch(e){$('lpResults').innerHTML=`<span class="err">${esc(e.message)}</span>`}
 }
 $('refreshLivePredictions').onclick=loadLivePredictionSummary;
+$('lpPeriod').onchange=loadLivePredictionSummary;
 $('refresh').onclick=live;$('bulletin').onclick=bulletin;$('searchMatch').onclick=searchMatch;
 $('matchSearch').addEventListener('keydown',e=>{if(e.key==='Enter')searchMatch()});
 $('clearMatchSearch').onclick=()=>{$('matchSearch').value='';$('matchSearchResult').textContent='Aramak için takım adını yaz.'};
