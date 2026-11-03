@@ -1272,28 +1272,39 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
         const liveOddsRow = (liveOddsPayload.response || []).find(row=>Number(row.fixture?.fixture?.id ?? row.fixture?.id ?? row.fixtureId)===fixture.id) || null;
         // Canlı tercih için yalnızca gerçek canlı oranı kabul et; maç önü oranı canlı oran yerine geçmez.
         marketOddsRow = liveOddsRow;
-        const statsRows = Array.isArray(statsPayload?.response) ? statsPayload.response : [];
+        const statsRows = statsPayload.response || [];
         const stats = liveStatsMetrics(statsRows, fixture);
         if (!marketOddsRow) { rejected.noOdds++; continue; }
         if (!stats.available) {
           rejected.noStats++;
-          // Keep this compact: it distinguishes provider-side empty data from a
-          // response-shape/team-matching problem without logging credentials.
-          console.warn(`[LIVE STATS API RESPONSE] ${JSON.stringify({
-            match: `${fixture.home} - ${fixture.away}`,
-            fixtureId: fixture.id,
-            leagueId: fixture.leagueId ?? null,
-            season: fixture.season ?? null,
-            minute: fixture.minute,
-            score: `${fixture.homeScore}-${fixture.awayScore}`,
-            httpPayloadPresent: Boolean(statsPayload),
-            results: statsPayload?.results ?? null,
-            providerErrors: statsPayload?.errors ?? null,
-            responseIsArray: Array.isArray(statsPayload?.response),
-            responseLength: statsRows.length,
-            firstRowKeys: statsRows[0] && typeof statsRows[0] === "object" ? Object.keys(statsRows[0]).slice(0, 12) : [],
-            ...stats.diagnostic
-          })}`);
+          // Check the provider's advertised coverage for this exact league-season.
+          // Cache for 24h so missing stats do not trigger a league request every scan.
+          let coverageDiagnostic = null;
+          try {
+            const coveragePayload = await cachedProviderRequest(
+              `league-coverage:${fixture.leagueId}:${fixture.season}`,
+              `/leagues?id=${encodeURIComponent(fixture.leagueId)}&season=${encodeURIComponent(fixture.season)}`,
+              24 * 60 * 60 * 1000
+            );
+            const leagueRow = (coveragePayload.response || []).find(row =>
+              Number(row.league?.id) === Number(fixture.leagueId)
+            ) || (coveragePayload.response || [])[0] || null;
+            const seasonRow = (leagueRow?.seasons || []).find(row =>
+              Number(row.year) === Number(fixture.season)
+            ) || null;
+            coverageDiagnostic = {
+              leagueFound: Boolean(leagueRow),
+              leagueName: leagueRow?.league?.name || null,
+              requestedSeason: Number(fixture.season) || null,
+              seasonFound: Boolean(seasonRow),
+              coverage: seasonRow?.coverage || leagueRow?.coverage || null,
+              providerErrors: coveragePayload.errors || []
+            };
+          } catch (coverageError) {
+            coverageDiagnostic = { lookupFailed: true, message: coverageError.message };
+          }
+          console.warn(`[LIVE STATS MISSING] ${JSON.stringify({match:`${fixture.home} - ${fixture.away}`, fixtureId:fixture.id, leagueId:fixture.leagueId, season:fixture.season, minute:fixture.minute, score:`${fixture.homeScore}-${fixture.awayScore}`, ...stats.diagnostic})}`);
+          console.warn(`[LIVE LEAGUE COVERAGE] ${JSON.stringify({match:`${fixture.home} - ${fixture.away}`, fixtureId:fixture.id, leagueId:fixture.leagueId, season:fixture.season, coverage:coverageDiagnostic})}`);
           continue;
         }
         if (!homeForm.available || !awayForm.available) { rejected.noForm++; continue; }
