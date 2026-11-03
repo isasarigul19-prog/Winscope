@@ -1220,7 +1220,8 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
         ]);
         prematchOddsRow = (prePayload.response || []).find(row=>Number(row.fixture?.id)===fixture.id) || null;
         const liveOddsRow = (liveOddsPayload.response || []).find(row=>Number(row.fixture?.fixture?.id ?? row.fixture?.id ?? row.fixtureId)===fixture.id) || null;
-        marketOddsRow = liveOddsRow || prematchOddsRow;
+        // Canlı tercih için yalnızca gerçek canlı oranı kabul et; maç önü oranı canlı oran yerine geçmez.
+        marketOddsRow = liveOddsRow;
         const statsRows = statsPayload.response || [];
         const stats = liveStatsMetrics(statsRows, fixture);
         if (!marketOddsRow) { rejected.noOdds++; continue; }
@@ -1286,7 +1287,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   if (!chosen.length || (mode === "prematch" && chosen.length < 2)) {
     const needed = mode === "prematch" ? 2 : 1;
     return {draftId:`coupon-${Date.now()}`,date,type:mode,status:"NO_MATCHES",picks:[],
-      message:`Maç önü oranı + son 5 maç formu${isLiveMode ? " + canlı istatistik" : ""} eşiklerini geçen yeterli maç yok (gereken: ${needed}). Kupon zorlanmadı.`,
+      message:`${isLiveMode ? "Canlı oran + son 5 maç formu + canlı istatistik" : "Maç önü oranı + son 5 maç formu"} eşiklerini geçen yeterli maç yok (gereken: ${needed}). Kupon zorlanmadı.`,
       detail:`Fikstür: ${allFixtures.length}; oran sayfasından eşleşen: ${dateOdds.size}; form/statistik için incelenen: ${fixturesToAnalyze.length}; aday: ${candidates.length}; elenme: oran=${rejected.noOdds}, form=${rejected.noForm}, canlı-istatistik=${rejected.noStats}, piyasa-sinyali=${rejected.noSignal}, API-hatası=${rejected.apiErrors}, tekrar=${rejected.duplicate}. ${errors.slice(0,2).join(" | ")}`};
   }
   // internalOdd / score iç skorlama; canlı kupon Telegram'da olasılık + form + dk/skor gösterilsin.
