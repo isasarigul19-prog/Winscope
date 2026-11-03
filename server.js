@@ -520,25 +520,62 @@ async function fetchTeamRecentForm(teamId, fixtureId, leagueId = null, season = 
 
 function liveStatsMetrics(stats, fixture) {
   const out = { available: false, shotsOnTarget: 0, totalShots: 0, corners: 0,
-    home: { shotsOnTarget: 0, totalShots: 0, corners: 0 }, away: { shotsOnTarget: 0, totalShots: 0, corners: 0 } };
+    home: { shotsOnTarget: 0, totalShots: 0, corners: 0 }, away: { shotsOnTarget: 0, totalShots: 0, corners: 0 },
+    diagnostic: { expectedHomeId: Number(fixture.homeId) || null, expectedAwayId: Number(fixture.awayId) || null,
+      teamsReceived: 0, teamsMatched: 0, recognized: { home: [], away: [] }, received: [] } };
   const seen = { home: new Set(), away: new Set() };
-  for (const team of (Array.isArray(stats) ? stats : [])) {
-    const teamId = Number(team.team?.id);
-    const side = teamId === Number(fixture.homeId) ? "home" : teamId === Number(fixture.awayId) ? "away" : null;
+  // API-Football normally returns an array. Accept common wrapped/object forms too,
+  // but never manufacture a statistic when the provider value is missing.
+  let rows = Array.isArray(stats) ? stats : Array.isArray(stats?.response) ? stats.response : [];
+  if (!rows.length && stats && typeof stats === "object") {
+    rows = [stats.home, stats.away].filter(Boolean).map(x => ({
+      team: x.team || { id: x.id, name: x.name },
+      statistics: x.statistics || x.stats || []
+    }));
+  }
+  const clean = value => String(value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const homeName = clean(fixture.home), awayName = clean(fixture.away);
+  for (const team of rows) {
+    out.diagnostic.teamsReceived++;
+    const teamInfo = team.team || team;
+    const teamId = Number(teamInfo.id ?? team.teamId ?? team.id) || null;
+    const teamName = clean(teamInfo.name ?? team.name);
+    let side = teamId && teamId === Number(fixture.homeId) ? "home"
+      : teamId && teamId === Number(fixture.awayId) ? "away" : null;
+    // Name fallback is only used when IDs are missing, not when a conflicting ID exists.
+    if (!side && !teamId && teamName) {
+      if (teamName === homeName) side = "home";
+      else if (teamName === awayName) side = "away";
+    }
+    const statList = Array.isArray(team.statistics) ? team.statistics
+      : Array.isArray(team.stats) ? team.stats
+      : team.statistics && typeof team.statistics === "object" ? Object.entries(team.statistics).map(([type, value]) => ({type, value})) : [];
+    out.diagnostic.received.push({ id: teamId, name: teamInfo.name ?? team.name ?? null,
+      matched: side || null, types: statList.slice(0, 20).map(st => String(st.type ?? st.name ?? "")) });
     if (!side) continue;
-    for (const st of (team.statistics || [])) {
-      const type = String(st.type || "").toLowerCase();
-      if (st.value == null || String(st.value).trim() === "" || /^[-—]+$/.test(String(st.value).trim())) continue;
-      const value = Number(String(st.value).replace('%',''));
+    out.diagnostic.teamsMatched++;
+    for (const st of statList) {
+      const type = clean(st.type ?? st.name ?? st.key);
+      const raw = st.value ?? st.val;
+      if (raw == null || String(raw).trim() === "" || /^[-—]+$/.test(String(raw).trim())) continue;
+      const match = String(raw).replace(/,/g, ".").match(/-?\d+(?:\.\d+)?/);
+      if (!match) continue;
+      const value = Number(match[0]);
       if (!Number.isFinite(value)) continue;
-      if (/shots on goal|shots on target/.test(type)) { out.shotsOnTarget += value; out[side].shotsOnTarget += value; seen[side].add("shotsOnTarget"); }
-      else if (/total shots|goal attempts/.test(type)) { out.totalShots += value; out[side].totalShots += value; seen[side].add("totalShots"); }
-      else if (/corner kicks|corners/.test(type)) { out.corners += value; out[side].corners += value; seen[side].add("corners"); }
+      if (/shots on goal|shots on target|shots on target inc goals/.test(type)) {
+        out.shotsOnTarget += value; out[side].shotsOnTarget += value; seen[side].add("shotsOnTarget"); out.diagnostic.recognized[side].push(String(st.type ?? st.name));
+      } else if (/total shots|goal attempts|total attempts/.test(type)) {
+        out.totalShots += value; out[side].totalShots += value; seen[side].add("totalShots"); out.diagnostic.recognized[side].push(String(st.type ?? st.name));
+      } else if (/corner kicks|corners|corner/.test(type)) {
+        out.corners += value; out[side].corners += value; seen[side].add("corners"); out.diagnostic.recognized[side].push(String(st.type ?? st.name));
+      }
     }
   }
-  // A two-row response alone is not proof that usable live stats exist.
+  // Both teams must have at least one real, recognized stat; missing data is not treated as zero.
   out.available = seen.home.size > 0 && seen.away.size > 0;
   out.pressure = out.shotsOnTarget*2.5 + out.totalShots*0.45 + out.corners*0.8;
+  out.diagnostic.recognized.home = [...new Set(out.diagnostic.recognized.home)];
+  out.diagnostic.recognized.away = [...new Set(out.diagnostic.recognized.away)];
   return out;
 }
 
@@ -1238,7 +1275,11 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
         const statsRows = statsPayload.response || [];
         const stats = liveStatsMetrics(statsRows, fixture);
         if (!marketOddsRow) { rejected.noOdds++; continue; }
-        if (!stats.available) { rejected.noStats++; continue; }
+        if (!stats.available) {
+          rejected.noStats++;
+          console.warn(`[LIVE STATS MISSING] ${JSON.stringify({match:`${fixture.home} - ${fixture.away}`, fixtureId:fixture.id, minute:fixture.minute, score:`${fixture.homeScore}-${fixture.awayScore}`, ...stats.diagnostic})}`);
+          continue;
+        }
         if (!homeForm.available || !awayForm.available) { rejected.noForm++; continue; }
         const chosen = chooseSupportedMarket(liveOddsRow, mode, fixture, {home:homeForm,away:awayForm}, stats, prematchOddsRow);
         if (!chosen) {
