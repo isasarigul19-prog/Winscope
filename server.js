@@ -1163,8 +1163,10 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   // Otomatik tarama ilk birkaç maçla sınırlı kalmasın; API istek kuyruğu hız sınırını korur.
   // Maç önü havuzunu sabit 20/35 maçla kesme: bültenin tamamını oran eşleştirmesine al.
   // Canlı taramada API kotası ve hız için ayrı, sınırlı havuz kullanılır.
+  // Genişletilmiş otomatik canlı tarama: uygun maç ilk 12'de değilse kaçırılmasın.
+  // API kota koruması, önbellek ve istek kuyruğu aynen korunur.
   const fixtures = isLiveMode
-    ? allFixtures.slice(0, options.automatic ? 12 : 15)
+    ? allFixtures.slice(0, options.automatic ? 25 : 25)
     : allFixtures;
   if (!fixtures.length) return { draftId:`coupon-${Date.now()}`, date, type:mode, status:"NO_MATCHES", picks:[], message:isLiveMode ? "Şu anda uygun dakika aralığında canlı maç bulunamadı." : "Seçilen tarihte başlamamış maç bulunamadı." };
 
@@ -1684,6 +1686,9 @@ async function runAutomaticDailyCoupon() {
 
 // Canlı tek tercih otomatik taraması: her 90 saniyede bir. Günün maç önü kuponu 2 saatte bir.
 setTimeout(() => { void runAutomaticLivePick(); }, 20000);
+// Günün maç önü kuponunu da sunucu açıldıktan kısa süre sonra dene;
+// yalnızca interval kullanılırsa ilk bildirim 2 saate kadar gecikebilirdi.
+setTimeout(() => { void runAutomaticDailyCoupon(); }, 30000);
 setInterval(() => { void runAutomaticLivePick(); }, 90 * 1000);
 setInterval(() => { void runAutomaticDailyCoupon(); }, 2 * 60 * 60 * 1000);
 
