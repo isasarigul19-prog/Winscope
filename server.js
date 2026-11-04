@@ -520,62 +520,25 @@ async function fetchTeamRecentForm(teamId, fixtureId, leagueId = null, season = 
 
 function liveStatsMetrics(stats, fixture) {
   const out = { available: false, shotsOnTarget: 0, totalShots: 0, corners: 0,
-    home: { shotsOnTarget: 0, totalShots: 0, corners: 0 }, away: { shotsOnTarget: 0, totalShots: 0, corners: 0 },
-    diagnostic: { expectedHomeId: Number(fixture.homeId) || null, expectedAwayId: Number(fixture.awayId) || null,
-      teamsReceived: 0, teamsMatched: 0, recognized: { home: [], away: [] }, received: [] } };
+    home: { shotsOnTarget: 0, totalShots: 0, corners: 0 }, away: { shotsOnTarget: 0, totalShots: 0, corners: 0 } };
   const seen = { home: new Set(), away: new Set() };
-  // API-Football normally returns an array. Accept common wrapped/object forms too,
-  // but never manufacture a statistic when the provider value is missing.
-  let rows = Array.isArray(stats) ? stats : Array.isArray(stats?.response) ? stats.response : [];
-  if (!rows.length && stats && typeof stats === "object") {
-    rows = [stats.home, stats.away].filter(Boolean).map(x => ({
-      team: x.team || { id: x.id, name: x.name },
-      statistics: x.statistics || x.stats || []
-    }));
-  }
-  const clean = value => String(value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  const homeName = clean(fixture.home), awayName = clean(fixture.away);
-  for (const team of rows) {
-    out.diagnostic.teamsReceived++;
-    const teamInfo = team.team || team;
-    const teamId = Number(teamInfo.id ?? team.teamId ?? team.id) || null;
-    const teamName = clean(teamInfo.name ?? team.name);
-    let side = teamId && teamId === Number(fixture.homeId) ? "home"
-      : teamId && teamId === Number(fixture.awayId) ? "away" : null;
-    // Name fallback is only used when IDs are missing, not when a conflicting ID exists.
-    if (!side && !teamId && teamName) {
-      if (teamName === homeName) side = "home";
-      else if (teamName === awayName) side = "away";
-    }
-    const statList = Array.isArray(team.statistics) ? team.statistics
-      : Array.isArray(team.stats) ? team.stats
-      : team.statistics && typeof team.statistics === "object" ? Object.entries(team.statistics).map(([type, value]) => ({type, value})) : [];
-    out.diagnostic.received.push({ id: teamId, name: teamInfo.name ?? team.name ?? null,
-      matched: side || null, types: statList.slice(0, 20).map(st => String(st.type ?? st.name ?? "")) });
+  for (const team of (Array.isArray(stats) ? stats : [])) {
+    const teamId = Number(team.team?.id);
+    const side = teamId === Number(fixture.homeId) ? "home" : teamId === Number(fixture.awayId) ? "away" : null;
     if (!side) continue;
-    out.diagnostic.teamsMatched++;
-    for (const st of statList) {
-      const type = clean(st.type ?? st.name ?? st.key);
-      const raw = st.value ?? st.val;
-      if (raw == null || String(raw).trim() === "" || /^[-—]+$/.test(String(raw).trim())) continue;
-      const match = String(raw).replace(/,/g, ".").match(/-?\d+(?:\.\d+)?/);
-      if (!match) continue;
-      const value = Number(match[0]);
+    for (const st of (team.statistics || [])) {
+      const type = String(st.type || "").toLowerCase();
+      if (st.value == null || String(st.value).trim() === "" || /^[-—]+$/.test(String(st.value).trim())) continue;
+      const value = Number(String(st.value).replace('%',''));
       if (!Number.isFinite(value)) continue;
-      if (/shots on goal|shots on target|shots on target inc goals/.test(type)) {
-        out.shotsOnTarget += value; out[side].shotsOnTarget += value; seen[side].add("shotsOnTarget"); out.diagnostic.recognized[side].push(String(st.type ?? st.name));
-      } else if (/total shots|goal attempts|total attempts/.test(type)) {
-        out.totalShots += value; out[side].totalShots += value; seen[side].add("totalShots"); out.diagnostic.recognized[side].push(String(st.type ?? st.name));
-      } else if (/corner kicks|corners|corner/.test(type)) {
-        out.corners += value; out[side].corners += value; seen[side].add("corners"); out.diagnostic.recognized[side].push(String(st.type ?? st.name));
-      }
+      if (/shots on goal|shots on target/.test(type)) { out.shotsOnTarget += value; out[side].shotsOnTarget += value; seen[side].add("shotsOnTarget"); }
+      else if (/total shots|goal attempts/.test(type)) { out.totalShots += value; out[side].totalShots += value; seen[side].add("totalShots"); }
+      else if (/corner kicks|corners/.test(type)) { out.corners += value; out[side].corners += value; seen[side].add("corners"); }
     }
   }
-  // Both teams must have at least one real, recognized stat; missing data is not treated as zero.
+  // A two-row response alone is not proof that usable live stats exist.
   out.available = seen.home.size > 0 && seen.away.size > 0;
   out.pressure = out.shotsOnTarget*2.5 + out.totalShots*0.45 + out.corners*0.8;
-  out.diagnostic.recognized.home = [...new Set(out.diagnostic.recognized.home)];
-  out.diagnostic.recognized.away = [...new Set(out.diagnostic.recognized.away)];
   return out;
 }
 
@@ -768,69 +731,6 @@ function liveMarketAlreadySettled(market, fixture) {
   return false;
 }
 
-
-function chooseLiveMarketWithoutStats(liveOddsRow, fixture, forms) {
-  // Fallback for leagues/fixtures where API-Football supplies no live statistics.
-  // This path uses only real live odds plus both teams' recent form; it never substitutes prematch odds.
-  if (!liveOddsRow || !forms?.home?.available || !forms?.away?.available) return null;
-  const minute = Number(fixture.minute || 0);
-  if (minute < 20 || minute > 80) return null;
-  const home = Number(fixture.homeScore || 0);
-  const away = Number(fixture.awayScore || 0);
-  const total = home + away;
-  let allowed = [];
-  if (minute < 33) {
-    allowed = total === 0 ? ["İY 0.5 ÜST"] : ["İY 1.5 ÜST"];
-  } else if (minute < 45) {
-    allowed = total === 0 ? ["MS 0.5 ÜST", "MS 1.5 ÜST"]
-      : total === 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST", "KG VAR"]
-      : ["MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
-  } else if (minute < 66) {
-    allowed = total === 0 ? ["MS 0.5 ÜST", "MS 1.5 ÜST"]
-      : total === 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST", "KG VAR"]
-      : total === 2 ? ["MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"]
-      : ["MS 3.5 ÜST", "KG VAR"];
-  } else if (minute <= 75) {
-    allowed = total === 0 ? ["MS 1.5 ÜST", "MS 2.5 ÜST"]
-      : total === 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST", "KG VAR"]
-      : total === 2 ? ["MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"]
-      : ["MS 3.5 ÜST"];
-  } else {
-    allowed = total <= 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST"]
-      : total === 2 ? ["MS 2.5 ÜST", "MS 3.5 ÜST"]
-      : ["MS 3.5 ÜST"];
-  }
-
-  const minMarketPct = {
-    "İY 0.5 ÜST": 58, "İY 1.5 ÜST": 50,
-    "MS 0.5 ÜST": 62, "MS 1.5 ÜST": 60,
-    "MS 2.5 ÜST": 58, "MS 3.5 ÜST": 48, "KG VAR": 58
-  };
-  const minFormPct = {
-    "İY 0.5 ÜST": 52, "İY 1.5 ÜST": 45,
-    "MS 0.5 ÜST": 54, "MS 1.5 ÜST": 54,
-    "MS 2.5 ÜST": 54, "MS 3.5 ÜST": 48, "KG VAR": 54
-  };
-  const choices = oddsForFixture(liveOddsRow).filter(row =>
-    allowed.includes(row.market) &&
-    !liveMarketAlreadySettled(row.market, fixture) &&
-    Number(row.odd) >= 1.15 &&
-    Number(row.probability) >= (minMarketPct[row.market] ?? 60)
-  ).map(row => {
-    const formPct = marketSupport(row.market, forms.home, forms.away);
-    if (!Number.isFinite(Number(formPct)) || formPct < (minFormPct[row.market] ?? 54)) return null;
-    return {
-      ...row,
-      oddsTiming: "live",
-      formPct: Number(formPct),
-      score: Number(row.probability) * 0.60 + Number(formPct) * 0.40
-    };
-  }).filter(Boolean).sort((a, b) =>
-    b.score - a.score || b.probability - a.probability
-  );
-  return choices[0] || null;
-}
-
 function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOddsRow, excludeMarket = null, preferredMarket = null) {
   const live = mode === "live";
   const total = Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0);
@@ -1003,19 +903,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     // Prefer probability supported by both market and form, while rewarding genuine price value;
     // never choose a long price merely because the odds are high.
     const valueBonus = valueEdge == null ? 0 : Math.max(-8, Math.min(8, valueEdge * 0.45));
-    // Araştırma temelli sıralama: piyasa olasılığı ana dayanak, son-5 form destekleyici,
-    // canlı baskı ise yalnızca canlı maçlarda ek kanıt. Bu bir kazanma garantisi değil;
-    // ağırlıklar başlangıç ayarıdır ve sonuçlarla kalibre edilmelidir.
-    const pressureConfidence = live
-      ? Math.max(0, Math.min(100,
-          Number(statsM.pressure || 0) * 2.6 +
-          Number(statsM.shotsOnTarget || 0) * 4 +
-          Math.min(8, Number(statsM.corners || 0) * 1.5)))
-      : 0;
-    const score = Number(choice.probability || 0) * 0.60
-      + (formPct == null ? 0 : Number(formPct) * 0.25)
-      + (live ? pressureConfidence * 0.15 : 0)
-      + liveBonus * 0.20 + valueBonus
+    const score = choice.probability * 0.62 + (formPct == null ? 0 : formPct * 0.20) + liveBonus + valueBonus
       - (live && choice.market === "MS 3.5 ÜST" ? Math.max(0, minute - 65) * 0.4 : 0);
     return {
       ...choice,
@@ -1301,7 +1189,6 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   }
   const candidates = [], errors = [];
   const rejected = { noOdds: 0, noIds: 0, noForm: 0, noStats: 0, noMarket: 0, noSignal: 0, apiErrors: 0, duplicate: 0 };
-  const liveNoSignalDetails = [];
   let fixturesToAnalyze = fixtures;
   if (!isLiveMode) {
     const withBulkOdds = fixtures.filter(f => dateOdds.has(f.id));
@@ -1332,139 +1219,33 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
           fetchTeamRecentForm(fixture.awayId, fixture.id, fixture.leagueId, fixture.season, "away")
         ]);
         prematchOddsRow = (prePayload.response || []).find(row=>Number(row.fixture?.id)===fixture.id) || null;
-        const liveOddsRow = (liveOddsPayload.response || []).find(row=>Number(row.fixture?.fixture?.id ?? row.fixture?.id ?? row.fixtureId)===fixture.id) || null;
-        // Canlı tercih için yalnızca gerçek canlı oranı kabul et; maç önü oranı canlı oran yerine geçmez.
-        marketOddsRow = liveOddsRow;
+        // Live odds providers may return a fixture in the bulk live feed even when
+        // the fixture-specific query is empty. Check both shapes, without substituting
+        // pre-match odds for a live price in the live selection logic.
+        let liveOddsRow = (liveOddsPayload.response || []).find(row=>Number(row.fixture?.fixture?.id ?? row.fixture?.id ?? row.fixtureId ?? row.id)===fixture.id) || null;
+        if (!liveOddsRow) {
+          try {
+            const allLiveOddsPayload = await cachedProviderRequest("odds-live-all", "/odds/live", 10000);
+            liveOddsRow = (allLiveOddsPayload.response || []).find(row=>Number(row.fixture?.fixture?.id ?? row.fixture?.id ?? row.fixtureId ?? row.id)===fixture.id) || null;
+            console.log(`[LIVE ODDS BULK CHECK] ${JSON.stringify({match:`${fixture.home} - ${fixture.away}`,fixtureId:fixture.id,fixtureQueryResults:(liveOddsPayload.response||[]).length,bulkResults:(allLiveOddsPayload.response||[]).length,bulkMatchFound:Boolean(liveOddsRow)})}`);
+          } catch (e) {
+            console.warn(`[LIVE ODDS BULK ERROR] fixture=${fixture.id}: ${e.message}`);
+          }
+        }
+        marketOddsRow = liveOddsRow || prematchOddsRow;
         const statsRows = statsPayload.response || [];
         const stats = liveStatsMetrics(statsRows, fixture);
-        if (!marketOddsRow) { rejected.noOdds++; continue; }
-        if (!stats.available) {
-          rejected.noStats++;
-          // Record the provider response and coverage once the fixture has no usable live stats.
-          console.warn(`[LIVE STATS API RESPONSE] ${JSON.stringify({
-            match: `${fixture.home} - ${fixture.away}`, fixtureId: fixture.id,
-            leagueId: fixture.leagueId, season: fixture.season, minute: fixture.minute,
-            score: `${fixture.homeScore}-${fixture.awayScore}`,
-            httpPayloadPresent: Boolean(statsPayload), results: Number(statsPayload?.results ?? statsRows.length ?? 0),
-            providerErrors: statsPayload?.errors || [], responseIsArray: Array.isArray(statsPayload?.response),
-            responseLength: statsRows.length, firstRowKeys: statsRows[0] ? Object.keys(statsRows[0]) : [],
-            ...stats.diagnostic
-          })}`);
-          // Check the provider's advertised coverage for this exact league-season; cached for 24h.
-          let coverageDiagnostic = null;
-          try {
-            const coveragePayload = await cachedProviderRequest(
-              `league-coverage:${fixture.leagueId}:${fixture.season}`,
-              `/leagues?id=${encodeURIComponent(fixture.leagueId)}&season=${encodeURIComponent(fixture.season)}`,
-              24 * 60 * 60 * 1000
-            );
-            const leagueRow = (coveragePayload.response || []).find(row =>
-              Number(row.league?.id) === Number(fixture.leagueId)
-            ) || (coveragePayload.response || [])[0] || null;
-            const seasonRow = (leagueRow?.seasons || []).find(row =>
-              Number(row.year) === Number(fixture.season)
-            ) || null;
-            coverageDiagnostic = {
-              leagueFound: Boolean(leagueRow),
-              leagueName: leagueRow?.league?.name || null,
-              requestedSeason: Number(fixture.season) || null,
-              seasonFound: Boolean(seasonRow),
-              coverage: seasonRow?.coverage || leagueRow?.coverage || null,
-              providerErrors: coveragePayload.errors || []
-            };
-          } catch (coverageError) {
-            coverageDiagnostic = { lookupFailed: true, message: coverageError.message };
-          }
-          console.warn(`[LIVE STATS MISSING] ${JSON.stringify({match:`${fixture.home} - ${fixture.away}`, fixtureId:fixture.id, leagueId:fixture.leagueId, season:fixture.season, minute:fixture.minute, score:`${fixture.homeScore}-${fixture.awayScore}`, ...stats.diagnostic})}`);
-          console.warn(`[LIVE LEAGUE COVERAGE] ${JSON.stringify({match:`${fixture.home} - ${fixture.away}`, fixtureId:fixture.id, leagueId:fixture.leagueId, season:fixture.season, coverage:coverageDiagnostic})}`);
-
-          // Safe fallback: only real live odds + both teams' recent form; never fake stats or use prematch odds as live odds.
-          if (!homeForm.available || !awayForm.available) {
-            rejected.noForm++;
-            continue;
-          }
-          const fallback = chooseLiveMarketWithoutStats(liveOddsRow, fixture, {home:homeForm, away:awayForm});
-          if (!fallback) {
-            rejected.noSignal++;
-            liveNoSignalDetails.push({
-              match: `${fixture.home} - ${fixture.away}`,
-              minute: fixture.minute,
-              score: `${fixture.homeScore}-${fixture.awayScore}`,
-              liveMarkets: [...new Set(oddsForFixture(liveOddsRow).map(x => x.market))].slice(0, 12),
-              reason: "istatistik_yok; canli_oran_ve_son5_form_fallback_esiklerini_gecmedi"
-            });
-            continue;
-          }
-          const fallbackBasis = `İstatistik bulunamadı; gerçek canlı oran + iki takımın son 5 maç formu kullanıldı (${fallback.bookmaker})`;
-          candidates.push({
-            fixtureId: fixture.id, league: fixture.league, country: fixture.country,
-            home: fixture.home, away: fixture.away, fixtureDate: fixture.fixtureDate,
-            market: fallback.market, alternativeMarket: null,
-            pressureSide: "Belirlenemedi", pressureTeam: null,
-            alternativeBasis: "Canlı istatistik bulunmadığı için baskı yönü ve alternatif tercih üretilmedi.",
-            source: fallback.bookmaker, oddsTiming: "live",
-            internalOdd: fallback.odd, marketProbability: fallback.probability,
-            formSupport: fallback.formPct, score: fallback.score,
-            minute: fixture.minute, currentScore: `${fixture.homeScore}-${fixture.awayScore}`,
-            isLive: true, statsAvailable: false, oddsBasis: fallbackBasis,
-            statsSummary: null
-          });
-          console.warn(`[LIVE FORM-ODDS FALLBACK PICK] ${JSON.stringify({
-            match: `${fixture.home} - ${fixture.away}`, fixtureId: fixture.id,
-            market: fallback.market, bookmaker: fallback.bookmaker,
-            minute: fixture.minute, score: `${fixture.homeScore}-${fixture.awayScore}`,
-            marketProbability: fallback.probability, formSupport: fallback.formPct
-          })}`);
+        if (!marketOddsRow) {
+          rejected.noOdds++;
+          console.warn(`[LIVE ODDS MISSING] ${JSON.stringify({match:`${fixture.home} - ${fixture.away}`,fixtureId:fixture.id,liveOddsResults:(liveOddsPayload.response||[]).length,prematchOddsFound:Boolean(prematchOddsRow),statsRows:statsRows.length,statsAvailable:stats.available})}`);
           continue;
         }
+        if (!stats.available) { rejected.noStats++; continue; }
         if (!homeForm.available || !awayForm.available) { rejected.noForm++; continue; }
-        let chosen = chooseSupportedMarket(liveOddsRow, mode, fixture, {home:homeForm,away:awayForm}, stats, prematchOddsRow);
-        // Secondary live path: the strict market/pressure gates can reject every market
-        // even when a real live price, both teams' last-five form, and usable live stats exist.
-        // Keep the strict model first; only if it returns no pick, allow the existing
-        // score/minute-aware live-odds + form selector with a modest minimum pressure signal.
-        // This never uses prematch odds as live odds and never fabricates statistics.
-        if (!chosen && stats.available) {
-          const hasLivePressureSignal = Number(stats.pressure || 0) >= 8 ||
-            Number(stats.shotsOnTarget || 0) >= 2 || Number(stats.totalShots || 0) >= 8;
-          if (hasLivePressureSignal) {
-            const secondary = chooseLiveMarketWithoutStats(liveOddsRow, fixture, {home:homeForm, away:awayForm});
-            if (secondary) {
-              const pressureBoost = Math.min(8,
-                Number(stats.pressure || 0) * 0.12 +
-                Number(stats.shotsOnTarget || 0) * 0.8 +
-                Number(stats.corners || 0) * 0.25);
-              chosen = { ...secondary, score: Number(secondary.score || 0) + pressureBoost,
-                fallbackUsed: true, fallbackReason: "strict live thresholds not met; secondary real-live-odds + last-five-form path passed" };
-              console.warn(`[LIVE STATS FORM-ODDS FALLBACK PICK] ${JSON.stringify({
-                match: `${fixture.home} - ${fixture.away}`, fixtureId: fixture.id,
-                market: chosen.market, bookmaker: chosen.bookmaker,
-                minute: fixture.minute, score: `${fixture.homeScore}-${fixture.awayScore}`,
-                liveProbability: chosen.probability, formSupport: chosen.formPct,
-                pressure: Number(stats.pressure || 0), shotsOnTarget: Number(stats.shotsOnTarget || 0),
-                totalShots: Number(stats.totalShots || 0), corners: Number(stats.corners || 0)
-              })}`);
-            }
-          }
-        }
-        if (!chosen) {
-          rejected.noSignal++;
-          const availableMarkets = oddsForFixture(liveOddsRow).map(x => x.market);
-          liveNoSignalDetails.push({
-            match: `${fixture.home} - ${fixture.away}`,
-            minute: fixture.minute,
-            score: `${fixture.homeScore}-${fixture.awayScore}`,
-            liveMarkets: [...new Set(availableMarkets)].slice(0, 12),
-            pressure: Number(stats.pressure || 0),
-            shotsOnTarget: Number(stats.shotsOnTarget || 0),
-            totalShots: Number(stats.totalShots || 0),
-            corners: Number(stats.corners || 0),
-            reason: availableMarkets.length ? "canli_pazar_var_ama_esik_veya_dakika_skor_kurali_gecmedi" : "canli_oran_yanitinda_desteklenen_pazar_yok"
-          });
-          continue;
-        }
+        const chosen = chooseSupportedMarket(liveOddsRow, mode, fixture, {home:homeForm,away:awayForm}, stats, prematchOddsRow);
+        if (!chosen) { rejected.noSignal++; continue; }
         oddsBasis = chosen.oddsTiming === "live"
-          ? `Gerçek canlı oran · ${chosen.bookmaker}${chosen.fallbackUsed ? " · alternatif canlı oran + son 5 maç formu eşiği" : ""}`
+          ? `Gerçek canlı oran · ${chosen.bookmaker}`
           : `Canlı oran bulunamadı; maç önü oranı · ${chosen.bookmaker} (canlı oran değildir)`;
         const alternative = teamGoalAlternative(fixture, {home:homeForm, away:awayForm}, stats, liveOddsRow, prematchOddsRow);
         candidates.push({
@@ -1477,7 +1258,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
           internalOdd: chosen.odd, marketProbability: chosen.probability,
           formSupport: chosen.formPct, score: chosen.score,
           minute: fixture.minute, currentScore: `${fixture.homeScore}-${fixture.awayScore}`,
-          isLive: true, statsAvailable: true, oddsBasis,
+          isLive: true, oddsBasis,
           statsSummary: [
             `İsabetli şut: ${stats.shotsOnTarget}`,
             `Toplam şut: ${stats.totalShots}`,
@@ -1514,24 +1295,21 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
     ? candidates.filter(p => !autoSentFixtureKeys.has(autoLivePickKey(mode, date, p)))
     : candidates;
   rejected.duplicate = candidates.length - availableCandidates.length;
-  console.log(`[COUPON SCAN ${mode.toUpperCase()}] date=${date} live=${isLiveMode} fixtures=${allFixtures.length} prioritized=${fixtures.length} analyzed=${analyzedFixtures} candidates=${candidates.length} available=${availableCandidates.length} rejected=${JSON.stringify(rejected)} oddsPolicy=${isLiveMode ? "live-odds-only" : "prematch-odds-only"} model=market60-form25-livePressure15 seasonStats=home-away-blend youthReserveWomen=excluded oddsPagesMax=50 errors=${errors.length}`);
-  if (isLiveMode && liveNoSignalDetails.length) {
-    console.log(`[LIVE SIGNAL DIAGNOSTICS] ${JSON.stringify(liveNoSignalDetails.slice(0, 8))}`);
-  }
+  console.log(`[COUPON SCAN ${mode.toUpperCase()}] date=${date} live=${isLiveMode} fixtures=${allFixtures.length} prioritized=${fixtures.length} analyzed=${analyzedFixtures} candidates=${candidates.length} available=${availableCandidates.length} rejected=${JSON.stringify(rejected)} seasonStats=home-away-blend youthReserveWomen=excluded oddsPagesMax=50 errors=${errors.length}`);
   availableCandidates.sort((a,b)=>b.score-a.score || b.formSupport-a.formSupport || a.internalOdd-b.internalOdd);
   const count = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
   const chosen = availableCandidates.slice(0,count);
   if (!chosen.length || (mode === "prematch" && chosen.length < 2)) {
     const needed = mode === "prematch" ? 2 : 1;
     return {draftId:`coupon-${Date.now()}`,date,type:mode,status:"NO_MATCHES",picks:[],
-      message:`${isLiveMode ? "Canlı oran + son 5 maç formu + canlı istatistik" : "Maç önü oranı + son 5 maç formu"} eşiklerini geçen yeterli maç yok (gereken: ${needed}). Kupon zorlanmadı.`,
+      message:`Maç önü oranı + son 5 maç formu${isLiveMode ? " + canlı istatistik" : ""} eşiklerini geçen yeterli maç yok (gereken: ${needed}). Kupon zorlanmadı.`,
       detail:`Fikstür: ${allFixtures.length}; oran sayfasından eşleşen: ${dateOdds.size}; form/statistik için incelenen: ${fixturesToAnalyze.length}; aday: ${candidates.length}; elenme: oran=${rejected.noOdds}, form=${rejected.noForm}, canlı-istatistik=${rejected.noStats}, piyasa-sinyali=${rejected.noSignal}, API-hatası=${rejected.apiErrors}, tekrar=${rejected.duplicate}. ${errors.slice(0,2).join(" | ")}`};
   }
   // internalOdd / score iç skorlama; canlı kupon Telegram'da olasılık + form + dk/skor gösterilsin.
   const publicPicks = chosen.map(({ internalOdd, score, ...p }) => p);
   const draftId = `coupon-${Date.now()}`;
   const coupon = {draftId,date,type:mode,isLive:isLiveMode,status:"READY",picks:publicPicks,autoGenerated:Boolean(options.automatic),
-    message:mode==="live" ? (publicPicks.some(p => p.statsAvailable === false) ? "Tek canlı tercih: canlı istatistik bulunmadığı için yalnızca gerçek canlı oranlar + son 5 maç formu kullanıldı; baskı verisi üretilmedi." : "Tek canlı tercih: yalnızca gerçek canlı oranlar; mevcut dakika/skor + son 5 maç formu + canlı şut/korner baskısı değerlendirildi.") :
+    message:mode==="live" ? "Tek canlı tercih: yalnızca maç önü oranı kullanıldı; dakika/skor + son 5 maç formu + canlı şut/korner baskısı değerlendirildi." :
       mode==="surprise" ? `Sürpriz kupon: ${publicPicks.length} maç (en fazla 10); yalnızca oran ve son 5 maç formu eşiğini geçen adaylar eklendi.` :
       "Maç önü kuponu: en az iki maç, maç önü son mevcut oran ve son 5 gerçek skor formu birlikte değerlendirildi."};
   const archiveCoupon = {date,type:mode,picks:publicPicks,createdAt:new Date().toISOString()};
@@ -1761,22 +1539,17 @@ app.get("/api/coupon/surprise", async (req, res) => {
   try { res.json(await createCouponByMode(String(req.query.date || ""), "surprise")); }
   catch (e) { res.status(502).json({ status: "ERROR", type: "surprise", picks: [], error: "10 maçlık sürpriz kupon oluşturulamadı.", detail: e.message }); }
 });
-async function liveCouponHandler(req, res) {
-  try {
-    // Tek güvenilir canlı tercih aktiftir; canlı kombin endpoint'i ise ayrı olarak kapalı kalır.
-    const date = String(req.query.date || turkeyDateString());
-    const result = await createCouponByMode(date, "live");
-    return res.json(result);
-  } catch (e) {
-    return res.status(502).json({ status: "ERROR", type: "live", picks: [], error: "Canlı tek tercih oluşturulamadı.", detail: e.message });
-  }
-}
-async function disabledLiveComboHandler(_req, res) {
-  return res.json({ status: "DISABLED", type: "live-combo", picks: [], error: "Canlı kombin kapalı. Yalnızca tek canlı tercih özelliği kullanılabilir." });
+async function liveCouponHandler(_req, res) {
+  res.json({
+    status: "DISABLED",
+    type: "live",
+    picks: [],
+    error: "Canlı analiz şimdilik kapalı. Canlı maçlar yalnızca listelenir; analiz maç önü oranlarıyla yapılır."
+  });
 }
 app.get("/api/coupon/live-best", liveCouponHandler);
 app.get("/api/coupon/live", liveCouponHandler);
-app.get("/api/live-combo", disabledLiveComboHandler);
+app.get("/api/live-combo", liveCouponHandler);
 
 app.post("/api/analyses/approve", async (req, res) => {
   const body = req.body || {};
