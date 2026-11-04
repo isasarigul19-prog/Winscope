@@ -1278,23 +1278,44 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
         marketOddsRow = liveOddsRow || prematchOddsRow;
         const statsRows = statsPayload.response || [];
         const stats = liveStatsMetrics(statsRows, fixture);
-        if (!stats.available) { rejected.noStats++; continue; }
         if (!homeForm.available || !awayForm.available) { rejected.noForm++; continue; }
+        const minuteNow = Number(fixture.minute || 0);
+        const totalNow = Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0);
+        const homeHTPct = Number(homeForm.htOver05Pct);
+        const awayHTPct = Number(awayForm.htOver05Pct);
+        const hasHTSamples = Number(homeForm.htSampleSize || 0) >= 5 && Number(awayForm.htSampleSize || 0) >= 5;
+        const combinedHTPct = Number.isFinite(homeHTPct) && Number.isFinite(awayHTPct) ? homeHTPct + awayHTPct : 0;
+        const firstHalfFormCandidate = minuteNow >= 20 && minuteNow <= 32 && totalNow === 0 &&
+          hasHTSamples && combinedHTPct >= 130;
+        if (!stats.available) {
+          rejected.noStats++;
+          // Do not discard a strong first-half form signal solely because the live
+          // stats endpoint is empty. This is explicitly marked FORM-ONLY; no live
+          // activity/pressure is claimed when the stats are unavailable.
+          if (firstHalfFormCandidate) {
+            const formSupport = Math.round(combinedHTPct / 2);
+            candidates.push({
+              fixtureId: fixture.id, league: fixture.league, country: fixture.country,
+              home: fixture.home, away: fixture.away, fixtureDate: fixture.fixtureDate,
+              market: "İY 0.5 ÜST", alternativeMarket: null,
+              source: "Son 5 maç ilk yarı gol yüzdesi (canlı istatistik yok)", oddsTiming: "form-only-fallback",
+              internalOdd: null, marketProbability: null, formSupport, score: formSupport,
+              minute: minuteNow, currentScore: `${fixture.homeScore}-${fixture.awayScore}`,
+              isLive: true, oddsBasis: "Canlı istatistik ve doğrulanmış hareketlilik yok; yalnızca son 5 maç İY 0.5 üst yüzdeleri toplamı ≥130%",
+              statsSummary: [`İY 0.5 üst son 5 maç: ev %${homeHTPct} · dep %${awayHTPct} · toplam %${combinedHTPct}`,
+                "Canlı istatistik bulunamadı; canlı baskı doğrulanmadı."]
+            });
+            console.log(`[LIVE HT FORM-ONLY FALLBACK] ${fixture.home} - ${fixture.away} minute=${minuteNow} homeHT=${homeHTPct} awayHT=${awayHTPct} combined=${combinedHTPct} statsAvailable=false`);
+          }
+          continue;
+        }
         if (!marketOddsRow) {
-          // Special, narrowly-scoped fallback: 20–32' at 0-0, both teams have
-          // scored in the first half in >=75% of their last five matches, and
-          // live match activity is present. This is form-based, not odds-backed.
-          const minuteNow = Number(fixture.minute || 0);
-          const totalNow = Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0);
-          const homeHTPct = Number(homeForm.htOver05Pct);
-          const awayHTPct = Number(awayForm.htOver05Pct);
+          // Fallback when odds are missing: combined first-half goal rate >=130%
+          // over the last five matches, with verified live activity at 20–32' and 0-0.
           const activeNow = Number(stats.pressure || 0) >= 3.5 || Number(stats.shotsOnTarget || 0) >= 1 ||
             Number(stats.totalShots || 0) >= 5 || Number(stats.corners || 0) >= 2;
-          if (minuteNow >= 20 && minuteNow <= 32 && totalNow === 0 &&
-              Number(homeForm.htSampleSize || 0) >= 5 && Number(awayForm.htSampleSize || 0) >= 5 &&
-              Number.isFinite(homeHTPct) && Number.isFinite(awayHTPct) &&
-              homeHTPct >= 75 && awayHTPct >= 75 && activeNow) {
-            const formSupport = Math.round((homeHTPct + awayHTPct) / 2);
+          if (firstHalfFormCandidate && activeNow) {
+            const formSupport = Math.round(combinedHTPct / 2);
             candidates.push({
               fixtureId: fixture.id, league: fixture.league, country: fixture.country,
               home: fixture.home, away: fixture.away, fixtureDate: fixture.fixtureDate,
@@ -1302,15 +1323,15 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
               source: "Son 5 maç ilk yarı gol yüzdesi", oddsTiming: "form-fallback",
               internalOdd: null, marketProbability: null, formSupport, score: formSupport,
               minute: minuteNow, currentScore: `${fixture.homeScore}-${fixture.awayScore}`,
-              isLive: true, oddsBasis: "Canlı ve maç önü oranı bulunamadı; yalnızca son 5 maç İY gol yüzdesi + canlı hareketlilik",
-              statsSummary: [`İY 0.5 üst son 5 maç: ev %${homeHTPct} · dep %${awayHTPct}`,
+              isLive: true, oddsBasis: "Canlı ve maç önü oranı bulunamadı; son 5 maç İY yüzdeleri toplamı ≥130% + doğrulanmış canlı hareketlilik",
+              statsSummary: [`İY 0.5 üst son 5 maç: ev %${homeHTPct} · dep %${awayHTPct} · toplam %${combinedHTPct}`,
                 `İsabetli şut: ${stats.shotsOnTarget}`, `Toplam şut: ${stats.totalShots}`,
                 `Korner: ${stats.corners}`, `Baskı skoru: ${Number(stats.pressure || 0).toFixed(1)}`]
             });
-            console.log(`[LIVE HT FORM FALLBACK] ${fixture.home} - ${fixture.away} minute=${minuteNow} homeHT=${homeHTPct} awayHT=${awayHTPct}`);
+            console.log(`[LIVE HT FORM FALLBACK] ${fixture.home} - ${fixture.away} minute=${minuteNow} homeHT=${homeHTPct} awayHT=${awayHTPct} combined=${combinedHTPct}`);
           } else {
             rejected.noOdds++;
-            console.warn(`[LIVE ODDS MISSING] ${JSON.stringify({match:`${fixture.home} - ${fixture.away}`,fixtureId:fixture.id,liveOddsResults:(liveOddsPayload.response||[]).length,prematchOddsFound:Boolean(prematchOddsRow),statsRows:statsRows.length,statsAvailable:stats.available,homeHTPct:Number.isFinite(homeHTPct)?homeHTPct:null,awayHTPct:Number.isFinite(awayHTPct)?awayHTPct:null})}`);
+            console.warn(`[LIVE ODDS MISSING] ${JSON.stringify({match:`${fixture.home} - ${fixture.away}`,fixtureId:fixture.id,liveOddsResults:(liveOddsPayload.response||[]).length,prematchOddsFound:Boolean(prematchOddsRow),statsRows:statsRows.length,statsAvailable:stats.available,homeHTPct:Number.isFinite(homeHTPct)?homeHTPct:null,awayHTPct:Number.isFinite(awayHTPct)?awayHTPct:null,combinedHTPct})}`);
           }
           continue;
         }
