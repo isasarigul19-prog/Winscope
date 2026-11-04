@@ -985,6 +985,15 @@ function couponMessage(coupon) {
 }
 
 
+function providerOddsFixtureId(row) {
+  const candidates = [row?.fixture?.id, row?.fixture?.fixture?.id, row?.fixtureId, row?.fixture_id, row?.id];
+  for (const value of candidates) {
+    const n = Number(value);
+    if (Number.isInteger(n) && n > 0) return n;
+  }
+  return null;
+}
+
 async function getOddsForFixture(fixtureId, date) {
   // Reuse date-level odds first, then query the exact fixture. Preserve errors so
   // diagnostics can distinguish an unsupported/empty market from an API failure.
@@ -1216,23 +1225,22 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
       if (isLiveMode) {
         const [prePayload, liveOddsPayload, statsPayload, homeForm, awayForm] = await Promise.all([
           cachedProviderRequest(`odds-fixture:${fixture.id}`, `/odds?fixture=${fixture.id}`, 90000).catch(()=>({response:[]})),
-          cachedProviderRequest(`odds-live-fixture:${fixture.id}`, `/odds/live?fixture=${fixture.id}`, 10000).catch(()=>({response:[]})),
-          cachedProviderRequest(`stats:${fixture.id}`, `/fixtures/statistics?fixture=${fixture.id}`, 15000),
+          cachedProviderRequest("odds-live-all", "/odds/live", 60000).catch(()=>({response:[]})),
+          cachedProviderRequest(`stats:${fixture.id}`, `/fixtures/statistics?fixture=${fixture.id}`, 60000),
           fetchTeamRecentForm(fixture.homeId, fixture.id, fixture.leagueId, fixture.season, "home"),
           fetchTeamRecentForm(fixture.awayId, fixture.id, fixture.leagueId, fixture.season, "away")
         ]);
-        prematchOddsRow = (prePayload.response || []).find(row=>Number(row.fixture?.id)===fixture.id) || null;
-        // Live odds providers may return a fixture in the bulk live feed even when
-        // the fixture-specific query is empty. Check both shapes, without substituting
-        // pre-match odds for a live price in the live selection logic.
-        let liveOddsRow = (liveOddsPayload.response || []).find(row=>Number(row.fixture?.fixture?.id ?? row.fixture?.id ?? row.fixtureId ?? row.id)===fixture.id) || null;
+        prematchOddsRow = (prePayload.response || []).find(row=>providerOddsFixtureId(row)===Number(fixture.id)) || null;
+        // Use the bulk live-odds response first; it is cached across fixtures.
+        // Only call the fixture endpoint if the bulk feed does not contain this match.
+        let liveOddsRow = (liveOddsPayload.response || []).find(row=>providerOddsFixtureId(row)===Number(fixture.id)) || null;
         if (!liveOddsRow) {
           try {
-            const allLiveOddsPayload = await cachedProviderRequest("odds-live-all", "/odds/live", 10000);
-            liveOddsRow = (allLiveOddsPayload.response || []).find(row=>Number(row.fixture?.fixture?.id ?? row.fixture?.id ?? row.fixtureId ?? row.id)===fixture.id) || null;
-            console.log(`[LIVE ODDS BULK CHECK] ${JSON.stringify({match:`${fixture.home} - ${fixture.away}`,fixtureId:fixture.id,fixtureQueryResults:(liveOddsPayload.response||[]).length,bulkResults:(allLiveOddsPayload.response||[]).length,bulkMatchFound:Boolean(liveOddsRow)})}`);
+            const singleLivePayload = await cachedProviderRequest(`odds-live-fixture:${fixture.id}`, `/odds/live?fixture=${fixture.id}`, 60000);
+            liveOddsRow = (singleLivePayload.response || []).find(row=>providerOddsFixtureId(row)===Number(fixture.id)) || null;
+            console.log(`[LIVE ODDS MATCH] ${JSON.stringify({match:`${fixture.home} - ${fixture.away}`,fixtureId:fixture.id,bulkResults:(liveOddsPayload.response||[]).length,fixtureResults:(singleLivePayload.response||[]).length,matchFound:Boolean(liveOddsRow),sampleFixtureIds:(liveOddsPayload.response||[]).slice(0,5).map(providerOddsFixtureId)})}`);
           } catch (e) {
-            console.warn(`[LIVE ODDS BULK ERROR] fixture=${fixture.id}: ${e.message}`);
+            console.warn(`[LIVE ODDS FIXTURE ERROR] fixture=${fixture.id}: ${e.message}`);
           }
         }
         marketOddsRow = liveOddsRow || prematchOddsRow;
@@ -1273,7 +1281,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
         marketOddsRow = dateOdds.get(fixture.id) || null;
         if (!marketOddsRow) {
           const payload = await cachedProviderRequest(`odds-fixture:${fixture.id}`, `/odds?fixture=${fixture.id}`, 90000);
-          marketOddsRow = (payload.response || []).find(row=>Number(row.fixture?.id)===fixture.id) || null;
+          marketOddsRow = (payload.response || []).find(row=>providerOddsFixtureId(row)===Number(fixture.id)) || null;
         }
         if (!marketOddsRow) { rejected.noOdds++; continue; }
         if (!fixture.homeId || !fixture.awayId) { rejected.noIds++; continue; }
@@ -1376,7 +1384,7 @@ app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
     }
     const [row, statsPayload, liveOddsPayload] = await Promise.all([
       getFixtureForLiveAnalysis(fixtureId),
-      cachedProviderRequest(`stats:${fixtureId}`, `/fixtures/statistics?fixture=${fixtureId}`, 15000).catch(e => {
+      cachedProviderRequest(`stats:${fixtureId}`, `/fixtures/statistics?fixture=${fixtureId}`, 60000).catch(e => {
         console.warn(`[Live analysis] stats failed fixture=${fixtureId}: ${e.message}`); return { response: [] };
       }),
       cachedProviderRequest(`odds-live-fixture:${fixtureId}`, `/odds/live?fixture=${fixtureId}`, 10000).catch(e => {
@@ -1391,7 +1399,7 @@ app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
     if (fixture.status !== "LIVE") {
       return res.status(409).json({ error: "Bu maç API tarafından canlı olarak işaretlenmiyor; canlı gol analizi yapılmadı." });
     }
-    const liveOddsRow = (liveOddsPayload.response || []).find(x => Number(x.fixture?.fixture?.id ?? x.fixture?.id ?? x.fixtureId) === fixtureId) || null;
+    const liveOddsRow = (liveOddsPayload.response || []).find(x => providerOddsFixtureId(x) === Number(fixtureId)) || null;
     const stats = liveStatsMetrics(statsPayload.response || [], fixture);
     if (!stats.available) {
       return res.json({ fixtureId, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute: fixture.minute,
