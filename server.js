@@ -1418,7 +1418,35 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
           continue;
         }
         if (!homeForm.available || !awayForm.available) { rejected.noForm++; continue; }
-        const chosen = chooseSupportedMarket(liveOddsRow, mode, fixture, {home:homeForm,away:awayForm}, stats, prematchOddsRow);
+        let chosen = chooseSupportedMarket(liveOddsRow, mode, fixture, {home:homeForm,away:awayForm}, stats, prematchOddsRow);
+        // Secondary live path: the strict market/pressure gates can reject every market
+        // even when a real live price, both teams' last-five form, and usable live stats exist.
+        // Keep the strict model first; only if it returns no pick, allow the existing
+        // score/minute-aware live-odds + form selector with a modest minimum pressure signal.
+        // This never uses prematch odds as live odds and never fabricates statistics.
+        if (!chosen && stats.available) {
+          const hasLivePressureSignal = Number(stats.pressure || 0) >= 8 ||
+            Number(stats.shotsOnTarget || 0) >= 2 || Number(stats.totalShots || 0) >= 8;
+          if (hasLivePressureSignal) {
+            const secondary = chooseLiveMarketWithoutStats(liveOddsRow, fixture, {home:homeForm, away:awayForm});
+            if (secondary) {
+              const pressureBoost = Math.min(8,
+                Number(stats.pressure || 0) * 0.12 +
+                Number(stats.shotsOnTarget || 0) * 0.8 +
+                Number(stats.corners || 0) * 0.25);
+              chosen = { ...secondary, score: Number(secondary.score || 0) + pressureBoost,
+                fallbackUsed: true, fallbackReason: "strict live thresholds not met; secondary real-live-odds + last-five-form path passed" };
+              console.warn(`[LIVE STATS FORM-ODDS FALLBACK PICK] ${JSON.stringify({
+                match: `${fixture.home} - ${fixture.away}`, fixtureId: fixture.id,
+                market: chosen.market, bookmaker: chosen.bookmaker,
+                minute: fixture.minute, score: `${fixture.homeScore}-${fixture.awayScore}`,
+                liveProbability: chosen.probability, formSupport: chosen.formPct,
+                pressure: Number(stats.pressure || 0), shotsOnTarget: Number(stats.shotsOnTarget || 0),
+                totalShots: Number(stats.totalShots || 0), corners: Number(stats.corners || 0)
+              })}`);
+            }
+          }
+        }
         if (!chosen) {
           rejected.noSignal++;
           const availableMarkets = oddsForFixture(liveOddsRow).map(x => x.market);
@@ -1436,7 +1464,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
           continue;
         }
         oddsBasis = chosen.oddsTiming === "live"
-          ? `Gerçek canlı oran · ${chosen.bookmaker}`
+          ? `Gerçek canlı oran · ${chosen.bookmaker}${chosen.fallbackUsed ? " · alternatif canlı oran + son 5 maç formu eşiği" : ""}`
           : `Canlı oran bulunamadı; maç önü oranı · ${chosen.bookmaker} (canlı oran değildir)`;
         const alternative = teamGoalAlternative(fixture, {home:homeForm, away:awayForm}, stats, liveOddsRow, prematchOddsRow);
         candidates.push({
