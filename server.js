@@ -60,8 +60,10 @@ if (databasePool) {
         match_date TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         settled_at TIMESTAMPTZ,
+        telegram_notified_at TIMESTAMPTZ,
         UNIQUE(coupon_key, fixture_id, market)
       )`);
+      await databasePool.query("ALTER TABLE winscope_coupon_predictions ADD COLUMN IF NOT EXISTS telegram_notified_at TIMESTAMPTZ");
       await databasePool.query("CREATE INDEX IF NOT EXISTS winscope_coupon_predictions_created_idx ON winscope_coupon_predictions(created_at DESC)");
       await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_predictions (
         fixture_id BIGINT PRIMARY KEY, home_team TEXT NOT NULL, away_team TEXT NOT NULL,
@@ -1876,25 +1878,59 @@ setInterval(async () => {
 
 async function settleCouponPredictions() {
   if (!databasePool) return;
-  const pending = await databasePool.query(`SELECT tracking_id,fixture_id,market FROM winscope_coupon_predictions
-    WHERE settled_at IS NULL ORDER BY created_at ASC LIMIT 40`);
+  const pending = await databasePool.query(`SELECT tracking_id,fixture_id,market,coupon_type,home_team,away_team,league,
+      telegram_notified_at
+    FROM winscope_coupon_predictions
+    WHERE settled_at IS NULL OR (outcome='won' AND telegram_notified_at IS NULL)
+    ORDER BY created_at ASC LIMIT 40`);
   for (const item of pending.rows) {
     try {
-      const payload = await cachedProviderRequest(`coupon-settle:${item.fixture_id}`, `/fixtures?id=${item.fixture_id}`, 5 * 60 * 1000);
-      const row = payload.response?.[0];
-      const status = String(row?.fixture?.status?.short || "").toUpperCase();
-      if (!row || !["FT","AET","PEN"].includes(status) || row.goals?.home == null || row.goals?.away == null) continue;
-      const homeGoals = Number(row.goals.home), awayGoals = Number(row.goals.away);
-      const htHome = row.score?.halftime?.home == null ? null : Number(row.score.halftime.home);
-      const htAway = row.score?.halftime?.away == null ? null : Number(row.score.halftime.away);
-      const result = evaluateTrackedLiveMarket(item.market, homeGoals, awayGoals, htHome, htAway);
-      if (result == null) continue;
-      const actualScore = `${homeGoals}-${awayGoals}`;
-      const outcome = result ? "won" : "lost";
-      await databasePool.query(
-        "UPDATE winscope_coupon_predictions SET actual_score=$2,outcome=$3,settled_at=NOW() WHERE tracking_id=$1 AND settled_at IS NULL",
-        [item.tracking_id, actualScore, outcome]
-      );
+      let outcome = null;
+      let actualScore = null;
+      if (!item.telegram_notified_at) {
+        const payload = await cachedProviderRequest(`coupon-settle:${item.fixture_id}`, `/fixtures?id=${item.fixture_id}`, 5 * 60 * 1000);
+        const row = payload.response?.[0];
+        const status = String(row?.fixture?.status?.short || "").toUpperCase();
+        if (!row || !["FT","AET","PEN"].includes(status) || row.goals?.home == null || row.goals?.away == null) continue;
+        const homeGoals = Number(row.goals.home), awayGoals = Number(row.goals.away);
+        const htHome = row.score?.halftime?.home == null ? null : Number(row.score.halftime.home);
+        const htAway = row.score?.halftime?.away == null ? null : Number(row.score.halftime.away);
+        const result = evaluateTrackedLiveMarket(item.market, homeGoals, awayGoals, htHome, htAway);
+        if (result == null) continue;
+        actualScore = `${homeGoals}-${awayGoals}`;
+        outcome = result ? "won" : "lost";
+        const updated = await databasePool.query(
+          `UPDATE winscope_coupon_predictions SET actual_score=$2,outcome=$3,settled_at=NOW()
+           WHERE tracking_id=$1 AND settled_at IS NULL RETURNING tracking_id`,
+          [item.tracking_id, actualScore, outcome]
+        );
+        if (!updated.rowCount) continue;
+      } else {
+        outcome = "won";
+      }
+
+      // Kazanan her tercih için Telegram'a tek bildirim gönder; başarısız gönderim
+      // sonraki settlement taramasında yeniden denenir.
+      if (outcome === "won" && !item.telegram_notified_at) {
+        const message = [
+          "🏆 WINSCOPE KUPON TERCİHİ KAZANDI!",
+          `🏟️ ${item.league || "Lig bilgisi yok"}`,
+          `⚽ ${item.home_team} - ${item.away_team}`,
+          `🎯 Kazanan tercih: ${item.market}`,
+          `📊 Maç sonucu: ${actualScore}`,
+          `📌 Kupon türü: ${item.coupon_type === "live" ? "Canlı" : item.coupon_type === "surprise" ? "Sürpriz" : "Maç önü"}`
+        ].join("\n");
+        const sent = await sendTelegram(message);
+        if (sent.sent) {
+          await databasePool.query(
+            "UPDATE winscope_coupon_predictions SET telegram_notified_at=NOW() WHERE tracking_id=$1 AND telegram_notified_at IS NULL",
+            [item.tracking_id]
+          );
+          console.log(`[Coupon WIN Telegram] Bildirim gönderildi tracking_id=${item.tracking_id} message_id=${sent.messageId ?? "?"}`);
+        } else {
+          console.warn(`[Coupon WIN Telegram] Bildirim gönderilemedi tracking_id=${item.tracking_id}: ${sent.reason || "Telegram yapılandırılmamış"}`);
+        }
+      }
     } catch (error) {
       console.warn(`[Coupon tracking settlement] fixture=${item.fixture_id}: ${error.message}`);
     }
