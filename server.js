@@ -776,19 +776,23 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   }
 
   const h = forms.home, a = forms.away;
-  // Canlı maçta önce gerçek /odds/live piyasasını kullan. Yalnızca bu uç nokta boşsa
-  // maç önü oranına düş; seçimin dayanağını oddsTiming ile açıkça işaretle.
+  // Canlı maçta gerçek canlı oran önceliklidir. Canlı oran yoksa veya canlı
+  // feed izin verilen gol marketlerini içermiyorsa maç önü oranı yedek referans olur.
+  // Kaynak oddsTiming ile etiketlenir; ham oranlar kullanıcıya gösterilmez.
   const liveMarketRows = live ? oddsForFixture(oddsRow || null) : [];
   const preMarkets = oddsForFixture(prematchOddsRow || (!live ? oddsRow : null) || null);
   // Initialize before scorePrediction reads it; otherwise live analysis throws a TDZ error.
   const useLiveOdds = live && liveMarketRows.length > 0;
   const predictedScores = scorePrediction(fixture, h, a, useLiveOdds ? oddsRow : null, prematchOddsRow || (!live ? oddsRow : null) || null);
-  // Canlı tercih sadece gerçek canlı pazardan seçilir. Maç önü oranı canlı fiyat
-  // veya canlı olasılık yerine geçemez. Canlı oran yoksa zayıf tercih üretme.
+  const liveAllowedRows = liveMarketRows.filter(x => allowed.includes(x.market));
   const mergedMarketRows = live
-    ? liveMarketRows.map(x => ({ ...x, oddsTiming: "live" }))
+    ? (liveAllowedRows.length
+        ? liveAllowedRows.map(x => ({ ...x, oddsTiming: "live" }))
+        : preMarkets.map(x => ({ ...x, oddsTiming: "prematch" })))
     : preMarkets.map(x => ({ ...x, oddsTiming: "prematch" }));
   const choices = mergedMarketRows.filter(x => allowed.includes(x.market) && x.market !== excludeMarket &&
+    // Maç önü ilk yarı oranı, canlı dakikaya uygun fiyat değildir; canlı HT marketlerinde kullanma.
+    !(live && x.oddsTiming !== "live" && x.market.startsWith("İY ")) &&
     (!live || !liveMarketAlreadySettled(x.market, fixture)) &&
     (live || marketConsistentWithScore(x.market, predictedScores)));
   const statsM = stats || { available: false, pressure: 0, home: {}, away: {} };
@@ -828,7 +832,6 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
       // 40. dakikadan sonra HT üst tercihlerini kapat; kalan süre çok kısa.
       if (choice.market.startsWith("İY ") && minute >= 40) return null;
       if (choice.market.startsWith("İY ")) {
-        if (choice.oddsTiming !== "live") return null;
         const currentHalfGoals = Number(fixture.htHomeScore ?? fixture.homeScore ?? 0) + Number(fixture.htAwayScore ?? fixture.awayScore ?? 0);
         const line = Number(choice.market.match(/(\d)[.,](\d)/)?.[1] || 0) + 0.5;
         if (currentHalfGoals >= Math.ceil(line)) return null;
@@ -1360,7 +1363,7 @@ app.get("/api/health", (_req, res) => res.json({
   ok: true, apiKeyConfigured: Boolean(API_KEY),
   telegramConfigured: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
   databaseConfigured: Boolean(databasePool),
-  provider: "API-Football", oddsPolicy: "pre-match odds for pre-match analysis; live endpoint checks live odds first", teamFormPolicy: "last five completed matches plus cached league-season home/away goal averages", oddsValuesHidden: true
+  provider: "API-Football", oddsPolicy: "pre-match odds for pre-match analysis; live analysis uses live odds first and pre-match odds only as a labeled fallback when no eligible live goal market exists", teamFormPolicy: "last five completed matches plus cached league-season home/away goal averages", oddsValuesHidden: true
 }));
 
 // Compatibility route used by the current index.html live-goal button.
