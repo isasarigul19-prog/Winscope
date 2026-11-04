@@ -1650,7 +1650,7 @@ app.post("/api/analyses/approve", async (req, res) => {
   if (!body.fixtureId || !body.home || !body.away) return res.status(400).json({ success: false, error: "Maç bilgileri eksik." });
   const approved = {
     fixture_id: Number(body.fixtureId), home_team: String(body.home), away_team: String(body.away),
-    analysis: body.analysis || {}, created_at: new Date().toISOString()
+    match_date: String(body.matchDate || "").slice(0, 10), analysis: body.analysis || {}, created_at: new Date().toISOString()
   };
   archives.analyses.unshift(approved);
   archives.analyses = archives.analyses.slice(0, 100);
