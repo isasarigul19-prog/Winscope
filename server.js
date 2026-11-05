@@ -585,28 +585,70 @@ async function fetchTeamRecentForm(teamId, fixtureId, leagueId = null, season = 
 }
 
 function liveStatsMetrics(stats, fixture) {
-  const out = { available: false, shotsOnTarget: 0, totalShots: 0, corners: 0, xG: null,
-    home: { shotsOnTarget: 0, totalShots: 0, corners: 0, xG: null }, away: { shotsOnTarget: 0, totalShots: 0, corners: 0, xG: null } };
-  const seen = { home: new Set(), away: new Set() };
+  const blank = () => ({ shotsOnTarget:0, totalShots:0, corners:0, dangerousAttacks:0, attacks:0, blockedShots:0, xG:null, possession:null });
+  const out = { available:false, shotsOnTarget:0, totalShots:0, corners:0, dangerousAttacks:0, attacks:0,
+    home:blank(), away:blank() };
+  const seen = { home:new Set(), away:new Set() };
   for (const team of (Array.isArray(stats) ? stats : [])) {
     const teamId = Number(team.team?.id);
-    const side = teamId === Number(fixture.homeId) ? "home" : teamId === Number(fixture.awayId) ? "away" : null;
+    const side = teamId === Number(fixture.homeId) ? 'home' : teamId === Number(fixture.awayId) ? 'away' : null;
     if (!side) continue;
     for (const st of (team.statistics || [])) {
-      const type = String(st.type || "").toLowerCase();
-      if (st.value == null || String(st.value).trim() === "" || /^[-—]+$/.test(String(st.value).trim())) continue;
-      const value = Number(String(st.value).replace('%',''));
+      const type = String(st.type || '').toLowerCase();
+      if (st.value == null || String(st.value).trim()==='' || /^[-—]+$/.test(String(st.value).trim())) continue;
+      const raw=String(st.value).trim();
+      const value=Number(raw.replace('%','').replace(',','.'));
+      if (/expected goals|\bxg\b/.test(type)) { if(Number.isFinite(value)) out[side].xG=value; continue; }
+      if (/ball possession/.test(type)) { if(Number.isFinite(value)) out[side].possession=value; continue; }
       if (!Number.isFinite(value)) continue;
-      if (/expected goals|\bxg\b/.test(type)) { out[side].xG = value; out.xG = (Number(out.home.xG) || 0) + (Number(out.away.xG) || 0); seen[side].add("xG"); }
-      else if (/shots on goal|shots on target/.test(type)) { out.shotsOnTarget += value; out[side].shotsOnTarget += value; seen[side].add("shotsOnTarget"); }
-      else if (/total shots|goal attempts/.test(type)) { out.totalShots += value; out[side].totalShots += value; seen[side].add("totalShots"); }
-      else if (/corner kicks|corners/.test(type)) { out.corners += value; out[side].corners += value; seen[side].add("corners"); }
+      if (/shots on goal|shots on target/.test(type)) { out[side].shotsOnTarget=value; seen[side].add('shotsOnTarget'); }
+      else if (/total shots|goal attempts/.test(type)) { out[side].totalShots=value; seen[side].add('totalShots'); }
+      else if (/corner kicks|corners/.test(type)) { out[side].corners=value; seen[side].add('corners'); }
+      else if (/dangerous attacks/.test(type)) { out[side].dangerousAttacks=value; seen[side].add('dangerousAttacks'); }
+      else if (/total attacks/.test(type)) { out[side].attacks=value; seen[side].add('attacks'); }
+      else if (/blocked shots/.test(type)) { out[side].blockedShots=value; seen[side].add('blockedShots'); }
     }
   }
-  // A two-row response alone is not proof that usable live stats exist.
-  out.available = seen.home.size > 0 && seen.away.size > 0;
-  out.pressure = out.shotsOnTarget*2.5 + out.totalShots*0.45 + out.corners*0.8;
+  for (const side of ['home','away']) {
+    out.shotsOnTarget += out[side].shotsOnTarget;
+    out.totalShots += out[side].totalShots;
+    out.corners += out[side].corners;
+    out.dangerousAttacks += out[side].dangerousAttacks;
+    out.attacks += out[side].attacks;
+  }
+  // Do not require both teams to expose every stat: one-sided provider omissions
+  // must not silence a match when usable pressure data exists.
+  out.available = ['home','away'].some(side => seen[side].size > 0);
+  const pressure = t => t.shotsOnTarget*3.2 + t.totalShots*0.55 + t.corners*1.0 + t.dangerousAttacks*0.08 + t.blockedShots*0.35;
+  out.homePressure=pressure(out.home); out.awayPressure=pressure(out.away);
+  out.pressure=out.homePressure+out.awayPressure;
+  const xgSides=['home','away'].filter(side=>Number.isFinite(out[side].xG));
+  out.xGAvailable=xgSides.length>0;
+  out.xGTotal=xgSides.reduce((sum,side)=>sum+out[side].xG,0);
   return out;
+}
+
+function buildLiveGoalSignal(fixture, stats) {
+  const minute=Number(fixture.minute||0), home=Number(fixture.homeScore||0), away=Number(fixture.awayScore||0);
+  const h=stats?.home||{}, a=stats?.away||{};
+  const sideScore = side => {
+    const t=side==='home'?h:a;
+    return Number(t.shotsOnTarget||0)*3.2 + Number(t.totalShots||0)*0.55 + Number(t.corners||0)*1.0
+      + Number(t.dangerousAttacks||0)*0.08 + Number(t.blockedShots||0)*0.35 + (Number.isFinite(t.xG)?t.xG*8:0);
+  };
+  const hs=sideScore('home'), as=sideScore('away'), max=Math.max(hs,as), gap=Math.abs(hs-as);
+  const leader=hs>as?'home':as>hs?'away':'balanced';
+  const score=leader==='balanced'?Math.round(max):Math.round(max+Math.min(12,gap*0.22));
+  const level=score>=42?'Yüksek':score>=25?'Orta':score>=13?'Hafif':'Düşük';
+  const sideLabel=leader==='home'?'Ev sahibi':leader==='away'?'Deplasman':'Dengeli';
+  const remaining=Math.max(0,90-minute);
+  const total=home+away;
+  const requiredForNextLine = total===0?'MS 0.5 ÜST':total===1?'MS 1.5 ÜST':total===2?'MS 2.5 ÜST':`MS ${total+0.5} ÜST`;
+  return { level, side:sideLabel, sideKey:leader, score, homeScore:Math.round(hs), awayScore:Math.round(as),
+    minute, currentScore:`${home}-${away}`, remainingMinutes:remaining, nextGoalMarket:requiredForNextLine,
+    xGAvailable:Boolean(stats?.xGAvailable), xGTotal:Number.isFinite(stats?.xGTotal)?Number(stats.xGTotal.toFixed(2)):null,
+    note:!stats?.available?'Canlı takım istatistikleri sınırlı; sinyal düşük güvenle değerlendirilir.':
+      `${sideLabel} baskısı · ${level} sinyal. Bu bir gol garantisi değil; yalnızca mevcut istatistiklerden türetilen yön göstergesidir.` };
 }
 
 function poissonProbabilityAtLeast(threshold, lambda, currentGoals = 0) {
@@ -886,14 +928,19 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   }
 
   const h = forms.home, a = forms.away;
-  // Canlı seçimde yalnızca gerçek canlı oran kullanılır. Maç önü oranı canlı fiyat
-  // yerine geçirilmez; yoksa sistem canlı tercih üretmez.
+  // Canlı maçta gerçek canlı oran önceliklidir. Canlı oran yoksa veya canlı
+  // feed izin verilen gol marketlerini içermiyorsa maç önü oranı yedek referans olur.
+  // Kaynak oddsTiming ile etiketlenir; ham oranlar kullanıcıya gösterilmez.
   const liveMarketRows = live ? oddsForFixture(oddsRow || null) : [];
   const preMarkets = oddsForFixture(prematchOddsRow || (!live ? oddsRow : null) || null);
-  const predictedScores = scorePrediction(fixture, h, a, live ? oddsRow : null, prematchOddsRow || (!live ? oddsRow : null) || null);
+  // Initialize before scorePrediction reads it; otherwise live analysis throws a TDZ error.
+  const useLiveOdds = live && liveMarketRows.length > 0;
+  const predictedScores = scorePrediction(fixture, h, a, useLiveOdds ? oddsRow : null, prematchOddsRow || (!live ? oddsRow : null) || null);
   const liveAllowedRows = liveMarketRows.filter(x => allowed.includes(x.market));
   const mergedMarketRows = live
-    ? liveAllowedRows.map(x => ({ ...x, oddsTiming: "live" }))
+    ? (liveAllowedRows.length
+        ? liveAllowedRows.map(x => ({ ...x, oddsTiming: "live" }))
+        : preMarkets.map(x => ({ ...x, oddsTiming: "prematch" })))
     : preMarkets.map(x => ({ ...x, oddsTiming: "prematch" }));
   const choices = mergedMarketRows.filter(x => allowed.includes(x.market) && x.market !== excludeMarket &&
     // Maç önü ilk yarı oranı, canlı dakikaya uygun fiyat değildir; canlı HT marketlerinde kullanma.
@@ -981,22 +1028,6 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
 
       const lineNum = Number(String(choice.market).match(/(\d)[.,](\d)/)?.[0]?.replace(",", ".") || 0);
       const needed = choice.market.startsWith("MS ") ? Math.max(0, Math.ceil(lineNum + 0.01) - total) : 1;
-
-      // Kalan süreye göre gereken gol sayısı: ör. 80' 0-1'de MS 2.5 için
-      // iki gol daha gerekir; sırf genel baskı puanı yüksek diye bu market seçilemez.
-      const xg = Number(statsM.xG || 0);
-      const remaining = Math.max(0, 96 - minute);
-      if (live && choice.market.startsWith("MS ")) {
-        if (needed <= 0) return null;
-        if (minute >= 76 && needed >= 2) return null;
-        if (minute >= 72 && needed >= 2 &&
-            !(xg >= 2.4 && statsM.shotsOnTarget >= 6 && statsM.totalShots >= 17 && statsM.pressure >= 34)) return null;
-        if (minute >= 80 && needed >= 1 &&
-            !(xg >= 1.8 && statsM.shotsOnTarget >= 3 && statsM.pressure >= 22)) return null;
-        if (minute >= 85 && needed >= 1 &&
-            !(xg >= 2.5 && statsM.shotsOnTarget >= 5 && statsM.pressure >= 32)) return null;
-        if (remaining <= 6 && needed >= 2) return null;
-      }
 
       // Geç dakikada çok gol ihtiyacı + düşük baskı = red.
       if (minute >= 66 && needed > 1 && statsM.pressure < 16) return null;
@@ -1534,17 +1565,18 @@ app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
     }
     const liveOddsRow = (liveOddsPayload.response || []).find(x => Number(x.fixture?.fixture?.id ?? x.fixture?.id ?? x.fixtureId) === fixtureId) || null;
     const stats = liveStatsMetrics(statsPayload.response || [], fixture);
+    const goalSignal = buildLiveGoalSignal(fixture, stats);
     if (!stats.available) {
       return res.json({ fixtureId, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute: fixture.minute,
-        mainPick: null, alternative: null, oddsTiming: liveOddsRow ? "live" : "unavailable", stats: null,
+        mainPick: null, alternative: null, oddsTiming: liveOddsRow ? "live" : "unavailable", stats: null, goalSignal,
         oddsBasis: "Canlı istatistikler API tarafından sağlanmadı.",
-        note: "Canlı istatistikler eksik olduğu için tercih zorlanmadı." });
+        note: "Canlı istatistikler eksik; bu nedenle bahis tercihi üretilmedi. Sinyal paneli mevcut verilerle sınırlıdır." });
     }
     if (!fixture.homeId || !fixture.awayId) {
       return res.json({ fixtureId, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute: fixture.minute,
         mainPick: null, alternative: null, oddsTiming: liveOddsRow ? "live" : "unavailable",
-        stats: { totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners, xG: stats.xG, pressure: Number(stats.pressure.toFixed(1)) },
-        oddsBasis: "Takım kimlikleri bulunamadı.", note: "Takım formu doğrulanamadığı için tercih zorlanmadı." });
+        stats: { totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners, dangerousAttacks:stats.dangerousAttacks, pressure: Number(stats.pressure.toFixed(1)), home:stats.home, away:stats.away }, goalSignal,
+        oddsBasis: "Takım kimlikleri bulunamadı.", note: "Takım formu doğrulanamadığı için bahis tercihi zorlanmadı; gol sinyali gösterilebilir." });
     }
     const [homeForm, awayForm] = await Promise.all([
       fetchTeamRecentForm(fixture.homeId, fixture.id, fixture.leagueId, fixture.season, "home"), fetchTeamRecentForm(fixture.awayId, fixture.id, fixture.leagueId, fixture.season, "away")
@@ -1552,8 +1584,8 @@ app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
     if (!homeForm.available || !awayForm.available) {
       return res.json({ fixtureId, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute: fixture.minute,
         mainPick: null, alternative: null, oddsTiming: liveOddsRow ? "live" : "unavailable",
-        stats: { totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners, xG: stats.xG, pressure: Number(stats.pressure.toFixed(1)) },
-        oddsBasis: "Son 5 maç form verisi eksik.", note: "Form verisi doğrulanamadığı için tercih zorlanmadı." });
+        stats: { totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners, dangerousAttacks:stats.dangerousAttacks, pressure: Number(stats.pressure.toFixed(1)), home:stats.home, away:stats.away }, goalSignal,
+        oddsBasis: "Son 5 maç form verisi eksik.", note: "Form verisi doğrulanamadığı için bahis tercihi zorlanmadı; gol sinyali bağımsız gösterilir." });
     }
     const chosen = chooseSupportedMarket(liveOddsRow, "live", fixture, { home: homeForm, away: awayForm }, stats, prematchOddsRow);
     const alternative = chosen ? chooseSupportedMarket(liveOddsRow, "live", fixture, { home: homeForm, away: awayForm }, stats, prematchOddsRow, chosen.market) : null;
@@ -1563,8 +1595,8 @@ app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
       : (liveOddsRow ? "Canlı oran var ancak dakika/skor/form/istatistik eşiklerini geçen market yok." : "Kullanılabilir canlı oran bulunamadı; eşikleri geçen doğrulanmış tercih yok.");
     res.json({ fixtureId, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute: fixture.minute,
       mainPick: chosen?.market || null, alternative: alternative?.market || null, oddsTiming,
-      stats: { totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners, xG: stats.xG, pressure: Number(stats.pressure.toFixed(1)) },
-      oddsBasis, note: chosen ? "Canlı skor, mevcut istatistikler, son 5 maç formu ve mevcut market verisi değerlendirildi. Ham oranlar gösterilmez." : "Güvenilir tercih eşiği karşılanmadığı için seçim zorlanmadı." });
+      stats: { totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners, dangerousAttacks:stats.dangerousAttacks, pressure: Number(stats.pressure.toFixed(1)), home:stats.home, away:stats.away, xGAvailable:stats.xGAvailable, xGTotal:stats.xGTotal }, goalSignal,
+      oddsBasis, note: chosen ? "Canlı skor, mevcut istatistikler, son 5 maç formu ve mevcut market verisi değerlendirildi. Ham oranlar gösterilmez." : "Güvenilir bahis tercihi eşiği karşılanmadı; gol tehlikesi sinyali ayrıca değerlendirilir." });
   } catch (error) {
     const message = String(error?.message || error);
     const limited = /429|rate.?limit|quota|istek sınırı/i.test(message);
@@ -1856,17 +1888,7 @@ app.get("/api/coupon-tracking/summary", async (req, res) => {
 
 app.get("/api/archives", async (_req, res) => {
   await archiveDatabaseReady;
-  const actualByFixture = new Map(predictionTracking
-    .filter(item => item.actualFT)
-    .map(item => [Number(item.fixtureId), { actualFT: item.actualFT, actualHT: item.actualHT || null, exactFT: item.exactFT }]));
-  const analyses = archives.analyses.map(item => {
-    const fixtureId = Number(item.fixture_id || item.fixtureId || 0);
-    const actual = actualByFixture.get(fixtureId);
-    return { ...item, actualFullTimeScore: actual?.actualFT || item.actualFullTimeScore || null,
-      actualHalfTimeScore: actual?.actualHT || item.actualHalfTimeScore || null,
-      exactFullTime: actual?.exactFT ?? null };
-  });
-  res.json({ analyses, coupons: archives.coupons, persistentStorage: Boolean(databasePool) });
+  res.json({ analyses: archives.analyses, coupons: archives.coupons, persistentStorage: Boolean(databasePool) });
 });
 
 app.get("/api/match/:id/stats", async (req, res) => {
@@ -2094,8 +2116,6 @@ async function settleApprovedPredictions() {
     } catch (error) { console.warn(`[Prediction settlement] fixture=${item.fixtureId}: ${error.message}`); }
   }
 }
-// Sunucu açıldığında geçmişte onaylanan analizlerin biten maç skorlarını da hemen eşitle.
-setTimeout(() => { void settleApprovedPredictions(); }, 5000);
 setInterval(() => { void settleApprovedPredictions(); }, 15 * 60 * 1000);
 setInterval(() => { void settleLivePredictions(); }, 15 * 60 * 1000);
 
