@@ -693,6 +693,44 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   const pmf=(k,l)=>Math.exp(-l)*Math.pow(l,k)/factorial(k);
   const scores=[];
   for(let h=0;h<=8;h++) for(let a=0;a<=8;a++) scores.push({home:h,away:a,probability:pmf(h,lambdaHome)*pmf(a,lambdaAway)});
+  // Piyasa kalibrasyonu: önce bağımsız Poisson skor dağılımı kurulur,
+  // ardından mevcut maç önü gol/BTTS/1X2 olasılıkları dağılıma uygulanır.
+  // Böylece skor yalnızca iki lambda'nın matematiksel tepesine (sıklıkla 1-1)
+  // bırakılmaz; gerçek piyasa sinyalleri skor olasılıklarını birlikte yönlendirir.
+  const constraints = [];
+  const addConstraint = (name, target, test) => {
+    const p = Number(target);
+    if (Number.isFinite(p) && p >= 0.04 && p <= 0.96) constraints.push({ name, target: p, test });
+  };
+  addConstraint("MS 1.5 ÜST", pre["MS 1.5 ÜST"], x => x.home + x.away >= 2);
+  addConstraint("MS 2.5 ÜST", pre["MS 2.5 ÜST"], x => x.home + x.away >= 3);
+  addConstraint("MS 3.5 ÜST", pre["MS 3.5 ÜST"], x => x.home + x.away >= 4);
+  addConstraint("KG VAR", pre["KG VAR"], x => x.home > 0 && x.away > 0);
+  addConstraint("EV 1.5 ÜST", pre["EV 1.5 ÜST"], x => x.home >= 2);
+  addConstraint("DEP 1.5 ÜST", pre["DEP 1.5 ÜST"], x => x.away >= 2);
+  if (outcome) {
+    addConstraint("MS 1", outcome.home, x => x.home > x.away);
+    addConstraint("MS X", outcome.draw, x => x.home === x.away);
+    addConstraint("MS 2", outcome.away, x => x.away > x.home);
+  }
+  const normalizeScores = () => {
+    const sum = scores.reduce((v, x) => v + x.probability, 0);
+    if (sum > 0) for (const x of scores) x.probability /= sum;
+  };
+  normalizeScores();
+  // Iterative proportional fitting: her pazarın piyasa olasılığına yaklaşırken
+  // toplam skor dağılımının toplamı 1 kalır. Çelişkili pazarlar yumuşak uygulanır.
+  for (let pass = 0; pass < 45 && constraints.length; pass++) {
+    for (const c of constraints) {
+      let current = 0;
+      for (const x of scores) if (c.test(x)) current += x.probability;
+      current = Math.max(0.005, Math.min(0.995, current));
+      const target = Math.max(0.03, Math.min(0.97, c.target));
+      const ratio = Math.pow((target / current) / ((1 - target) / (1 - current)), 0.16);
+      for (const x of scores) x.probability *= c.test(x) ? ratio : 1;
+      normalizeScores();
+    }
+  }
   scores.sort((a,b)=>b.probability-a.probability||(a.home+a.away)-(b.home+b.away)||b.home-a.home);
   const best=scores[0];
   const alternative=scores.find(x=>x.home!==best.home||x.away!==best.away);
@@ -709,7 +747,8 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   htScores.sort((a,b)=>b.p-a.p||(a.home+a.away)-(b.home+b.away)||b.home-a.home);
   const basis=[];
   if(marketHomeLambda!=null||marketAwayLambda!=null||marketTotalLambda!=null) basis.push("Maç önü gol oranları (%85 ağırlık)");
-  if(outcome) basis.push("MS 1X2 ev/deplasman dengesi");
+  if(outcome) basis.push("MS 1X2 ev/beraberlik/deplasman dengesi");
+  if(constraints.length) basis.push("gol, KG ve sonuç piyasalarıyla skor dağılımı kalibrasyonu");
   if(hasForm) basis.push("son 5 maç formu (%15 destek)");
   return {
     halfTimeScore:`${htScores[0].home}-${htScores[0].away} (tahmin)`,
