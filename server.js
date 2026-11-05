@@ -585,9 +585,10 @@ async function fetchTeamRecentForm(teamId, fixtureId, leagueId = null, season = 
 }
 
 function liveStatsMetrics(stats, fixture) {
-  const blank = () => ({ shotsOnTarget:0, totalShots:0, corners:0, dangerousAttacks:0, attacks:0, blockedShots:0, xG:null, possession:null });
-  const out = { available:false, shotsOnTarget:0, totalShots:0, corners:0, dangerousAttacks:0, attacks:0,
-    home:blank(), away:blank() };
+  const blank = () => ({ shotsOnTarget:0, totalShots:0, corners:0, dangerousAttacks:0, attacks:0,
+    blockedShots:0, shotsInsideBox:0, bigChances:0, xG:null, possession:null });
+  const out = { available:false, shotsOnTarget:0, totalShots:0, corners:0, dangerousAttacks:0,
+    attacks:0, blockedShots:0, home:blank(), away:blank() };
   const seen = { home:new Set(), away:new Set() };
   for (const team of (Array.isArray(stats) ? stats : [])) {
     const teamId = Number(team.team?.id);
@@ -602,6 +603,8 @@ function liveStatsMetrics(stats, fixture) {
       if (/ball possession/.test(type)) { if(Number.isFinite(value)) out[side].possession=value; continue; }
       if (!Number.isFinite(value)) continue;
       if (/shots on goal|shots on target/.test(type)) { out[side].shotsOnTarget=value; seen[side].add('shotsOnTarget'); }
+      else if (/shots inside box|shots inside the box/.test(type)) { out[side].shotsInsideBox=value; seen[side].add('shotsInsideBox'); }
+      else if (/big chances/.test(type)) { out[side].bigChances=value; seen[side].add('bigChances'); }
       else if (/total shots|goal attempts/.test(type)) { out[side].totalShots=value; seen[side].add('totalShots'); }
       else if (/corner kicks|corners/.test(type)) { out[side].corners=value; seen[side].add('corners'); }
       else if (/dangerous attacks/.test(type)) { out[side].dangerousAttacks=value; seen[side].add('dangerousAttacks'); }
@@ -610,16 +613,13 @@ function liveStatsMetrics(stats, fixture) {
     }
   }
   for (const side of ['home','away']) {
-    out.shotsOnTarget += out[side].shotsOnTarget;
-    out.totalShots += out[side].totalShots;
-    out.corners += out[side].corners;
-    out.dangerousAttacks += out[side].dangerousAttacks;
-    out.attacks += out[side].attacks;
+    for (const key of ['shotsOnTarget','totalShots','corners','dangerousAttacks','attacks','blockedShots']) out[key] += out[side][key];
   }
-  // Do not require both teams to expose every stat: one-sided provider omissions
-  // must not silence a match when usable pressure data exists.
-  out.available = ['home','away'].some(side => seen[side].size > 0);
-  const pressure = t => t.shotsOnTarget*3.2 + t.totalShots*0.55 + t.corners*1.0 + t.dangerousAttacks*0.08 + t.blockedShots*0.35;
+  out.available = ['home','away'].some(side => seen[side].size > 0 || Number.isFinite(out[side].xG));
+  // Cumulative volume is not equivalent to goal threat. High-quality events carry most weight.
+  const pressure = t => t.shotsOnTarget*4 + t.bigChances*5 + t.shotsInsideBox*1.4
+    + (Number.isFinite(t.xG)?t.xG*10:0) + t.totalShots*0.22 + t.corners*0.30
+    + t.dangerousAttacks*0.025 + t.blockedShots*0.15;
   out.homePressure=pressure(out.home); out.awayPressure=pressure(out.away);
   out.pressure=out.homePressure+out.awayPressure;
   const xgSides=['home','away'].filter(side=>Number.isFinite(out[side].xG));
@@ -631,24 +631,30 @@ function liveStatsMetrics(stats, fixture) {
 function buildLiveGoalSignal(fixture, stats) {
   const minute=Number(fixture.minute||0), home=Number(fixture.homeScore||0), away=Number(fixture.awayScore||0);
   const h=stats?.home||{}, a=stats?.away||{};
-  const sideScore = side => {
-    const t=side==='home'?h:a;
-    return Number(t.shotsOnTarget||0)*3.2 + Number(t.totalShots||0)*0.55 + Number(t.corners||0)*1.0
-      + Number(t.dangerousAttacks||0)*0.08 + Number(t.blockedShots||0)*0.35 + (Number.isFinite(t.xG)?t.xG*8:0);
-  };
-  const hs=sideScore('home'), as=sideScore('away'), max=Math.max(hs,as), gap=Math.abs(hs-as);
-  const leader=hs>as?'home':as>hs?'away':'balanced';
-  const score=leader==='balanced'?Math.round(max):Math.round(max+Math.min(12,gap*0.22));
-  const level=score>=42?'Yüksek':score>=25?'Orta':score>=13?'Hafif':'Düşük';
-  const sideLabel=leader==='home'?'Ev sahibi':leader==='away'?'Deplasman':'Dengeli';
-  const remaining=Math.max(0,90-minute);
+  const sideScore = t => Number(t.shotsOnTarget||0)*4 + Number(t.bigChances||0)*5
+    + Number(t.shotsInsideBox||0)*1.4 + (Number.isFinite(t.xG)?t.xG*10:0)
+    + Number(t.totalShots||0)*0.22 + Number(t.corners||0)*0.30
+    + Number(t.dangerousAttacks||0)*0.025 + Number(t.blockedShots||0)*0.15;
+  const hs=sideScore(h), as=sideScore(a), max=Math.max(hs,as), gap=Math.abs(hs-as);
+  const qualityGap = Math.abs(Number(h.shotsOnTarget||0)-Number(a.shotsOnTarget||0)) >= 2
+    || Math.abs(Number(h.bigChances||0)-Number(a.bigChances||0)) >= 1
+    || Math.abs(Number(h.shotsInsideBox||0)-Number(a.shotsInsideBox||0)) >= 3
+    || (Number.isFinite(h.xG)&&Number.isFinite(a.xG)&&Math.abs(h.xG-a.xG)>=0.35);
+  // Do not assign a team direction from harmless shot/corner volume alone.
+  const directionCertain = qualityGap && gap >= 5 && max >= 8;
+  const leader = !directionCertain ? 'unknown' : (hs>as?'home':'away');
+  const score = Math.round(max + Math.min(12,gap*0.18));
+  const level = score>=35?'Yüksek':score>=22?'Orta':score>=10?'Hafif':'Düşük';
+  const sideLabel = leader==='home'?'Ev sahibi':leader==='away'?'Deplasman':'Belirsiz';
   const total=home+away;
-  const requiredForNextLine = total===0?'MS 0.5 ÜST':total===1?'MS 1.5 ÜST':total===2?'MS 2.5 ÜST':`MS ${total+0.5} ÜST`;
-  return { level, side:sideLabel, sideKey:leader, score, homeScore:Math.round(hs), awayScore:Math.round(as),
-    minute, currentScore:`${home}-${away}`, remainingMinutes:remaining, nextGoalMarket:requiredForNextLine,
+  const totalGoalsTarget = `MS ${(total+0.5).toFixed(1)} ÜST`;
+  return { level, side:sideLabel, sideKey:leader, nextGoalCandidate:sideLabel, score,
+    homeScore:Math.round(hs), awayScore:Math.round(as), minute, currentScore:`${home}-${away}`,
+    remainingMinutes:Math.max(0,90-minute), totalGoalsTarget,
     xGAvailable:Boolean(stats?.xGAvailable), xGTotal:Number.isFinite(stats?.xGTotal)?Number(stats.xGTotal.toFixed(2)):null,
-    note:!stats?.available?'Canlı takım istatistikleri sınırlı; sinyal düşük güvenle değerlendirilir.':
-      `${sideLabel} baskısı · ${level} sinyal. Bu bir gol garantisi değil; yalnızca mevcut istatistiklerden türetilen yön göstergesidir.` };
+    note:!stats?.available?'Canlı takım istatistikleri API tarafından sağlanmadı.':
+      !directionCertain?'Takım yönü için yeterli kaliteli fırsat verisi yok; yön tahmini yapılmadı.':
+      `${sideLabel} lehine kaliteli fırsat sinyali var. Bu bir gol garantisi değildir.` };
 }
 
 function poissonProbabilityAtLeast(threshold, lambda, currentGoals = 0) {
@@ -938,9 +944,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   const predictedScores = scorePrediction(fixture, h, a, useLiveOdds ? oddsRow : null, prematchOddsRow || (!live ? oddsRow : null) || null);
   const liveAllowedRows = liveMarketRows.filter(x => allowed.includes(x.market));
   const mergedMarketRows = live
-    ? (liveAllowedRows.length
-        ? liveAllowedRows.map(x => ({ ...x, oddsTiming: "live" }))
-        : preMarkets.map(x => ({ ...x, oddsTiming: "prematch" })))
+    ? liveAllowedRows.map(x => ({ ...x, oddsTiming: "live" }))
     : preMarkets.map(x => ({ ...x, oddsTiming: "prematch" }));
   const choices = mergedMarketRows.filter(x => allowed.includes(x.market) && x.market !== excludeMarket &&
     // Maç önü ilk yarı oranı, canlı dakikaya uygun fiyat değildir; canlı HT marketlerinde kullanma.
@@ -1535,7 +1539,7 @@ app.get("/api/health", (_req, res) => res.json({
   ok: true, apiKeyConfigured: Boolean(API_KEY),
   telegramConfigured: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
   databaseConfigured: Boolean(databasePool),
-  provider: "API-Football", oddsPolicy: "pre-match odds for pre-match analysis; live analysis uses live odds first and pre-match odds only as a labeled fallback when no eligible live goal market exists", teamFormPolicy: "last five completed matches plus cached league-season home/away goal averages", oddsValuesHidden: true
+  provider: "API-Football", oddsPolicy: "pre-match odds for pre-match analysis; live analysis requires live odds for live selections; pre-match odds are model baseline only", teamFormPolicy: "last five completed matches plus cached league-season home/away goal averages", oddsValuesHidden: true
 }));
 
 // Compatibility route used by the current index.html live-goal button.
@@ -1589,10 +1593,10 @@ app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
     }
     const chosen = chooseSupportedMarket(liveOddsRow, "live", fixture, { home: homeForm, away: awayForm }, stats, prematchOddsRow);
     const alternative = chosen ? chooseSupportedMarket(liveOddsRow, "live", fixture, { home: homeForm, away: awayForm }, stats, prematchOddsRow, chosen.market) : null;
-    const oddsTiming = chosen?.oddsTiming || (liveOddsRow ? "live" : (prematchOddsRow ? "prematch" : "unavailable"));
+    const oddsTiming = chosen?.oddsTiming || (liveOddsRow ? "live" : "unavailable");
     const oddsBasis = chosen
-      ? (chosen.oddsTiming === "live" ? `Gerçek canlı oran · ${chosen.bookmaker}` : `Canlı oran bulunamadı; maç önü oranı yedek olarak kullanıldı · ${chosen.bookmaker}`)
-      : (liveOddsRow ? "Canlı oran var ancak dakika/skor/form/istatistik eşiklerini geçen market yok." : "Kullanılabilir canlı oran bulunamadı; eşikleri geçen doğrulanmış tercih yok.");
+      ? (chosen.oddsTiming === "live" ? `Gerçek canlı oran · ${chosen.bookmaker}` : `Canlı oran · ${chosen.bookmaker}`)
+      : (liveOddsRow ? "Canlı oran var ancak dakika/skor/form/istatistik eşiklerini geçen market yok." : "Canlı oran bulunamadı; maç önü oranıyla canlı tercih üretilmedi.");
     res.json({ fixtureId, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute: fixture.minute,
       mainPick: chosen?.market || null, alternative: alternative?.market || null, oddsTiming,
       stats: { totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners, dangerousAttacks:stats.dangerousAttacks, pressure: Number(stats.pressure.toFixed(1)), home:stats.home, away:stats.away, xGAvailable:stats.xGAvailable, xGTotal:stats.xGTotal }, goalSignal,
