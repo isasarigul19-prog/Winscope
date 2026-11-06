@@ -65,6 +65,15 @@ if (databasePool) {
       )`);
       await databasePool.query("ALTER TABLE winscope_coupon_predictions ADD COLUMN IF NOT EXISTS telegram_notified_at TIMESTAMPTZ");
       await databasePool.query("ALTER TABLE winscope_coupon_predictions ADD COLUMN IF NOT EXISTS settlement_checked_at TIMESTAMPTZ");
+      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_coupon_result_notifications (
+        fixture_id BIGINT NOT NULL,
+        market_key TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'sending',
+        telegram_message_id BIGINT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        sent_at TIMESTAMPTZ,
+        PRIMARY KEY (fixture_id, market_key)
+      )`);
       await databasePool.query("CREATE INDEX IF NOT EXISTS winscope_coupon_predictions_created_idx ON winscope_coupon_predictions(created_at DESC)");
       await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_predictions (
         fixture_id BIGINT PRIMARY KEY, home_team TEXT NOT NULL, away_team TEXT NOT NULL,
@@ -249,7 +258,7 @@ let providerQueue = Promise.resolve();
 let lastProviderRequestAt = 0;
 let providerCooldownUntil = 0;
 let providerQuotaBlockedUntil = 0;
-const PROVIDER_MIN_INTERVAL_MS = 260;
+const PROVIDER_MIN_INTERVAL_MS = 1200; // yaklaşık 50 istek/dk; 429 riskini azaltır.
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
@@ -288,8 +297,11 @@ async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
         throw new Error(`API-Football kotası dolu; 6 saatlik koruma devrede. ${errorText}`);
       }
       if (response.status === 429 || /rate.?limit|too many requests|per-minute/i.test(errorText)) {
-        providerCooldownUntil = Date.now() + 60_000;
-        throw new Error(`API-Football hız sınırına ulaşıldı; 60 saniye bekleme uygulandı. ${errorText}`);
+        const retryHeader = Number(response.headers.get("retry-after")) || 0;
+        const retryBody = Number((errorText.match(/retry after\s+(\d+)/i) || [])[1]) || 0;
+        const waitMs = Math.max(90_000, (Math.max(retryHeader, retryBody) + 5) * 1000);
+        providerCooldownUntil = Math.max(providerCooldownUntil, Date.now() + waitMs);
+        throw new Error(`API-Football hız sınırı; ${Math.ceil(waitMs / 1000)} saniye bekleme uygulandı. ${errorText}`);
       }
       throw new Error(`API-Football hatası: ${errors ? errorText : `HTTP ${response.status}`}`);
     }
@@ -586,76 +598,27 @@ async function fetchTeamRecentForm(teamId, fixtureId, leagueId = null, season = 
 }
 
 function liveStatsMetrics(stats, fixture) {
-  const blank = () => ({ shotsOnTarget:0, totalShots:0, corners:0, dangerousAttacks:0, attacks:0,
-    blockedShots:0, shotsInsideBox:0, bigChances:0, xG:null, possession:null });
-  const out = { available:false, shotsOnTarget:0, totalShots:0, corners:0, dangerousAttacks:0,
-    attacks:0, blockedShots:0, home:blank(), away:blank() };
-  const seen = { home:new Set(), away:new Set() };
+  const out = { available: false, shotsOnTarget: 0, totalShots: 0, corners: 0,
+    home: { shotsOnTarget: 0, totalShots: 0, corners: 0 }, away: { shotsOnTarget: 0, totalShots: 0, corners: 0 } };
+  const seen = { home: new Set(), away: new Set() };
   for (const team of (Array.isArray(stats) ? stats : [])) {
     const teamId = Number(team.team?.id);
-    const side = teamId === Number(fixture.homeId) ? 'home' : teamId === Number(fixture.awayId) ? 'away' : null;
+    const side = teamId === Number(fixture.homeId) ? "home" : teamId === Number(fixture.awayId) ? "away" : null;
     if (!side) continue;
     for (const st of (team.statistics || [])) {
-      const type = String(st.type || '').toLowerCase();
-      if (st.value == null || String(st.value).trim()==='' || /^[-—]+$/.test(String(st.value).trim())) continue;
-      const raw=String(st.value).trim();
-      const value=Number(raw.replace('%','').replace(',','.'));
-      if (/expected goals|\bxg\b/.test(type)) { if(Number.isFinite(value)) out[side].xG=value; continue; }
-      if (/ball possession/.test(type)) { if(Number.isFinite(value)) out[side].possession=value; continue; }
+      const type = String(st.type || "").toLowerCase();
+      if (st.value == null || String(st.value).trim() === "" || /^[-—]+$/.test(String(st.value).trim())) continue;
+      const value = Number(String(st.value).replace('%',''));
       if (!Number.isFinite(value)) continue;
-      if (/shots on goal|shots on target/.test(type)) { out[side].shotsOnTarget=value; seen[side].add('shotsOnTarget'); }
-      else if (/shots inside box|shots inside the box/.test(type)) { out[side].shotsInsideBox=value; seen[side].add('shotsInsideBox'); }
-      else if (/big chances/.test(type)) { out[side].bigChances=value; seen[side].add('bigChances'); }
-      else if (/total shots|goal attempts/.test(type)) { out[side].totalShots=value; seen[side].add('totalShots'); }
-      else if (/corner kicks|corners/.test(type)) { out[side].corners=value; seen[side].add('corners'); }
-      else if (/dangerous attacks/.test(type)) { out[side].dangerousAttacks=value; seen[side].add('dangerousAttacks'); }
-      else if (/total attacks/.test(type)) { out[side].attacks=value; seen[side].add('attacks'); }
-      else if (/blocked shots/.test(type)) { out[side].blockedShots=value; seen[side].add('blockedShots'); }
+      if (/shots on goal|shots on target/.test(type)) { out.shotsOnTarget += value; out[side].shotsOnTarget += value; seen[side].add("shotsOnTarget"); }
+      else if (/total shots|goal attempts/.test(type)) { out.totalShots += value; out[side].totalShots += value; seen[side].add("totalShots"); }
+      else if (/corner kicks|corners/.test(type)) { out.corners += value; out[side].corners += value; seen[side].add("corners"); }
     }
   }
-  for (const side of ['home','away']) {
-    for (const key of ['shotsOnTarget','totalShots','corners','dangerousAttacks','attacks','blockedShots']) out[key] += out[side][key];
-  }
-  out.available = ['home','away'].some(side => seen[side].size > 0 || Number.isFinite(out[side].xG));
-  // Cumulative volume is not equivalent to goal threat. High-quality events carry most weight.
-  const pressure = t => t.shotsOnTarget*4 + t.bigChances*5 + t.shotsInsideBox*1.4
-    + (Number.isFinite(t.xG)?t.xG*10:0) + t.totalShots*0.22 + t.corners*0.30
-    + t.dangerousAttacks*0.025 + t.blockedShots*0.15;
-  out.homePressure=pressure(out.home); out.awayPressure=pressure(out.away);
-  out.pressure=out.homePressure+out.awayPressure;
-  const xgSides=['home','away'].filter(side=>Number.isFinite(out[side].xG));
-  out.xGAvailable=xgSides.length>0;
-  out.xGTotal=xgSides.reduce((sum,side)=>sum+out[side].xG,0);
+  // A two-row response alone is not proof that usable live stats exist.
+  out.available = seen.home.size > 0 && seen.away.size > 0;
+  out.pressure = out.shotsOnTarget*2.5 + out.totalShots*0.45 + out.corners*0.8;
   return out;
-}
-
-function buildLiveGoalSignal(fixture, stats) {
-  const minute=Number(fixture.minute||0), home=Number(fixture.homeScore||0), away=Number(fixture.awayScore||0);
-  const h=stats?.home||{}, a=stats?.away||{};
-  const sideScore = t => Number(t.shotsOnTarget||0)*4 + Number(t.bigChances||0)*5
-    + Number(t.shotsInsideBox||0)*1.4 + (Number.isFinite(t.xG)?t.xG*10:0)
-    + Number(t.totalShots||0)*0.22 + Number(t.corners||0)*0.30
-    + Number(t.dangerousAttacks||0)*0.025 + Number(t.blockedShots||0)*0.15;
-  const hs=sideScore(h), as=sideScore(a), max=Math.max(hs,as), gap=Math.abs(hs-as);
-  const qualityGap = Math.abs(Number(h.shotsOnTarget||0)-Number(a.shotsOnTarget||0)) >= 2
-    || Math.abs(Number(h.bigChances||0)-Number(a.bigChances||0)) >= 1
-    || Math.abs(Number(h.shotsInsideBox||0)-Number(a.shotsInsideBox||0)) >= 3
-    || (Number.isFinite(h.xG)&&Number.isFinite(a.xG)&&Math.abs(h.xG-a.xG)>=0.35);
-  // Do not assign a team direction from harmless shot/corner volume alone.
-  const directionCertain = qualityGap && gap >= 5 && max >= 8;
-  const leader = !directionCertain ? 'unknown' : (hs>as?'home':'away');
-  const score = Math.round(max + Math.min(12,gap*0.18));
-  const level = score>=35?'Yüksek':score>=22?'Orta':score>=10?'Hafif':'Düşük';
-  const sideLabel = leader==='home'?'Ev sahibi':leader==='away'?'Deplasman':'Belirsiz';
-  const total=home+away;
-  const totalGoalsTarget = `MS ${(total+0.5).toFixed(1)} ÜST`;
-  return { level, side:sideLabel, sideKey:leader, nextGoalCandidate:sideLabel, score,
-    homeScore:Math.round(hs), awayScore:Math.round(as), minute, currentScore:`${home}-${away}`,
-    remainingMinutes:Math.max(0,90-minute), totalGoalsTarget,
-    xGAvailable:Boolean(stats?.xGAvailable), xGTotal:Number.isFinite(stats?.xGTotal)?Number(stats.xGTotal.toFixed(2)):null,
-    note:!stats?.available?'Canlı takım istatistikleri API tarafından sağlanmadı.':
-      !directionCertain?'Takım yönü için yeterli kaliteli fırsat verisi yok; yön tahmini yapılmadı.':
-      `${sideLabel} lehine kaliteli fırsat sinyali var. Bu bir gol garantisi değildir.` };
 }
 
 function poissonProbabilityAtLeast(threshold, lambda, currentGoals = 0) {
@@ -945,7 +908,9 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   const predictedScores = scorePrediction(fixture, h, a, useLiveOdds ? oddsRow : null, prematchOddsRow || (!live ? oddsRow : null) || null);
   const liveAllowedRows = liveMarketRows.filter(x => allowed.includes(x.market));
   const mergedMarketRows = live
-    ? liveAllowedRows.map(x => ({ ...x, oddsTiming: "live" }))
+    ? (liveAllowedRows.length
+        ? liveAllowedRows.map(x => ({ ...x, oddsTiming: "live" }))
+        : preMarkets.map(x => ({ ...x, oddsTiming: "prematch" })))
     : preMarkets.map(x => ({ ...x, oddsTiming: "prematch" }));
   const choices = mergedMarketRows.filter(x => allowed.includes(x.market) && x.market !== excludeMarket &&
     // Maç önü ilk yarı oranı, canlı dakikaya uygun fiyat değildir; canlı HT marketlerinde kullanma.
@@ -1540,7 +1505,7 @@ app.get("/api/health", (_req, res) => res.json({
   ok: true, apiKeyConfigured: Boolean(API_KEY),
   telegramConfigured: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
   databaseConfigured: Boolean(databasePool),
-  provider: "API-Football", oddsPolicy: "pre-match odds for pre-match analysis; live analysis requires live odds for live selections; pre-match odds are model baseline only", teamFormPolicy: "last five completed matches plus cached league-season home/away goal averages", oddsValuesHidden: true
+  provider: "API-Football", oddsPolicy: "pre-match odds for pre-match analysis; live analysis uses live odds first and pre-match odds only as a labeled fallback when no eligible live goal market exists", teamFormPolicy: "last five completed matches plus cached league-season home/away goal averages", oddsValuesHidden: true
 }));
 
 // Compatibility route used by the current index.html live-goal button.
@@ -1570,18 +1535,17 @@ app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
     }
     const liveOddsRow = (liveOddsPayload.response || []).find(x => Number(x.fixture?.fixture?.id ?? x.fixture?.id ?? x.fixtureId) === fixtureId) || null;
     const stats = liveStatsMetrics(statsPayload.response || [], fixture);
-    const goalSignal = buildLiveGoalSignal(fixture, stats);
     if (!stats.available) {
       return res.json({ fixtureId, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute: fixture.minute,
-        mainPick: null, alternative: null, oddsTiming: liveOddsRow ? "live" : "unavailable", stats: null, goalSignal,
+        mainPick: null, alternative: null, oddsTiming: liveOddsRow ? "live" : "unavailable", stats: null,
         oddsBasis: "Canlı istatistikler API tarafından sağlanmadı.",
-        note: "Canlı istatistikler eksik; bu nedenle bahis tercihi üretilmedi. Sinyal paneli mevcut verilerle sınırlıdır." });
+        note: "Canlı istatistikler eksik olduğu için tercih zorlanmadı." });
     }
     if (!fixture.homeId || !fixture.awayId) {
       return res.json({ fixtureId, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute: fixture.minute,
         mainPick: null, alternative: null, oddsTiming: liveOddsRow ? "live" : "unavailable",
-        stats: { totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners, dangerousAttacks:stats.dangerousAttacks, pressure: Number(stats.pressure.toFixed(1)), home:stats.home, away:stats.away }, goalSignal,
-        oddsBasis: "Takım kimlikleri bulunamadı.", note: "Takım formu doğrulanamadığı için bahis tercihi zorlanmadı; gol sinyali gösterilebilir." });
+        stats: { totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners, pressure: Number(stats.pressure.toFixed(1)) },
+        oddsBasis: "Takım kimlikleri bulunamadı.", note: "Takım formu doğrulanamadığı için tercih zorlanmadı." });
     }
     const [homeForm, awayForm] = await Promise.all([
       fetchTeamRecentForm(fixture.homeId, fixture.id, fixture.leagueId, fixture.season, "home"), fetchTeamRecentForm(fixture.awayId, fixture.id, fixture.leagueId, fixture.season, "away")
@@ -1589,19 +1553,19 @@ app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
     if (!homeForm.available || !awayForm.available) {
       return res.json({ fixtureId, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute: fixture.minute,
         mainPick: null, alternative: null, oddsTiming: liveOddsRow ? "live" : "unavailable",
-        stats: { totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners, dangerousAttacks:stats.dangerousAttacks, pressure: Number(stats.pressure.toFixed(1)), home:stats.home, away:stats.away }, goalSignal,
-        oddsBasis: "Son 5 maç form verisi eksik.", note: "Form verisi doğrulanamadığı için bahis tercihi zorlanmadı; gol sinyali bağımsız gösterilir." });
+        stats: { totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners, pressure: Number(stats.pressure.toFixed(1)) },
+        oddsBasis: "Son 5 maç form verisi eksik.", note: "Form verisi doğrulanamadığı için tercih zorlanmadı." });
     }
     const chosen = chooseSupportedMarket(liveOddsRow, "live", fixture, { home: homeForm, away: awayForm }, stats, prematchOddsRow);
     const alternative = chosen ? chooseSupportedMarket(liveOddsRow, "live", fixture, { home: homeForm, away: awayForm }, stats, prematchOddsRow, chosen.market) : null;
-    const oddsTiming = chosen?.oddsTiming || (liveOddsRow ? "live" : "unavailable");
+    const oddsTiming = chosen?.oddsTiming || (liveOddsRow ? "live" : (prematchOddsRow ? "prematch" : "unavailable"));
     const oddsBasis = chosen
-      ? (chosen.oddsTiming === "live" ? `Gerçek canlı oran · ${chosen.bookmaker}` : `Canlı oran · ${chosen.bookmaker}`)
-      : (liveOddsRow ? "Canlı oran var ancak dakika/skor/form/istatistik eşiklerini geçen market yok." : "Canlı oran bulunamadı; maç önü oranıyla canlı tercih üretilmedi.");
+      ? (chosen.oddsTiming === "live" ? `Gerçek canlı oran · ${chosen.bookmaker}` : `Canlı oran bulunamadı; maç önü oranı yedek olarak kullanıldı · ${chosen.bookmaker}`)
+      : (liveOddsRow ? "Canlı oran var ancak dakika/skor/form/istatistik eşiklerini geçen market yok." : "Kullanılabilir canlı oran bulunamadı; eşikleri geçen doğrulanmış tercih yok.");
     res.json({ fixtureId, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute: fixture.minute,
       mainPick: chosen?.market || null, alternative: alternative?.market || null, oddsTiming,
-      stats: { totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners, dangerousAttacks:stats.dangerousAttacks, pressure: Number(stats.pressure.toFixed(1)), home:stats.home, away:stats.away, xGAvailable:stats.xGAvailable, xGTotal:stats.xGTotal }, goalSignal,
-      oddsBasis, note: chosen ? "Canlı skor, mevcut istatistikler, son 5 maç formu ve mevcut market verisi değerlendirildi. Ham oranlar gösterilmez." : "Güvenilir bahis tercihi eşiği karşılanmadı; gol tehlikesi sinyali ayrıca değerlendirilir." });
+      stats: { totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners, pressure: Number(stats.pressure.toFixed(1)) },
+      oddsBasis, note: chosen ? "Canlı skor, mevcut istatistikler, son 5 maç formu ve mevcut market verisi değerlendirildi. Ham oranlar gösterilmez." : "Güvenilir tercih eşiği karşılanmadığı için seçim zorlanmadı." });
   } catch (error) {
     const message = String(error?.message || error);
     const limited = /429|rate.?limit|quota|istek sınırı/i.test(message);
@@ -2023,12 +1987,12 @@ async function settleCouponPredictions() {
     }
     for (const [fixtureId, items] of fixtureGroups) {
       try {
+        const payload = await cachedProviderRequest(`coupon-settle:${fixtureId}`, `/fixtures?id=${fixtureId}`, 5 * 60 * 1000);
         await databasePool.query(
           `UPDATE winscope_coupon_predictions SET settlement_checked_at=NOW()
            WHERE tracking_id = ANY($1::bigint[]) AND settled_at IS NULL`,
           [items.map(x => x.tracking_id)]
         );
-        const payload = await cachedProviderRequest(`coupon-settle:${fixtureId}`, `/fixtures?id=${fixtureId}`, 2 * 60 * 1000);
         const row = payload.response?.[0];
         const status = String(row?.fixture?.status?.short || '').toUpperCase();
         if (!row || !['FT','AET','PEN'].includes(status) || row.goals?.home == null || row.goals?.away == null) continue;
@@ -2049,6 +2013,20 @@ async function settleCouponPredictions() {
             [item.tracking_id, actualScore, outcome]
           );
           if (!updated.rowCount || outcome !== 'won' || item.telegram_notified_at) continue;
+          const marketKey = String(item.market || '').trim().toLocaleLowerCase('tr-TR');
+          // Aynı fixture+market birden fazla kupon/tekrar kayıt içinde bulunsa da tek bildirim.
+          const claim = await databasePool.query(
+            `INSERT INTO winscope_coupon_result_notifications(fixture_id,market_key,status)
+             VALUES($1,$2,'sending') ON CONFLICT(fixture_id,market_key) DO NOTHING RETURNING fixture_id`,
+            [fixtureId, marketKey]
+          );
+          if (!claim.rowCount) {
+            await databasePool.query(
+              'UPDATE winscope_coupon_predictions SET telegram_notified_at=COALESCE(telegram_notified_at,NOW()) WHERE tracking_id=$1',
+              [item.tracking_id]
+            );
+            continue;
+          }
           const message = [
             '🏆 WINSCOPE KUPON TERCİHİ KAZANDI!',
             `🏟️ ${item.league || 'Lig bilgisi yok'}`,
@@ -2057,12 +2035,23 @@ async function settleCouponPredictions() {
             `📊 Maç sonucu: ${actualScore}`,
             `📌 Kupon türü: ${item.coupon_type === 'live' ? 'Canlı' : item.coupon_type === 'surprise' ? 'Sürpriz' : 'Maç önü'}`
           ].join('\n');
-          const sent = await sendTelegram(message);
-          if (sent.sent) {
-            await databasePool.query(
-              'UPDATE winscope_coupon_predictions SET telegram_notified_at=NOW() WHERE tracking_id=$1 AND telegram_notified_at IS NULL',
-              [item.tracking_id]
-            );
+          try {
+            const sent = await sendTelegram(message);
+            if (sent.sent) {
+              await databasePool.query(
+                `UPDATE winscope_coupon_result_notifications SET status='sent',telegram_message_id=$3,sent_at=NOW()
+                 WHERE fixture_id=$1 AND market_key=$2`, [fixtureId, marketKey, sent.messageId]
+              );
+              await databasePool.query(
+                'UPDATE winscope_coupon_predictions SET telegram_notified_at=NOW() WHERE tracking_id=$1 AND telegram_notified_at IS NULL',
+                [item.tracking_id]
+              );
+            } else {
+              await databasePool.query('DELETE FROM winscope_coupon_result_notifications WHERE fixture_id=$1 AND market_key=$2 AND status='sending'', [fixtureId, marketKey]);
+            }
+          } catch (telegramError) {
+            await databasePool.query('DELETE FROM winscope_coupon_result_notifications WHERE fixture_id=$1 AND market_key=$2 AND status='sending'', [fixtureId, marketKey]);
+            console.warn(`[Coupon tracking Telegram] fixture=${fixtureId} market=${marketKey}: ${telegramError.message}`);
           }
         }
       } catch (error) {
