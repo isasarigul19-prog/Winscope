@@ -347,7 +347,8 @@ function normalizeProviderMatch(match) {
   const leagueName = match.league?.name || match.league || "Lig";
   const countryName = match.league?.country || match.country || "";
   const idNum = Number(match.fixture?.id ?? match.id) || 0;
-  let status = String(match.fixture?.status?.short || match.status || "NS").toUpperCase();
+  const periodStatus = String(match.fixture?.status?.short || match.statusShort || match.rawStatus || match.status || "NS").toUpperCase();
+  let status = periodStatus;
   if (["FT", "AET", "PEN"].includes(status)) status = "FT";
   else if (["1H", "2H", "HT", "LIVE", "IN_PLAY", "ET", "BT", "P"].includes(status)) status = "LIVE";
   else if (["NS", "TBD", "PST", "CANC", "ABD", "AWD", "WO"].includes(status)) status = status === "NS" ? "NS" : status;
@@ -355,7 +356,7 @@ function normalizeProviderMatch(match) {
     id: idNum, homeId: Number(match.teams?.home?.id) || null, awayId: Number(match.teams?.away?.id) || null,
     leagueId: Number(match.league?.id) || null, season: Number(match.league?.season) || null,
     league: String(leagueName), country: String(countryName),
-    minute: match.fixture?.status?.elapsed ?? match.minute ?? null, status,
+    minute: match.fixture?.status?.elapsed ?? match.minute ?? null, status, periodStatus,
     home: String(homeName), away: String(awayName),
     homeScore: match.goals?.home ?? 0, awayScore: match.goals?.away ?? 0,
     htHomeScore: match.score?.halftime?.home ?? null, htAwayScore: match.score?.halftime?.away ?? null,
@@ -853,6 +854,20 @@ function chooseFormFallbackMarket(mode, fixture, forms, excludeMarket = null) {
   return candidates[0] || null;
 }
 
+function liveMatchPhase(fixture) {
+  const short = String(fixture.periodStatus || fixture.statusShort || fixture.rawStatus || "").toUpperCase();
+  if (short === "1H") return "FIRST_HALF";
+  if (short === "HT" || short === "BT") return "HALFTIME";
+  if (short === "2H") return "SECOND_HALF";
+  // Extra time / penalties are excluded because regular-time market settlement differs.
+  if (["ET", "P"].includes(short)) return "UNSUPPORTED_PERIOD";
+  // Fallback for legacy records. Exactly 45' is ambiguous, so fail closed.
+  const minute = Number(fixture.minute || 0);
+  if (minute > 0 && minute < 45) return "FIRST_HALF";
+  if (minute > 45) return "SECOND_HALF";
+  return "UNKNOWN_PERIOD";
+}
+
 function liveMarketAlreadySettled(market, fixture) {
   const home = Number(fixture.homeScore || 0), away = Number(fixture.awayScore || 0), total = home + away;
   const minute = Number(fixture.minute || 0);
@@ -863,7 +878,8 @@ function liveMarketAlreadySettled(market, fixture) {
   if (ms && total >= Math.ceil(Number(ms[1].replace(",", ".")))) return true;
   const ht = market.match(/^İY ([0-9]+[.,][0-9]+) ÜST$/);
   if (ht) {
-    if (minute >= 45) return true;
+    const phase = liveMatchPhase(fixture);
+    if (phase === "HALFTIME" || phase === "SECOND_HALF" || phase === "UNSUPPORTED_PERIOD") return true;
     const hg = Number(fixture.htHomeScore ?? home), ag = Number(fixture.htAwayScore ?? away);
     if (hg + ag >= Math.ceil(Number(ht[1].replace(",", ".")))) return true;
   }
@@ -1701,6 +1717,7 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows) {
     ["İY 0.5 ÜST", "İY 1.5 ÜST", "MS 0.5 ÜST", "MS 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "MS 5.5 ÜST", "EV 1.5 ÜST", "DEP 1.5 ÜST"].includes(x.market)
   );
   const minute = Number(fixture.minute || 0);
+  const phase = liveMatchPhase(fixture);
   const total = Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0);
   const pressurePerMinute = minute > 0 ? Number(stats.pressure || 0) / minute : 0;
   const pressureFactor = Math.max(0.72, Math.min(1.38, 0.82 + pressurePerMinute / 2.2));
@@ -1712,12 +1729,13 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows) {
     const ms = item.market.match(/^MS ([0-9]+(?:[.,][0-9]+)?) ÜST$/);
     const ht = item.market.match(/^İY ([0-9]+(?:[.,][0-9]+)?) ÜST$/);
     const team = item.market === "EV 1.5 ÜST" || item.market === "DEP 1.5 ÜST";
-    // Pazar zaman dilimi kuralı: ilk yarıda yalnızca ilk yarı gol pazarları,
-    // devre arasında/ikinci yarıda yalnızca maç sonu gol pazarları değerlendirilir.
-    // Böylece 20-44. dakikada 0-0 için MS 0.5 ÜST gibi yanlış dönem pazarı seçilemez.
-    if (minute < 45 && !ht) continue;
-    if (minute >= 45 && ht) continue;
-    if (team) continue; // takım golü pazarı için takım bazlı canlı gol modeli henüz doğrulanmadı
+    // Market selection uses API-Football's period code, not minute alone.
+    // 1H: HT markets only; HT/BT: no pick; 2H: FT markets only.
+    // If the period is unknown at 45', do not guess.
+    if (phase === "HALFTIME" || phase === "UNKNOWN_PERIOD" || phase === "UNSUPPORTED_PERIOD") continue;
+    if (phase === "FIRST_HALF" && !ht) continue;
+    if (phase === "SECOND_HALF" && !ms) continue;
+    if (team) continue; // Team-goal model is not validated yet.
     const line = Number((ms || ht)[1].replace(',', '.'));
     const current = ms ? total : total;
     const remaining = ms ? Math.max(1, 95 - minute) : Math.max(1, 50 - minute);
@@ -1734,6 +1752,7 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows) {
   const chosen = candidates[0] || null;
   return {
     fixtureId: fixture.id, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute,
+    matchPhase: phase,
     mainPick: chosen?.market || null, alternative: candidates[1]?.market || null,
     source: chosen?.bookmaker || null, valueScore: chosen?.ev ?? null, edge: chosen?.edge ?? null,
     oddsTiming: liveOddsRow ? "live" : "unavailable",
@@ -1741,7 +1760,11 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows) {
     goalSignal: { level: chosen ? "Değer adayı" : "Tercih yok", score: chosen ? Math.round(chosen.edge * 100) : 0, note: chosen ? "Canlı oran, skor, kalan süre ve canlı baskı birlikte değerlendirildi." : (!liveOddsRow ? "Gerçek canlı oran bulunamadı." : !stats.available ? "Canlı istatistik eksik; bahis tercihi üretilmedi." : "Uygun canlı pazarda yeterli beklenen değer bulunamadı.") },
     oddsBasis: liveOddsRow ? "Yalnızca gerçek canlı oranlar kullanıldı; maç önü oranı yedek yapılmadı." : "Canlı oran bulunamadı; maç önü oranı kullanılmadı.",
     reasonCounts: rejected,
-    note: chosen ? `En güçlü canlı aday: ${chosen.market}. Güven seviyesi orta; kesin sonuç değildir.` : "Maç analiz edildi ancak güvenilir değer eşiğini geçen canlı tercih bulunmadı."
+    note: chosen ? `En güçlü canlı aday: ${chosen.market}. Güven seviyesi orta; kesin sonuç değildir.` :
+      phase === "HALFTIME" ? "Devre arası: canlı tercih üretilmedi." :
+      phase === "UNKNOWN_PERIOD" ? "Maçın devre durumu doğrulanamadı; yanlış pazar önermemek için tercih üretilmedi." :
+      phase === "UNSUPPORTED_PERIOD" ? "Uzatma/penaltı dönemi desteklenmiyor; tercih üretilmedi." :
+      "Maç analiz edildi ancak güvenilir değer eşiğini geçen doğru dönem pazarı bulunmadı."
   };
 }
 
