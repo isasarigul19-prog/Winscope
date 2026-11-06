@@ -2047,10 +2047,10 @@ async function settleCouponPredictions() {
                 [item.tracking_id]
               );
             } else {
-              await databasePool.query('DELETE FROM winscope_coupon_result_notifications WHERE fixture_id=$1 AND market_key=$2 AND status='sending'', [fixtureId, marketKey]);
+              await databasePool.query("DELETE FROM winscope_coupon_result_notifications WHERE fixture_id=$1 AND market_key=$2 AND status='sending'", [fixtureId, marketKey]);
             }
           } catch (telegramError) {
-            await databasePool.query('DELETE FROM winscope_coupon_result_notifications WHERE fixture_id=$1 AND market_key=$2 AND status='sending'', [fixtureId, marketKey]);
+            await databasePool.query("DELETE FROM winscope_coupon_result_notifications WHERE fixture_id=$1 AND market_key=$2 AND status='sending'", [fixtureId, marketKey]);
             console.warn(`[Coupon tracking Telegram] fixture=${fixtureId} market=${marketKey}: ${telegramError.message}`);
           }
         }
