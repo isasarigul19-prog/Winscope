@@ -1712,7 +1712,11 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows) {
     const ms = item.market.match(/^MS ([0-9]+(?:[.,][0-9]+)?) ÜST$/);
     const ht = item.market.match(/^İY ([0-9]+(?:[.,][0-9]+)?) ÜST$/);
     const team = item.market === "EV 1.5 ÜST" || item.market === "DEP 1.5 ÜST";
-    if (ht && minute >= 45) continue;
+    // Pazar zaman dilimi kuralı: ilk yarıda yalnızca ilk yarı gol pazarları,
+    // devre arasında/ikinci yarıda yalnızca maç sonu gol pazarları değerlendirilir.
+    // Böylece 20-44. dakikada 0-0 için MS 0.5 ÜST gibi yanlış dönem pazarı seçilemez.
+    if (minute < 45 && !ht) continue;
+    if (minute >= 45 && ht) continue;
     if (team) continue; // takım golü pazarı için takım bazlı canlı gol modeli henüz doğrulanmadı
     const line = Number((ms || ht)[1].replace(',', '.'));
     const current = ms ? total : total;
