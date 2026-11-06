@@ -1479,7 +1479,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   const fixturePayload = await cachedProviderRequest(fixtureKey, fixturePath, isLiveMode ? 60_000 : 60_000);
   const allFixtures = (fixturePayload.response || []).map(normalizeProviderMatch)
     .filter(m => m.id && !isExcludedAnalysisCompetition(m) &&
-      (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 25 && Number(m.minute || 0) <= 80 : m.status === "NS"));
+      (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 20 && Number(m.minute || 0) <= 90 : m.status === "NS"));
   // Büyük ligleri önceliklendir; aynı öncelikte erken başlayacak maçları öne al.
   allFixtures.sort((a, b) => automaticLeaguePriority(a) - automaticLeaguePriority(b) ||
     String(a.fixtureDate || "").localeCompare(String(b.fixtureDate || "")));
@@ -1489,7 +1489,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   // Genişletilmiş otomatik canlı tarama: uygun maç ilk 12'de değilse kaçırılmasın.
   // API kota koruması, önbellek ve istek kuyruğu aynen korunur.
   const fixtures = isLiveMode
-    ? allFixtures.slice(0, options.automatic ? 25 : 25)
+    ? allFixtures
     : allFixtures;
   if (!fixtures.length) return { draftId:`coupon-${Date.now()}`, date, type:mode, status:"NO_MATCHES", picks:[], message:isLiveMode ? "Şu anda uygun dakika aralığında canlı maç bulunamadı." : "Seçilen tarihte başlamamış maç bulunamadı." };
 
@@ -1869,13 +1869,107 @@ app.get("/api/coupon/surprise", async (req, res) => {
   try { res.json(await createCouponByMode(String(req.query.date || ""), "surprise")); }
   catch (e) { res.status(502).json({ status: "ERROR", type: "surprise", picks: [], error: "10 maçlık sürpriz kupon oluşturulamadı.", detail: e.message }); }
 });
+function nextGoalMarketRows(oddsRow, fixture) {
+  const rows = [];
+  for (const bookmaker of bookmakerRows(oddsRow)) {
+    for (const bet of (bookmaker.bets || [])) {
+      const name = String(bet.name || "").toLowerCase();
+      if (!/(next goal|next team to score|team to score next|next scorer)/.test(name)) continue;
+      const outcomes = {};
+      for (const v of (bet.values || [])) {
+        const label = String(v.value ?? v.name ?? "").toLowerCase().trim();
+        const odd = Number(v.odd);
+        if (!Number.isFinite(odd) || odd < 1.01) continue;
+        if (/^(home|1|team 1|home team)$/.test(label)) outcomes.home = odd;
+        else if (/^(away|2|team 2|away team)$/.test(label)) outcomes.away = odd;
+        else if (/^(no goal|no more goals|none|no scorer)$/.test(label)) outcomes.none = odd;
+      }
+      if (Object.keys(outcomes).length >= 2) rows.push({ bookmaker: bookmaker.name || "Kaynak belirtilmedi", outcomes });
+    }
+  }
+  return rows;
+}
+
+function estimateNextGoal(fixture, stats) {
+  const minute = Math.max(1, Number(fixture.minute || 1));
+  const remaining = Math.max(1, 95 - minute);
+  const h = Number(fixture.homeScore || 0), a = Number(fixture.awayScore || 0);
+  const sh = stats?.home || {}, sa = stats?.away || {};
+  // Baseline intensity uses live pressure, score state and remaining time; no missing value is fabricated.
+  const homePressure = (Number(sh.shotsOnTarget || 0) * 2.2) + (Number(sh.totalShots || 0) * .35) + (Number(sh.corners || 0) * .55);
+  const awayPressure = (Number(sa.shotsOnTarget || 0) * 2.2) + (Number(sa.totalShots || 0) * .35) + (Number(sa.corners || 0) * .55);
+  const homeRate = Math.max(.025, .11 + homePressure / Math.max(35, minute * 2.8) + (h < a ? .035 : 0));
+  const awayRate = Math.max(.025, .11 + awayPressure / Math.max(35, minute * 2.8) + (a < h ? .035 : 0));
+  const totalRate = homeRate + awayRate;
+  const eventProbability = 1 - Math.exp(-totalRate * remaining / 90);
+  const noGoal = 1 - eventProbability;
+  const home = eventProbability * homeRate / totalRate;
+  const away = eventProbability * awayRate / totalRate;
+  return { home, away, none: noGoal, confidence: stats?.available ? "MEDIUM" : "LOW", basis: stats?.available ? "canlı şut/korner baskısı + skor + dakika" : "skor + dakika; canlı istatistik eksik" };
+}
+
+async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
+  const payload = await cachedProviderRequest("next-goal-live-fixtures", "/fixtures?live=all", 30000);
+  const fixtures = (payload.response || []).map(normalizeProviderMatch)
+    .filter(f => f.id && f.status === "LIVE" && Number(f.minute || 0) >= 20 && Number(f.minute || 0) <= 90 && !isExcludedAnalysisCompetition(f));
+  const results = [];
+  for (const fixture of fixtures) {
+    try {
+      const [oddsPayload, statsPayload] = await Promise.all([
+        cachedProviderRequest(`next-goal-live-odds:${fixture.id}`, `/odds/live?fixture=${fixture.id}`, 8000).catch(() => ({ response: [] })),
+        cachedProviderRequest(`next-goal-stats:${fixture.id}`, `/fixtures/statistics?fixture=${fixture.id}`, 12000).catch(() => ({ response: [] }))
+      ]);
+      const oddsRow = (oddsPayload.response || []).find(r => Number(r.fixture?.fixture?.id ?? r.fixture?.id ?? r.fixtureId ?? r.id) === fixture.id) || null;
+      const stats = liveStatsMetrics(statsPayload.response || [], fixture);
+      const probabilities = estimateNextGoal(fixture, stats);
+      const marketRows = nextGoalMarketRows(oddsRow, fixture);
+      let value = null;
+      for (const market of marketRows) {
+        const prices = market.outcomes;
+        const available = Object.entries(prices).filter(([, odd]) => odd >= 1.50);
+        const invSum = Object.values(prices).reduce((sum, odd) => sum + 1 / odd, 0);
+        for (const [outcome, odd] of available) {
+          const fair = (1 / odd) / invSum;
+          const model = probabilities[outcome];
+          const edge = model - fair;
+          const ev = model * odd - 1;
+          if (model != null && edge >= 0.05 && ev >= 0.05 && (!value || ev > value.ev)) {
+            value = { outcome, bookmaker: market.bookmaker, edge, ev };
+          }
+        }
+      }
+      const nextGoal = Object.entries(probabilities).sort((a,b) => b[1]-a[1])[0][0];
+      results.push({ fixtureId: fixture.id, league: fixture.league, home: fixture.home, away: fixture.away,
+        minute: fixture.minute, score: `${fixture.homeScore}-${fixture.awayScore}`,
+        prediction: nextGoal === "home" ? "Ev sahibi golü" : nextGoal === "away" ? "Deplasman golü" : "Başka gol yok",
+        probabilities: { home: Math.round(probabilities.home*1000)/10, away: Math.round(probabilities.away*1000)/10, none: Math.round(probabilities.none*1000)/10 },
+        confidence: probabilities.confidence, basis: probabilities.basis,
+        status: value ? "VALUE_CANDIDATE" : marketRows.length ? "NO_VALUE" : "LIVE_NEXT_GOAL_ODDS_UNAVAILABLE",
+        valuePick: value ? { outcome: value.outcome === "home" ? "Ev sahibi sıradaki gol" : value.outcome === "away" ? "Deplasman sıradaki gol" : "Başka gol yok", bookmaker: value.bookmaker } : null
+      });
+    } catch (error) {
+      results.push({ fixtureId: fixture.id, league: fixture.league, home: fixture.home, away: fixture.away,
+        minute: fixture.minute, score: `${fixture.homeScore}-${fixture.awayScore}`, prediction: "Analiz sürüyor",
+        confidence: "LOW", status: "PARTIAL_DATA", reason: error.message });
+    }
+  }
+  const valueCandidates = results.filter(x => x.status === "VALUE_CANDIDATE");
+  valueCandidates.sort((a,b) => (b.probabilities?.[a.valuePick?.outcome === "Ev sahibi sıradaki gol" ? "home" : a.valuePick?.outcome === "Deplasman sıradaki gol" ? "away" : "none"] || 0) - (a.probabilities?.[b.valuePick?.outcome === "Ev sahibi sıradaki gol" ? "home" : b.valuePick?.outcome === "Deplasman sıradaki gol" ? "away" : "none"] || 0));
+  const top = valueCandidates[0] || null;
+  let telegram = null;
+  if (sendTelegramMessage && top) {
+    const key = `next-goal:${top.fixtureId}:${top.valuePick.outcome}`;
+    if (!autoSentFixtureKeys.has(key)) {
+      telegram = await sendTelegram(`⚡ WINSCOPE SIRADAKİ GOL DEĞER ADAYI\n${top.home} - ${top.away}\nDakika/skor: ${top.minute}' · ${top.score}\nTercih: ${top.valuePick.outcome}\nGüven: ${top.confidence}\nOran: 1.50+ filtresi ve değer kontrolü geçti.`);
+      if (telegram?.sent) autoSentFixtureKeys.add(key);
+    } else telegram = { sent: false, duplicateSuppressed: true };
+  }
+  return { status: "READY", type: "next-goal", scanned: results.length, valueCandidates: valueCandidates.length, matches: results, topPick: top, picks: top ? [{ ...top, market: top.valuePick?.outcome || "Sıradaki gol" }] : [], telegram };
+}
+
 async function liveCouponHandler(_req, res) {
-  res.json({
-    status: "DISABLED",
-    type: "live",
-    picks: [],
-    error: "Canlı analiz şimdilik kapalı. Canlı maçlar yalnızca listelenir; analiz maç önü oranlarıyla yapılır."
-  });
+  try { res.json(await buildNextGoalAnalysis()); }
+  catch (error) { res.status(502).json({ status: "ERROR", type: "next-goal", scanned: 0, matches: [], error: error.message }); }
 }
 app.get("/api/coupon/live-best", liveCouponHandler);
 app.get("/api/coupon/live", liveCouponHandler);
@@ -2073,15 +2167,9 @@ async function runAutomaticLivePick() {
   if (autoLiveTaskInFlight) return;
   autoLiveTaskInFlight = true;
   try {
-    const date = turkeyDateString();
-    const result = await createCouponByMode(date, "live", { automatic: true });
-    if (result.status === "READY" && result.telegram?.sent && !result.telegram?.duplicateSuppressed) {
-      console.log(`[AUTO LIVE] Telegram kabul etti message_id=${result.telegram.messageId ?? "bilinmiyor"}: ${result.picks?.[0]?.home} - ${result.picks?.[0]?.away}`);
-    } else if (result.telegram?.duplicateSuppressed) {
-      console.log(`[AUTO LIVE] Tekrar engellendi; yeni Telegram mesajı gönderilmedi: ${result.telegram.reason || "aynı maç/pazar daha önce gönderilmiş"}`);
-    } else {
-      console.log(`[AUTO LIVE] Telegram bildirimi gönderilmedi: ${result.message || result.telegram?.reason || result.telegram?.error || result.status}`);
-    }
+    const result = await buildNextGoalAnalysis({ sendTelegramMessage: true });
+    if (result.telegram?.sent) console.log(`[AUTO LIVE] Sıradaki gol Telegram bildirimi gönderildi; taranan=${result.scanned}`);
+    else console.log(`[AUTO LIVE] Bildirim yok; taranan=${result.scanned}, değer adayı=${result.valueCandidates}`);
   } catch (error) {
     console.error(`[AUTO LIVE ERROR] ${error.message}`);
   } finally {
