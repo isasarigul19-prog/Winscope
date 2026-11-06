@@ -347,8 +347,7 @@ function normalizeProviderMatch(match) {
   const leagueName = match.league?.name || match.league || "Lig";
   const countryName = match.league?.country || match.country || "";
   const idNum = Number(match.fixture?.id ?? match.id) || 0;
-  const periodStatus = String(match.fixture?.status?.short || match.statusShort || match.rawStatus || match.status || "NS").toUpperCase();
-  let status = periodStatus;
+  let status = String(match.fixture?.status?.short || match.status || "NS").toUpperCase();
   if (["FT", "AET", "PEN"].includes(status)) status = "FT";
   else if (["1H", "2H", "HT", "LIVE", "IN_PLAY", "ET", "BT", "P"].includes(status)) status = "LIVE";
   else if (["NS", "TBD", "PST", "CANC", "ABD", "AWD", "WO"].includes(status)) status = status === "NS" ? "NS" : status;
@@ -356,7 +355,7 @@ function normalizeProviderMatch(match) {
     id: idNum, homeId: Number(match.teams?.home?.id) || null, awayId: Number(match.teams?.away?.id) || null,
     leagueId: Number(match.league?.id) || null, season: Number(match.league?.season) || null,
     league: String(leagueName), country: String(countryName),
-    minute: match.fixture?.status?.elapsed ?? match.minute ?? null, status, periodStatus,
+    minute: match.fixture?.status?.elapsed ?? match.minute ?? null, status,
     home: String(homeName), away: String(awayName),
     homeScore: match.goals?.home ?? 0, awayScore: match.goals?.away ?? 0,
     htHomeScore: match.score?.halftime?.home ?? null, htAwayScore: match.score?.halftime?.away ?? null,
@@ -854,20 +853,6 @@ function chooseFormFallbackMarket(mode, fixture, forms, excludeMarket = null) {
   return candidates[0] || null;
 }
 
-function liveMatchPhase(fixture) {
-  const short = String(fixture.periodStatus || fixture.statusShort || fixture.rawStatus || "").toUpperCase();
-  if (short === "1H") return "FIRST_HALF";
-  if (short === "HT" || short === "BT") return "HALFTIME";
-  if (short === "2H") return "SECOND_HALF";
-  // Extra time / penalties are excluded because regular-time market settlement differs.
-  if (["ET", "P"].includes(short)) return "UNSUPPORTED_PERIOD";
-  // Fallback for legacy records. Exactly 45' is ambiguous, so fail closed.
-  const minute = Number(fixture.minute || 0);
-  if (minute > 0 && minute < 45) return "FIRST_HALF";
-  if (minute > 45) return "SECOND_HALF";
-  return "UNKNOWN_PERIOD";
-}
-
 function liveMarketAlreadySettled(market, fixture) {
   const home = Number(fixture.homeScore || 0), away = Number(fixture.awayScore || 0), total = home + away;
   const minute = Number(fixture.minute || 0);
@@ -878,8 +863,7 @@ function liveMarketAlreadySettled(market, fixture) {
   if (ms && total >= Math.ceil(Number(ms[1].replace(",", ".")))) return true;
   const ht = market.match(/^İY ([0-9]+[.,][0-9]+) ÜST$/);
   if (ht) {
-    const phase = liveMatchPhase(fixture);
-    if (phase === "HALFTIME" || phase === "SECOND_HALF" || phase === "UNSUPPORTED_PERIOD") return true;
+    if (minute >= 45) return true;
     const hg = Number(fixture.htHomeScore ?? home), ag = Number(fixture.htAwayScore ?? away);
     if (hg + ag >= Math.ceil(Number(ht[1].replace(",", ".")))) return true;
   }
@@ -1717,7 +1701,6 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows) {
     ["İY 0.5 ÜST", "İY 1.5 ÜST", "MS 0.5 ÜST", "MS 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "MS 5.5 ÜST", "EV 1.5 ÜST", "DEP 1.5 ÜST"].includes(x.market)
   );
   const minute = Number(fixture.minute || 0);
-  const phase = liveMatchPhase(fixture);
   const total = Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0);
   const pressurePerMinute = minute > 0 ? Number(stats.pressure || 0) / minute : 0;
   const pressureFactor = Math.max(0.72, Math.min(1.38, 0.82 + pressurePerMinute / 2.2));
@@ -1729,13 +1712,12 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows) {
     const ms = item.market.match(/^MS ([0-9]+(?:[.,][0-9]+)?) ÜST$/);
     const ht = item.market.match(/^İY ([0-9]+(?:[.,][0-9]+)?) ÜST$/);
     const team = item.market === "EV 1.5 ÜST" || item.market === "DEP 1.5 ÜST";
-    // Market selection uses API-Football's period code, not minute alone.
-    // 1H: HT markets only; HT/BT: no pick; 2H: FT markets only.
-    // If the period is unknown at 45', do not guess.
-    if (phase === "HALFTIME" || phase === "UNKNOWN_PERIOD" || phase === "UNSUPPORTED_PERIOD") continue;
-    if (phase === "FIRST_HALF" && !ht) continue;
-    if (phase === "SECOND_HALF" && !ms) continue;
-    if (team) continue; // Team-goal model is not validated yet.
+    // Pazar zaman dilimi kuralı: ilk yarıda yalnızca ilk yarı gol pazarları,
+    // devre arasında/ikinci yarıda yalnızca maç sonu gol pazarları değerlendirilir.
+    // Böylece 20-44. dakikada 0-0 için MS 0.5 ÜST gibi yanlış dönem pazarı seçilemez.
+    if (minute < 45 && !ht) continue;
+    if (minute >= 45 && ht) continue;
+    if (team) continue; // takım golü pazarı için takım bazlı canlı gol modeli henüz doğrulanmadı
     const line = Number((ms || ht)[1].replace(',', '.'));
     const current = ms ? total : total;
     const remaining = ms ? Math.max(1, 95 - minute) : Math.max(1, 50 - minute);
@@ -1752,7 +1734,6 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows) {
   const chosen = candidates[0] || null;
   return {
     fixtureId: fixture.id, currentScore: `${fixture.homeScore}-${fixture.awayScore}`, minute,
-    matchPhase: phase,
     mainPick: chosen?.market || null, alternative: candidates[1]?.market || null,
     source: chosen?.bookmaker || null, valueScore: chosen?.ev ?? null, edge: chosen?.edge ?? null,
     oddsTiming: liveOddsRow ? "live" : "unavailable",
@@ -1760,11 +1741,7 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows) {
     goalSignal: { level: chosen ? "Değer adayı" : "Tercih yok", score: chosen ? Math.round(chosen.edge * 100) : 0, note: chosen ? "Canlı oran, skor, kalan süre ve canlı baskı birlikte değerlendirildi." : (!liveOddsRow ? "Gerçek canlı oran bulunamadı." : !stats.available ? "Canlı istatistik eksik; bahis tercihi üretilmedi." : "Uygun canlı pazarda yeterli beklenen değer bulunamadı.") },
     oddsBasis: liveOddsRow ? "Yalnızca gerçek canlı oranlar kullanıldı; maç önü oranı yedek yapılmadı." : "Canlı oran bulunamadı; maç önü oranı kullanılmadı.",
     reasonCounts: rejected,
-    note: chosen ? `En güçlü canlı aday: ${chosen.market}. Güven seviyesi orta; kesin sonuç değildir.` :
-      phase === "HALFTIME" ? "Devre arası: canlı tercih üretilmedi." :
-      phase === "UNKNOWN_PERIOD" ? "Maçın devre durumu doğrulanamadı; yanlış pazar önermemek için tercih üretilmedi." :
-      phase === "UNSUPPORTED_PERIOD" ? "Uzatma/penaltı dönemi desteklenmiyor; tercih üretilmedi." :
-      "Maç analiz edildi ancak güvenilir değer eşiğini geçen doğru dönem pazarı bulunmadı."
+    note: chosen ? `En güçlü canlı aday: ${chosen.market}. Güven seviyesi orta; kesin sonuç değildir.` : "Maç analiz edildi ancak güvenilir değer eşiğini geçen canlı tercih bulunmadı."
   };
 }
 
@@ -1935,13 +1912,74 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
     }
   }
   const valueCandidates = results.filter(x => x.status === "VALUE_CANDIDATE").sort((a,b) => Number(b.valueScore || 0) - Number(a.valueScore || 0));
-  const top = valueCandidates[0] || null;
+  let top = valueCandidates[0] || null;
   let telegram = null;
   if (sendTelegramMessage && top) {
     const key = `next-goal:${top.fixtureId}:${top.mainPick}`;
     if (!autoSentFixtureKeys.has(key)) {
-      telegram = await sendTelegram(`⚡ WINSCOPE CANLI DEĞER ADAYI\n${top.home} - ${top.away}\nDakika/skor: ${top.minute}' · ${top.score}\nTercih: ${top.mainPick}\nGüven: Orta`);
-      if (telegram?.sent) autoSentFixtureKeys.add(key);
+      // Analiz sırasında maç ilerleyebilir. Telegram'a basmadan hemen önce
+      // fixture bilgisini önbelleksiz yeniden çek; eski skorla bildirim gönderme.
+      try {
+        const confirmPayload = await cachedProviderRequest(
+          `live-final-confirm:${top.fixtureId}:${Date.now()}`,
+          `/fixtures?id=${encodeURIComponent(top.fixtureId)}`, 0
+        );
+        let freshRow = (confirmPayload.response || []).find(r => Number(r.fixture?.id ?? r.id) === Number(top.fixtureId)) || null;
+        if (!freshRow || normalizeProviderMatch(freshRow).status !== "LIVE") {
+          const liveConfirm = await cachedProviderRequest(`live-final-list:${Date.now()}`, "/fixtures?live=all", 0);
+          freshRow = (liveConfirm.response || []).find(r => Number(r.fixture?.id ?? r.id) === Number(top.fixtureId)) || freshRow;
+        }
+        const freshFixture = freshRow ? normalizeProviderMatch(freshRow) : null;
+        if (!freshFixture || freshFixture.status !== "LIVE") {
+          console.log(`[AUTO LIVE] Bildirim iptal: fixture=${top.fixtureId} artık canlı değil/doğrulanamadı.`);
+          top = null;
+          telegram = { sent: false, staleSuppressed: true, reason: "Maçın güncel canlı durumu doğrulanamadı." };
+        } else {
+          const oldScore = String(top.score || "");
+          const newScore = `${freshFixture.homeScore}-${freshFixture.awayScore}`;
+          const oldMinute = Number(top.minute || 0), newMinute = Number(freshFixture.minute || 0);
+          if (oldScore !== newScore || newMinute - oldMinute >= 2) {
+            // Skor/dakika değişmişse son istatistik ve canlı oranla yeniden değerlendir.
+            const [freshOddsPayload, freshStatsPayload] = await Promise.all([
+              cachedProviderRequest(`live-final-odds:${top.fixtureId}:${Date.now()}`, `/odds/live?fixture=${top.fixtureId}`, 0).catch(() => ({ response: [] })),
+              cachedProviderRequest(`live-final-stats:${top.fixtureId}:${Date.now()}`, `/fixtures/statistics?fixture=${top.fixtureId}`, 0).catch(() => ({ response: [] }))
+            ]);
+            const freshOdds = (freshOddsPayload.response || []).find(r => Number(r.fixture?.fixture?.id ?? r.fixture?.id ?? r.fixtureId ?? r.id) === Number(top.fixtureId)) || null;
+            const freshAnalysis = await analyzeLiveFixture(freshFixture, freshOdds, freshStatsPayload.response || []);
+            if (!freshAnalysis.mainPick || freshAnalysis.mainPick !== top.mainPick) {
+              // İlk snapshot ile son doğrulama arasında gol olduysa eski aday gönderilmez.
+              goalTrackedFixtures.set(Number(top.fixtureId), {
+                home: top.home, away: top.away, league: top.league,
+                sourceLabel: "Canlı değer adayı sırasında skor değişimi",
+                baselineScore: oldScore
+              });
+              goalScoreCache.set(Number(top.fixtureId), oldScore);
+              console.log(`[AUTO LIVE] Eski aday iptal: ${top.home}-${top.away} ${oldScore} -> ${newScore}; yeni tercih doğrulanmadı.`);
+              top = null;
+              telegram = { sent: false, staleSuppressed: true, reason: "Skor/dakika değişti; eski aday iptal edildi." };
+            } else {
+              top = { ...top, minute: freshFixture.minute, score: newScore, mainPick: freshAnalysis.mainPick,
+                valueScore: freshAnalysis.valueScore, edge: freshAnalysis.edge };
+            }
+          } else {
+            top = { ...top, minute: freshFixture.minute, score: newScore };
+          }
+        }
+      } catch (confirmError) {
+        console.warn(`[AUTO LIVE] Son dakika doğrulaması başarısız fixture=${top.fixtureId}: ${confirmError.message}`);
+        top = null;
+        telegram = { sent: false, staleSuppressed: true, reason: "Güncel skor doğrulanamadığı için bildirim gönderilmedi." };
+      }
+      if (top) {
+        telegram = await sendTelegram(`⚡ WINSCOPE CANLI DEĞER ADAYI\n${top.home} - ${top.away}\nDakika/skor: ${top.minute}' · ${top.score}\nTercih: ${top.mainPick}\nGüven: Orta`);
+        if (telegram?.sent) {
+          autoSentFixtureKeys.add(key);
+          const fixtureId = Number(top.fixtureId);
+          goalTrackedFixtures.set(fixtureId, { home: top.home, away: top.away, league: top.league,
+            sourceLabel: "Canlı değer adayı", baselineScore: String(top.score) });
+          goalScoreCache.set(fixtureId, String(top.score));
+        }
+      }
     } else telegram = { sent: false, duplicateSuppressed: true };
   }
   const reasonSummary = results.reduce((acc, x) => { acc[x.status] = (acc[x.status] || 0) + 1; return acc; }, {});
@@ -2178,12 +2216,12 @@ async function runAutomaticDailyCoupon() {
   }
 }
 
-// Canlı tek tercih otomatik taraması: her 90 saniyede bir. Günün maç önü kuponu 2 saatte bir.
+// Canlı tek tercih otomatik taraması: her 45 saniyede bir. Günün maç önü kuponu 2 saatte bir.
 setTimeout(() => { void runAutomaticLivePick(); }, 20000);
 // Günün maç önü kuponunu da sunucu açıldıktan kısa süre sonra dene;
 // yalnızca interval kullanılırsa ilk bildirim 2 saate kadar gecikebilirdi.
 setTimeout(() => { void runAutomaticDailyCoupon(); }, 30000);
-setInterval(() => { void runAutomaticLivePick(); }, 90 * 1000);
+setInterval(() => { void runAutomaticLivePick(); }, 45 * 1000);
 setInterval(() => { void runAutomaticDailyCoupon(); }, 2 * 60 * 60 * 1000);
 setTimeout(() => { void scanSurpriseScenarios(); }, 45000);
 setInterval(() => { void scanSurpriseScenarios(); }, 10 * 60 * 1000);
@@ -2194,7 +2232,7 @@ setInterval(async () => {
   if (goalScanInFlight || goalTrackedFixtures.size === 0) return;
   goalScanInFlight = true;
   try {
-    const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 60_000);
+    const payload = await cachedProviderRequest(`goal-scan-live:${Math.floor(Date.now()/15000)}`, "/fixtures?live=all", 0);
     const liveMatches = (payload.response || []).map(normalizeProviderMatch);
     const liveById = new Map(liveMatches.map(m => [Number(m.id), m]));
     for (const [fixtureId, tracked] of goalTrackedFixtures.entries()) {
@@ -2220,7 +2258,7 @@ setInterval(async () => {
   } finally {
     goalScanInFlight = false;
   }
-}, 60_000);
+}, 30_000);
 
 let couponSettlementInFlight = false;
 async function settleCouponPredictions() {
