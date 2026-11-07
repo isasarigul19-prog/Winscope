@@ -999,6 +999,9 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     ? liveAllowedRows.map(x => ({ ...x, oddsTiming: "live" }))
     : preMarkets.map(x => ({ ...x, oddsTiming: "prematch" }));
   const choices = mergedMarketRows.filter(x => allowed.includes(x.market) && x.market !== excludeMarket &&
+    // Maç önü KG VAR yalnızca gerçek bookmaker fiyatı 1.50–1.80 aralığındaysa aday olabilir.
+    // Canlı KG VAR kendi canlı oranı ve canlı baskı kontrolleriyle ayrıca değerlendirilir.
+    !(!live && x.market === "KG VAR" && !(Number(x.odd) >= 1.50 && Number(x.odd) <= 1.80)) &&
     // Maç önü ilk yarı oranı, canlı dakikaya uygun fiyat değildir; canlı HT marketlerinde kullanma.
     !(live && x.oddsTiming !== "live" && x.market.startsWith("İY ")) &&
     (!live || !liveMarketAlreadySettled(x.market, fixture)) &&
@@ -1389,15 +1392,33 @@ async function scanSurpriseScenarios() {
       const payload = await cachedProviderRequest(`surprise-settle:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 2 * 60 * 1000).catch(() => ({ response: [] }));
       const byId = new Map((payload.response || []).map(x => [Number(x.fixture?.id), x]));
       for (const row of pending.rows.filter(r => String(r.match_date).slice(0,10) === date)) {
-        const raw = byId.get(Number(row.fixture_id));
+        let raw = byId.get(Number(row.fixture_id));
+        if (!raw) {
+          try {
+            const exact = await cachedProviderRequest(
+              `surprise-settle-fixture:${row.fixture_id}`,
+              `/fixtures?id=${encodeURIComponent(row.fixture_id)}`,
+              30_000
+            );
+            raw = (exact.response || []).find(x => Number(x.fixture?.id) === Number(row.fixture_id)) || null;
+          } catch (lookupError) {
+            console.warn(`[Surprise settle] exact fixture lookup failed fixture=${row.fixture_id}: ${lookupError.message}`);
+          }
+        }
         if (!raw) continue;
         const status = String(raw.fixture?.status?.short || "").toUpperCase();
         if (!["FT","AET","PEN"].includes(status)) continue;
         const ftH = raw.goals?.home, ftA = raw.goals?.away;
         const htH = raw.score?.halftime?.home, htA = raw.score?.halftime?.away;
-        if (![ftH,ftA,htH,htA].every(v => v !== null && v !== undefined && Number.isFinite(Number(v)))) continue;
-        const score = `${ftH}-${ftA}`, ht = `${htH}-${htA}`;
-        const htft = htftLabel(htH,htA,ftH,ftA);
+        // Full-time goals are sufficient to settle FT markets. Half-time data can be
+        // absent from some provider responses; that must not leave the whole match pending.
+        if (ftH === null || ftH === undefined || ftA === null || ftA === undefined ||
+            !Number.isFinite(Number(ftH)) || !Number.isFinite(Number(ftA))) continue;
+        const score = `${ftH}-${ftA}`;
+        const hasHalfTime = htH !== null && htH !== undefined && htA !== null && htA !== undefined &&
+          Number.isFinite(Number(htH)) && Number.isFinite(Number(htA));
+        const ht = hasHalfTime ? `${htH}-${htA}` : null;
+        const htft = hasHalfTime ? htftLabel(htH,htA,ftH,ftA) : null;
         const over25 = Number(ftH)+Number(ftA) > 2.5;
         const btts = Number(ftH) > 0 && Number(ftA) > 0;
         await databasePool.query(
@@ -2544,12 +2565,15 @@ setInterval(async () => {
   if (goalScanInFlight || goalTrackedFixtures.size === 0) return;
   goalScanInFlight = true;
   try {
-    const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 60_000);
+    // Cache TTL is deliberately shorter than the scan interval; otherwise each
+    // scan could repeatedly receive the same cached score snapshot.
+    const payload = await cachedProviderRequest("liveList:goal-alert", "/fixtures?live=all", 20_000);
     const liveMatches = (payload.response || []).map(normalizeProviderMatch);
     const liveById = new Map(liveMatches.map(m => [Number(m.id), m]));
     for (const [fixtureId, tracked] of goalTrackedFixtures.entries()) {
       const match = liveById.get(fixtureId);
-      if (!match || match.status !== "LIVE") continue;
+      // Compare scores whenever the fixture remains in the live feed, including HT/extra-time labels.
+      if (!match) continue;
       const score = `${match.homeScore}-${match.awayScore}`;
       const previous = goalScoreCache.get(fixtureId) ?? tracked.baselineScore ?? score;
       if (score === previous) continue;
@@ -2570,7 +2594,7 @@ setInterval(async () => {
   } finally {
     goalScanInFlight = false;
   }
-}, 60_000);
+}, 45_000);
 
 let couponSettlementInFlight = false;
 async function settleCouponPredictions() {
