@@ -1461,8 +1461,19 @@ async function sendCouponAutomatically(coupon, chosen) {
 
 
 function isExcludedAnalysisCompetition(match) {
-  const text = `${match.league || ""} ${match.country || ""}`.toLowerCase();
-  return /\b(women|woman|ladies|feminine|youth|reserve|reserves|u(?:16|17|18|19|20|21|23)|under[- ]?(?:16|17|18|19|20|21|23)|academy|junior|development league|premier league 2)\b/.test(text);
+  // Günün maç önü/sürpriz kuponlarında U20 ve U21 organizasyonlarını alma.
+  // Kadın U20/U21 ligleri de isim sırası farklı olsa bile bu kontrole takılır.
+  // Kıdemli kadın liglerini yalnızca kadın oldukları için dışlama.
+  const text = `${match.league || ""} ${match.country || ""}`
+    .toLocaleLowerCase("en")
+    .replace(/[’']/g, " ")
+    .replace(/[._-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const ageGroup = /\b(?:u\s*20|u\s*21|under\s*20|under\s*21|under 20s|under 21s)\b/i.test(text);
+  const women'sAgeGroup = /\b(?:women|woman|ladies|female)\b.*\b(?:u\s*20|u\s*21|under\s*20|under\s*21)\b|\b(?:u\s*20|u\s*21|under\s*20|under\s*21)\b.*\b(?:women|woman|ladies|female)\b/i.test(text);
+  const otherYouthOrReserve = /\b(?:youth|reserve|reserves|academy|junior|development league|premier league 2)\b/i.test(text);
+  return ageGroup || women'sAgeGroup || otherYouthOrReserve;
 }
 
 function automaticLeaguePriority(match) {
