@@ -1575,7 +1575,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
       const first = await cachedProviderRequest(`odds-date:${date}:page:1`, `/odds?date=${encodeURIComponent(date)}&page=1`, 15 * 60 * 1000);
       for (const row of (first.response || [])) if (row.fixture?.id) dateOdds.set(Number(row.fixture.id), row);
       const reportedPages = Math.max(1, Number(first.paging?.total || 1));
-      const totalPages = Math.min(50, reportedPages);
+      const totalPages = Math.min(150, reportedPages);
       if (reportedPages > totalPages) console.warn(`[Coupon] Güvenlik sınırı: ${reportedPages} oran sayfasının ilk ${totalPages} sayfası kullanılıyor.`);
       for (let page = 2; page <= totalPages; page++) {
         const payload = await cachedProviderRequest(`odds-date:${date}:page:${page}`, `/odds?date=${encodeURIComponent(date)}&page=${page}`, 15 * 60 * 1000);
@@ -1590,9 +1590,10 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   if (!isLiveMode) {
     const withBulkOdds = fixtures.filter(f => dateOdds.has(f.id));
     const withoutBulkOdds = fixtures.filter(f => !dateOdds.has(f.id));
-    // Önce bütün fikstürlerin oran sayfalarını tara; takım formu API kotasını korumak için
-    // en fazla 50 oranlı ve 10 oran-yedek fikstürde çekilir. Canlı istatistik çağrısı yoktur.
-    fixturesToAnalyze = [...withBulkOdds.slice(0, 50), ...withoutBulkOdds.slice(0, (options.automatic ? 0 : 2))];
+    // Oran sayfaları tarandıktan sonra sabit ilk 50 maç sınırı koyma:
+    // bu sınır, 50. sıradan sonraki uygun maçları kupon analizinin dışında bırakıyordu.
+    // Aday hedefi (2 veya 10) dolunca aşağıdaki döngü zaten durur.
+    fixturesToAnalyze = [...withBulkOdds, ...withoutBulkOdds.slice(0, (options.automatic ? 0 : 2))];
   }
   let analyzedFixtures = 0;
   // Maç önü kuponunda ilk 2 adayı bulunca durma: daha geniş örneklemden
@@ -1691,7 +1692,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
     ? candidates.filter(p => !autoSentFixtureKeys.has(autoLivePickKey(mode, date, p)))
     : candidates;
   rejected.duplicate = candidates.length - availableCandidates.length;
-  console.log(`[COUPON SCAN ${mode.toUpperCase()}] date=${date} live=${isLiveMode} fixtures=${allFixtures.length} prioritized=${fixtures.length} analyzed=${analyzedFixtures} candidates=${candidates.length} available=${availableCandidates.length} rejected=${JSON.stringify(rejected)} seasonStats=home-away-blend youthReserveWomen=excluded oddsPagesMax=50 errors=${errors.length}`);
+  console.log(`[COUPON SCAN ${mode.toUpperCase()}] date=${date} live=${isLiveMode} fixtures=${allFixtures.length} prioritized=${fixtures.length} analyzed=${analyzedFixtures} candidates=${candidates.length} available=${availableCandidates.length} rejected=${JSON.stringify(rejected)} seasonStats=home-away-blend youthReserveWomen=excluded oddsPagesMax=150 errors=${errors.length}`);
   availableCandidates.sort((a,b)=>b.score-a.score || b.formSupport-a.formSupport || a.internalOdd-b.internalOdd);
   const count = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
   const chosen = availableCandidates.slice(0,count);
@@ -2009,6 +2010,7 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
   catch (e) { console.warn(`[Live odds bulk] ${e.message}`); }
   const results = [];
   let formEnrichedFixtures = 0;
+  let formAttempts = 0;
   let statsFetchedFixtures = 0;
   for (const fixture of fixtures) {
     try {
@@ -2027,14 +2029,20 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
         statsRows = statsPayload.response || [];
       }
       let teamForms = null;
-      const hasTeamGoalMarket = oddsRow && oddsForFixture(oddsRow).some(x => x.market.startsWith("EV ") || x.market.startsWith("DEP "));
-      if (hasTeamGoalMarket && formEnrichedFixtures < 10 && fixture.homeId && fixture.awayId && fixture.leagueId && fixture.season) {
-        formEnrichedFixtures++;
+      // Son 5 maç formu yalnızca EV/DEP gol pazarlarında değil, MS ÜST ve KG
+      // modellerinde de kullanılır. Eski koşul yüzünden EV/DEP marketi sunmayan
+      // maçlarda formEnriched=0 kalıyor ve toplam gol modeli formsuz çalışıyordu.
+      // API kotasını korumak için her taramada en fazla 10 oranlı maça form eklenir;
+      // fetchTeamRecentForm kendi 6 saatlik önbelleğini kullanır.
+      const hasUsableLiveMarkets = Boolean(oddsRow && oddsForFixture(oddsRow).length);
+      if (hasUsableLiveMarkets && formAttempts < 10 && fixture.homeId && fixture.awayId) {
+        formAttempts++;
         const [homeForm, awayForm] = await Promise.all([
           fetchTeamRecentForm(fixture.homeId, fixture.id, fixture.leagueId, fixture.season, "home"),
           fetchTeamRecentForm(fixture.awayId, fixture.id, fixture.leagueId, fixture.season, "away")
         ]);
         teamForms = { home: homeForm, away: awayForm };
+        if (homeForm.available && awayForm.available) formEnrichedFixtures++;
       }
       const analysis = await analyzeLiveFixture(fixture, oddsRow, statsRows, teamForms);
       results.push({ fixtureId: fixture.id, league: fixture.league, home: fixture.home, away: fixture.away,
@@ -2118,7 +2126,7 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
     }
     return acc;
   }, {});
-  console.log(`[LIVE SCAN SUMMARY] liveFixtures=${fixtures.length} scanned=${results.length} oddsBulk=${bulkOdds.length} statsFetched=${statsFetchedFixtures} formEnriched=${formEnrichedFixtures} candidates=${valueCandidates.length} reasons=${JSON.stringify(reasonSummary)}`);
+  console.log(`[LIVE SCAN SUMMARY] liveFixtures=${fixtures.length} scanned=${results.length} oddsBulk=${bulkOdds.length} statsFetched=${statsFetchedFixtures} formAttempts=${formAttempts} formPairsReady=${formEnrichedFixtures} candidates=${valueCandidates.length} reasons=${JSON.stringify(reasonSummary)}`);
   return { status: "READY", type: "live", scanned: results.length, valueCandidates: valueCandidates.length,
     message: top ? "En yüksek değerli canlı aday bulundu ve son skor/periyot kontrolünden geçirildi." : "Canlı maçlar tarandı; şu an taze oran ve değer kontrolünü geçen doğrulanmış tercih yok.",
     reasonSummary, matches: results, topPick: top, picks: top ? [{ fixtureId: top.fixtureId, league: top.league, home: top.home, away: top.away, minute: top.minute, currentScore: top.score, market: top.mainPick, source: top.valuePick?.bookmaker, oddsBasis: "Gerçek canlı oran" }] : [], telegram };
