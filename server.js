@@ -1470,10 +1470,8 @@ function isExcludedAnalysisCompetition(match) {
     .replace(/[._-]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  const ageGroup = /\b(?:u\s*20|u\s*21|under\s*20|under\s*21|under 20s|under 21s)\b/i.test(text);
-  const women'sAgeGroup = /\b(?:women|woman|ladies|female)\b.*\b(?:u\s*20|u\s*21|under\s*20|under\s*21)\b|\b(?:u\s*20|u\s*21|under\s*20|under\s*21)\b.*\b(?:women|woman|ladies|female)\b/i.test(text);
-  const otherYouthOrReserve = /\b(?:youth|reserve|reserves|academy|junior|development league|premier league 2)\b/i.test(text);
-  return ageGroup || women'sAgeGroup || otherYouthOrReserve;
+  const womenAgeGroup = /\b(?:women|woman|ladies|female)\b.*\b(?:u\s*20|u\s*21|under\s*20|under\s*21)\b|\b(?:u\s*20|u\s*21|under\s*20|under\s*21)\b.*\b(?:women|woman|ladies|female)\b/i.test(text);
+  return womenAgeGroup;
 }
 
 function automaticLeaguePriority(match) {
