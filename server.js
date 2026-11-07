@@ -1840,8 +1840,11 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
     const ev = modelProbability * Number(item.odd) - 1;
     evaluations.push({ market: item.market, odd: Number(item.odd), bookmaker: item.bookmaker,
       modelProbability, marketProbability, edge, ev, lambda: lambdaUsed });
-    const minEdge = stats.available ? 0.03 : 0.06;
-    const minEv = stats.available ? 0.03 : 0.06;
+    // Kontrollü genişletme: canlı istatistik ve gerçek canlı oran varsa küçük ama
+    // pozitif avantajlı fırsatları kaçırmamak için eşikleri makul ölçüde düşür.
+    // İstatistik yoksa daha yüksek güvenlik eşiği korunur.
+    const minEdge = stats.available ? 0.015 : 0.04;
+    const minEv = stats.available ? 0.02 : 0.05;
     if (edge < minEdge || ev < minEv) { rejected.noValue++; continue; }
     candidates.push({ market: item.market, bookmaker: item.bookmaker, modelProbability, marketProbability, edge, ev,
       odd: Number(item.odd), confidence: stats.available && formsAvailable ? "MEDIUM" : "LOW", statsAvailable: stats.available,
@@ -2126,7 +2129,13 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
     }
     return acc;
   }, {});
-  console.log(`[LIVE SCAN SUMMARY] liveFixtures=${fixtures.length} scanned=${results.length} oddsBulk=${bulkOdds.length} statsFetched=${statsFetchedFixtures} formAttempts=${formAttempts} formPairsReady=${formEnrichedFixtures} candidates=${valueCandidates.length} reasons=${JSON.stringify(reasonSummary)}`);
+  // En iyi elenen pazarları logla: eşik değişikliğinin etkisini ölçmek için
+  // market, model olasılığı, piyasa olasılığı, edge ve EV birlikte görünür.
+  const nearMisses = results.flatMap(x => (x.bestRejectedMarket ? [{
+    match: `${x.home} - ${x.away}`, minute: x.minute, score: x.score,
+    market: x.bestRejectedMarket.market, edge: x.bestRejectedMarket.edge, ev: x.bestRejectedMarket.ev
+  }] : [])).sort((a,b) => b.ev - a.ev).slice(0,5);
+  console.log(`[LIVE SCAN SUMMARY] liveFixtures=${fixtures.length} scanned=${results.length} oddsBulk=${bulkOdds.length} statsFetched=${statsFetchedFixtures} formAttempts=${formAttempts} formPairsReady=${formEnrichedFixtures} candidates=${valueCandidates.length} reasons=${JSON.stringify(reasonSummary)} nearMisses=${JSON.stringify(nearMisses)}`);
   return { status: "READY", type: "live", scanned: results.length, valueCandidates: valueCandidates.length,
     message: top ? "En yüksek değerli canlı aday bulundu ve son skor/periyot kontrolünden geçirildi." : "Canlı maçlar tarandı; şu an taze oran ve değer kontrolünü geçen doğrulanmış tercih yok.",
     reasonSummary, matches: results, topPick: top, picks: top ? [{ fixtureId: top.fixtureId, league: top.league, home: top.home, away: top.away, minute: top.minute, currentScore: top.score, market: top.mainPick, source: top.valuePick?.bookmaker, oddsBasis: "Gerçek canlı oran" }] : [], telegram };
