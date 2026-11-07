@@ -998,10 +998,21 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   const mergedMarketRows = live
     ? liveAllowedRows.map(x => ({ ...x, oddsTiming: "live" }))
     : preMarkets.map(x => ({ ...x, oddsTiming: "prematch" }));
+  // Maç önü KG VAR fiyatını hem maç önü hem canlı KG VAR kararında kontrol et.
+  // Aynı bookmaker'dan gelen MS 1X2 oranlarında aşırı favori farkını da tespit et.
+  const prematchBttsInRange = preMarkets.some(x =>
+    x.market === "KG VAR" && Number(x.odd) >= 1.50 && Number(x.odd) <= 1.80
+  );
+  const hasExtremeFavoriteGap = preMarkets.some(x =>
+    x.market === "MS 1" && Number.isFinite(Number(x.homeOdd)) && Number.isFinite(Number(x.awayOdd)) &&
+    ((Number(x.homeOdd) < 1.30 && Number(x.awayOdd) > 7.00) ||
+     (Number(x.awayOdd) < 1.30 && Number(x.homeOdd) > 7.00))
+  );
   const choices = mergedMarketRows.filter(x => allowed.includes(x.market) && x.market !== excludeMarket &&
-    // Maç önü KG VAR yalnızca gerçek bookmaker fiyatı 1.50–1.80 aralığındaysa aday olabilir.
-    // Canlı KG VAR kendi canlı oranı ve canlı baskı kontrolleriyle ayrıca değerlendirilir.
-    !(!live && x.market === "KG VAR" && !(Number(x.odd) >= 1.50 && Number(x.odd) <= 1.80)) &&
+    // KG VAR için gerçek maç önü fiyatı 1.50–1.80 bandında olmalı.
+    !(x.market === "KG VAR" && !prematchBttsInRange) &&
+    // Favori <1.30 ve rakip >7.00 ise takımlar arası güç farkı aşırı: KG VAR'ı ele.
+    !(x.market === "KG VAR" && hasExtremeFavoriteGap) &&
     // Maç önü ilk yarı oranı, canlı dakikaya uygun fiyat değildir; canlı HT marketlerinde kullanma.
     !(live && x.oddsTiming !== "live" && x.market.startsWith("İY ")) &&
     (!live || !liveMarketAlreadySettled(x.market, fixture)) &&
@@ -1688,7 +1699,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
         if (!homeForm.available || !awayForm.available) { rejected.noForm++; continue; }
         // Canlı istatistikler yardımcı sinyaldir; eksik olduklarında takım formu + gerçek canlı oranla
         // daha yüksek eşik kullanılır. İstatistik değerleri hiçbir zaman tahmin edilmez.
-        const chosen = chooseSupportedMarket(liveOddsRow, mode, fixture, {home:homeForm,away:awayForm}, stats, null);
+        const chosen = chooseSupportedMarket(liveOddsRow, mode, fixture, {home:homeForm,away:awayForm}, stats, prematchOddsRow);
         if (!chosen) { rejected.noSignal++; continue; }
         oddsBasis = `Gerçek canlı oran · ${chosen.bookmaker}`;
         const alternative = teamGoalAlternative(fixture, {home:homeForm, away:awayForm}, stats, liveOddsRow, prematchOddsRow);
