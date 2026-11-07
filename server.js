@@ -474,14 +474,11 @@ function oddsForFixture(oddsRow) {
     const book = String(bookmaker.name || "Kaynak belirtilmedi");
     for (const bet of (bookmaker.bets || [])) {
       const name = String(bet.name || "").toLowerCase().replace(/[–—]/g, "-");
-      // Only parse football GOAL markets. The old broad /total/ matcher could
-      // accidentally treat corners/cards/other totals as match-goal odds.
-      const goalContext = /\b(goal|goals|score|scoring)\b/.test(name);
-      const isHalf = goalContext && /first half|1st half|half.?time|1st period|first period/.test(name);
-      const isHomeTeam = goalContext && /home team|home goals|team 1 total|team 1 goals|team total - home/.test(name);
-      const isAwayTeam = goalContext && /away team|away goals|team 2 total|team 2 goals|team total - away/.test(name);
+      const isHalf = /first half|1st half|half.?time|1st period|first period/.test(name);
+      const isHomeTeam = /home team|home goals|team 1 total|team 1 goals|team total - home/.test(name);
+      const isAwayTeam = /away team|away goals|team 2 total|team 2 goals|team total - away/.test(name);
       const isBtts = /both teams to score|both teams score|btts/.test(name);
-      const isTotal = goalContext && /over.?under|total goals|match goals|goal line|goals total/.test(name) && !isHomeTeam && !isAwayTeam;
+      const isTotal = /over.?under|total goals|match goals|goal line|goals total|total/.test(name) && !isHomeTeam && !isAwayTeam;
       const isWinner = /match winner|1x2|full.?time result|match result|regular time result|winner/.test(name);
       for (const value of (bet.values || [])) {
         const label = String(value.value ?? value.name ?? "").toLowerCase().trim();
@@ -1578,7 +1575,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
       const first = await cachedProviderRequest(`odds-date:${date}:page:1`, `/odds?date=${encodeURIComponent(date)}&page=1`, 15 * 60 * 1000);
       for (const row of (first.response || [])) if (row.fixture?.id) dateOdds.set(Number(row.fixture.id), row);
       const reportedPages = Math.max(1, Number(first.paging?.total || 1));
-      const totalPages = Math.min(150, reportedPages);
+      const totalPages = Math.min(50, reportedPages);
       if (reportedPages > totalPages) console.warn(`[Coupon] Güvenlik sınırı: ${reportedPages} oran sayfasının ilk ${totalPages} sayfası kullanılıyor.`);
       for (let page = 2; page <= totalPages; page++) {
         const payload = await cachedProviderRequest(`odds-date:${date}:page:${page}`, `/odds?date=${encodeURIComponent(date)}&page=${page}`, 15 * 60 * 1000);
@@ -1593,10 +1590,9 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   if (!isLiveMode) {
     const withBulkOdds = fixtures.filter(f => dateOdds.has(f.id));
     const withoutBulkOdds = fixtures.filter(f => !dateOdds.has(f.id));
-    // Oran sayfaları tarandıktan sonra sabit ilk 50 maç sınırı koyma:
-    // bu sınır, 50. sıradan sonraki uygun maçları kupon analizinin dışında bırakıyordu.
-    // Aday hedefi (2 veya 10) dolunca aşağıdaki döngü zaten durur.
-    fixturesToAnalyze = [...withBulkOdds, ...withoutBulkOdds.slice(0, (options.automatic ? 0 : 2))];
+    // Önce bütün fikstürlerin oran sayfalarını tara; takım formu API kotasını korumak için
+    // en fazla 50 oranlı ve 10 oran-yedek fikstürde çekilir. Canlı istatistik çağrısı yoktur.
+    fixturesToAnalyze = [...withBulkOdds.slice(0, 50), ...withoutBulkOdds.slice(0, (options.automatic ? 0 : 2))];
   }
   let analyzedFixtures = 0;
   // Maç önü kuponunda ilk 2 adayı bulunca durma: daha geniş örneklemden
@@ -1695,7 +1691,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
     ? candidates.filter(p => !autoSentFixtureKeys.has(autoLivePickKey(mode, date, p)))
     : candidates;
   rejected.duplicate = candidates.length - availableCandidates.length;
-  console.log(`[COUPON SCAN ${mode.toUpperCase()}] date=${date} live=${isLiveMode} fixtures=${allFixtures.length} prioritized=${fixtures.length} analyzed=${analyzedFixtures} candidates=${candidates.length} available=${availableCandidates.length} rejected=${JSON.stringify(rejected)} seasonStats=home-away-blend youthReserveWomen=excluded oddsPagesMax=150 errors=${errors.length}`);
+  console.log(`[COUPON SCAN ${mode.toUpperCase()}] date=${date} live=${isLiveMode} fixtures=${allFixtures.length} prioritized=${fixtures.length} analyzed=${analyzedFixtures} candidates=${candidates.length} available=${availableCandidates.length} rejected=${JSON.stringify(rejected)} seasonStats=home-away-blend youthReserveWomen=excluded oddsPagesMax=50 errors=${errors.length}`);
   availableCandidates.sort((a,b)=>b.score-a.score || b.formSupport-a.formSupport || a.internalOdd-b.internalOdd);
   const count = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
   const chosen = availableCandidates.slice(0,count);
@@ -1767,7 +1763,7 @@ app.get("/api/health", (_req, res) => res.json({
   ok: true, apiKeyConfigured: Boolean(API_KEY),
   telegramConfigured: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
   databaseConfigured: Boolean(databasePool),
-  provider: "API-Football", oddsPolicy: "pre-match odds for pre-match analysis; live analysis uses live odds only; no pre-match fallback for live picks", livePolicy: "period-aware; goal-markets-only odds parsing; minimum live odd 1.50; probability/EV sanity checks; fresh odds recheck before Telegram", teamFormPolicy: "last five completed matches plus cached league-season home/away goal averages", oddsValuesHidden: true
+  provider: "API-Football", oddsPolicy: "pre-match odds for pre-match analysis; live analysis uses live odds only; no pre-match fallback for live picks", livePolicy: "period-aware; settled markets excluded; fresh fixture/odds recheck before Telegram", teamFormPolicy: "last five completed matches plus cached league-season home/away goal averages", oddsValuesHidden: true
 }));
 
 // Compatibility route used by the current index.html live-goal button.
@@ -1791,9 +1787,8 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
   const formsAvailable = Boolean(teamForms?.home?.available && teamForms?.away?.available);
   const candidates = [];
   const evaluations = [];
-  const rejected = { noLiveOdds: !liveOddsRow, noStats: !stats.available, noTeamForm: !formsAvailable, noMarket: markets.length === 0, lowOdds: 0, invalidProbability: 0, invalidEV: 0, noValue: 0, settled: 0, wrongPeriod: 0 };
+  const rejected = { noLiveOdds: !liveOddsRow, noStats: !stats.available, noTeamForm: !formsAvailable, noMarket: markets.length === 0, lowOdds: 0, noValue: 0, settled: 0, wrongPeriod: 0 };
   for (const item of markets) {
-    // Hard floor: do not notify on a price below the user's minimum playable odds.
     if (!Number.isFinite(Number(item.odd)) || Number(item.odd) < 1.50) { rejected.lowOdds++; continue; }
     if (liveMarketAlreadySettled(item.market, fixture)) { rejected.settled++; continue; }
     const ms = item.market.match(/^MS ([0-9]+(?:[.,][0-9]+)?) ÜST$/);
@@ -1805,10 +1800,7 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
       if (minute >= 45 && ht) { rejected.wrongPeriod++; continue; }
     }
     const marketProbability = Number(item.probability) / 100;
-    if (!Number.isFinite(marketProbability) || marketProbability <= 0 || marketProbability >= 1 ||
-        !Number.isFinite(Number(item.odd)) || Number(item.odd) < 1.50) {
-      rejected.invalidProbability++; continue;
-    }
+    if (!Number.isFinite(marketProbability) || marketProbability <= 0 || marketProbability >= 1) { rejected.noMarket = true; continue; }
     let modelProbability;
     let lambdaUsed = null;
     if (team) {
@@ -1845,26 +1837,21 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
     }
     const edge = modelProbability - marketProbability;
     const ev = modelProbability * Number(item.odd) - 1;
-    // EV is a decimal return: with probability in [0,1], it cannot exceed odd - 1.
-    // Reject malformed probabilities/odds rather than allowing impossible EV values.
-    if (!Number.isFinite(modelProbability) || modelProbability < 0 || modelProbability > 1 ||
-        !Number.isFinite(ev) || ev > (Number(item.odd) - 1) + 1e-9) {
-      rejected.invalidEV++; continue;
-    }
     evaluations.push({ market: item.market, odd: Number(item.odd), bookmaker: item.bookmaker,
       modelProbability, marketProbability, edge, ev, lambda: lambdaUsed });
-    // Kontrollü genişletme: canlı istatistik ve gerçek canlı oran varsa küçük ama
-    // pozitif avantajlı fırsatları kaçırmamak için eşikleri makul ölçüde düşür.
-    // İstatistik yoksa daha yüksek güvenlik eşiği korunur.
-    const minEdge = stats.available ? 0.015 : 0.04;
-    const minEv = stats.available ? 0.02 : 0.05;
+    // Adaptif canlı değer eşiği:
+    // İstatistik + son 5 maç formu varsa daha seçici; yalnızca canlı istatistik varsa
+    // orta eşik; istatistik eksikse daha yüksek güvenlik payı korunur.
+    // Oran tabanı (1.50) hiçbir koşulda gevşetilmez.
+    const minEdge = (stats.available && formsAvailable) ? 0.015 : (stats.available ? 0.025 : 0.04);
+    const minEv = (stats.available && formsAvailable) ? 0.015 : (stats.available ? 0.025 : 0.04);
     if (edge < minEdge || ev < minEv) { rejected.noValue++; continue; }
     candidates.push({ market: item.market, bookmaker: item.bookmaker, modelProbability, marketProbability, edge, ev,
-      odd: Number(item.odd), confidence: stats.available && formsAvailable ? "MEDIUM" : "LOW", statsAvailable: stats.available,
-      teamFormAvailable: formsAvailable });
+      odd: Number(item.odd), confidence: stats.available && formsAvailable ? "MEDIUM" : (stats.available ? "LOW" : "VERY_LOW"),
+      statsAvailable: stats.available, teamFormAvailable: formsAvailable, minEdgeRequired: minEdge, minEVRequired: minEv });
   }
-  candidates.sort((a,b) => b.ev - a.ev || b.edge - a.edge);
-  evaluations.sort((a,b) => b.ev - a.ev || b.edge - a.edge);
+  candidates.sort((a,b) => (b.ev + b.edge) - (a.ev + a.edge) || b.ev - a.ev);
+  evaluations.sort((a,b) => (b.ev + b.edge) - (a.ev + a.edge) || b.ev - a.ev);
   const chosen = candidates[0] || null;
   return {
     fixtureId: fixture.id, currentScore: `${homeGoals}-${awayGoals}`, minute, periodStatus: phase,
@@ -1878,7 +1865,7 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
       note: chosen ? (formsAvailable ? "Canlı oran, takımın son 5 maçı, rakip savunması ve canlı veriler birlikte değerlendirildi." : "Canlı oran, skor ve kalan süre değerlendirildi; takım formu veya canlı istatistik eksik olduğu için güven düşürüldü.") : (!liveOddsRow ? "Gerçek canlı oran bulunamadı." : isHalftime ? "Devre arası; canlı tercih bekletildi." : "Canlı pazarlarda yeterli değer eşiği bulunamadı.") },
     oddsBasis: liveOddsRow ? "Yalnızca gerçek canlı oranlar kullanıldı; maç önü oranı yedek yapılmadı." : "Canlı oran bulunamadı; maç önü oranı kullanılmadı.",
     reasonCounts: rejected,
-    note: chosen ? `En güçlü canlı aday: ${chosen.market}. Güven seviyesi ${stats.available && formsAvailable ? "orta" : "düşük"}; kesin sonuç değildir.` : "Maç analiz edildi ancak güvenilir değer eşiğini geçen canlı tercih bulunmadı."
+    note: chosen ? `En güçlü canlı aday: ${chosen.market}. Güven seviyesi ${stats.available && formsAvailable ? "orta" : (stats.available ? "düşük" : "çok düşük")}; kesin sonuç değildir.` : "Maç analiz edildi ancak canlı oran, olasılık ve değer eşiklerini birlikte karşılayan tercih bulunmadı."
   };
 }
 
@@ -2026,7 +2013,6 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
   catch (e) { console.warn(`[Live odds bulk] ${e.message}`); }
   const results = [];
   let formEnrichedFixtures = 0;
-  let formAttempts = 0;
   let statsFetchedFixtures = 0;
   for (const fixture of fixtures) {
     try {
@@ -2045,20 +2031,14 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
         statsRows = statsPayload.response || [];
       }
       let teamForms = null;
-      // Son 5 maç formu yalnızca EV/DEP gol pazarlarında değil, MS ÜST ve KG
-      // modellerinde de kullanılır. Eski koşul yüzünden EV/DEP marketi sunmayan
-      // maçlarda formEnriched=0 kalıyor ve toplam gol modeli formsuz çalışıyordu.
-      // API kotasını korumak için her taramada en fazla 10 oranlı maça form eklenir;
-      // fetchTeamRecentForm kendi 6 saatlik önbelleğini kullanır.
-      const hasUsableLiveMarkets = Boolean(oddsRow && oddsForFixture(oddsRow).length);
-      if (hasUsableLiveMarkets && formAttempts < 10 && fixture.homeId && fixture.awayId) {
-        formAttempts++;
+      const hasTeamGoalMarket = oddsRow && oddsForFixture(oddsRow).some(x => x.market.startsWith("EV ") || x.market.startsWith("DEP "));
+      if (hasTeamGoalMarket && formEnrichedFixtures < 10 && fixture.homeId && fixture.awayId && fixture.leagueId && fixture.season) {
+        formEnrichedFixtures++;
         const [homeForm, awayForm] = await Promise.all([
           fetchTeamRecentForm(fixture.homeId, fixture.id, fixture.leagueId, fixture.season, "home"),
           fetchTeamRecentForm(fixture.awayId, fixture.id, fixture.leagueId, fixture.season, "away")
         ]);
         teamForms = { home: homeForm, away: awayForm };
-        if (homeForm.available && awayForm.available) formEnrichedFixtures++;
       }
       const analysis = await analyzeLiveFixture(fixture, oddsRow, statsRows, teamForms);
       results.push({ fixtureId: fixture.id, league: fixture.league, home: fixture.home, away: fixture.away,
@@ -2068,15 +2048,7 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
         mainPick: analysis.mainPick, alternative: analysis.alternative, note: analysis.note,
         reasonCounts: analysis.reasonCounts,
         marketCoverage: analysis.marketEvaluations.map(x => x.market),
-        bestRejectedMarket: analysis.marketEvaluations[0] ? {
-          market: analysis.marketEvaluations[0].market,
-          bookmaker: analysis.marketEvaluations[0].bookmaker,
-          odd: analysis.marketEvaluations[0].odd,
-          modelProbability: Number((analysis.marketEvaluations[0].modelProbability * 100).toFixed(1)),
-          marketProbability: Number((analysis.marketEvaluations[0].marketProbability * 100).toFixed(1)),
-          edge: Number((analysis.marketEvaluations[0].edge * 100).toFixed(1)),
-          ev: Number((analysis.marketEvaluations[0].ev * 100).toFixed(1))
-        } : null,
+        bestRejectedMarket: analysis.marketEvaluations[0] ? { market: analysis.marketEvaluations[0].market, edge: Number((analysis.marketEvaluations[0].edge * 100).toFixed(1)), ev: Number((analysis.marketEvaluations[0].ev * 100).toFixed(1)) } : null,
         teamForm: analysis.teamForm,
         teamForms,
         valuePick: analysis.mainPick ? { outcome: analysis.mainPick, bookmaker: analysis.source || "Canlı oran kaynağı" } : null
@@ -2116,10 +2088,8 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
           } catch (bulkError) { console.warn(`[AUTO LIVE FINAL ODDS] ${bulkError.message}`); }
         }
         const freshAnalysis = await analyzeLiveFixture(freshFixture, freshOdds, freshStatsPayload.response || [], top.teamForms || null);
-        const freshChosenMarket = freshAnalysis.marketEvaluations?.find(x => x.market === freshAnalysis.mainPick);
-        if (!freshAnalysis.mainPick || freshAnalysis.mainPick !== top.mainPick ||
-            !Number.isFinite(Number(freshChosenMarket?.odd)) || Number(freshChosenMarket.odd) < 1.50) {
-          console.log(`[AUTO LIVE SKIP] fixture=${top.fixtureId}: taze kontrolde aday/pazar oranı değişti veya 1.50 altına indi.`);
+        if (!freshAnalysis.mainPick || freshAnalysis.mainPick !== top.mainPick) {
+          console.log(`[AUTO LIVE SKIP] fixture=${top.fixtureId}: taze kontrolde aday değişti/kayboldu.`);
           top = null;
         } else {
           top = { ...top, minute: freshFixture.minute, score: freshAnalysis.currentScore, mainPick: freshAnalysis.mainPick,
@@ -2152,16 +2122,7 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
     }
     return acc;
   }, {});
-  // En iyi elenen pazarları logla: eşik değişikliğinin etkisini ölçmek için
-  // market, model olasılığı, piyasa olasılığı, edge ve EV birlikte görünür.
-  const nearMisses = results.flatMap(x => (x.bestRejectedMarket ? [{
-    match: `${x.home} - ${x.away}`, minute: x.minute, score: x.score,
-    market: x.bestRejectedMarket.market, bookmaker: x.bestRejectedMarket.bookmaker,
-    providerOdd: x.bestRejectedMarket.odd, modelProbability: x.bestRejectedMarket.modelProbability,
-    marketProbability: x.bestRejectedMarket.marketProbability,
-    edge: x.bestRejectedMarket.edge, ev: x.bestRejectedMarket.ev
-  }] : [])).sort((a,b) => b.ev - a.ev).slice(0,5);
-  console.log(`[LIVE SCAN SUMMARY] liveFixtures=${fixtures.length} scanned=${results.length} oddsBulk=${bulkOdds.length} statsFetched=${statsFetchedFixtures} formAttempts=${formAttempts} formPairsReady=${formEnrichedFixtures} candidates=${valueCandidates.length} reasons=${JSON.stringify(reasonSummary)} nearMisses=${JSON.stringify(nearMisses)}`);
+  console.log(`[LIVE SCAN SUMMARY] liveFixtures=${fixtures.length} scanned=${results.length} oddsBulk=${bulkOdds.length} statsFetched=${statsFetchedFixtures} formEnriched=${formEnrichedFixtures} candidates=${valueCandidates.length} reasons=${JSON.stringify(reasonSummary)}`);
   return { status: "READY", type: "live", scanned: results.length, valueCandidates: valueCandidates.length,
     message: top ? "En yüksek değerli canlı aday bulundu ve son skor/periyot kontrolünden geçirildi." : "Canlı maçlar tarandı; şu an taze oran ve değer kontrolünü geçen doğrulanmış tercih yok.",
     reasonSummary, matches: results, topPick: top, picks: top ? [{ fixtureId: top.fixtureId, league: top.league, home: top.home, away: top.away, minute: top.minute, currentScore: top.score, market: top.mainPick, source: top.valuePick?.bookmaker, oddsBasis: "Gerçek canlı oran" }] : [], telegram };
