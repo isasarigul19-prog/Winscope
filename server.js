@@ -277,14 +277,73 @@ let autoPrematchTaskInFlight = false;
 const goalTrackedFixtures = new Map();
 const goalScoreCache = new Map();
 let goalScanInFlight = false;
-// API-Football plan limitine takılmamak için istekleri tek kuyruktan geçir.
-// 260 ms aralık yaklaşık 231 istek/dk ile 300/dk sınırının altında kalır.
-let providerQueue = Promise.resolve();
+// API-Football: tüm istekler tek, öncelikli ve hız kontrollü kuyruktan geçer.
+// ULTRA sınırı 450/dk olsa da uygulama güvenlik payıyla yaklaşık 50/dk hedefler.
+// Canlı fikstür/oran/istatistik istekleri, maç önü sayfalı oran taramasının önüne alınır.
+let providerQueue = [];
+let providerQueueRunning = false;
 let lastProviderRequestAt = 0;
 let providerCooldownUntil = 0;
 let providerQuotaBlockedUntil = 0;
-const PROVIDER_MIN_INTERVAL_MS = 1200; // yaklaşık 50 istek/dk; 429 riskini azaltır.
+const PROVIDER_MIN_INTERVAL_MS = Math.max(1000, Number(process.env.API_FOOTBALL_MIN_INTERVAL_MS) || 1200);
+let providerQueueSequence = 0;
+let lastProviderUsageLogAt = 0;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function providerRequestPriority(pathname) {
+  const path = String(pathname || "");
+  if (/\/fixtures\?live=all|\/odds\/live|\/fixtures\/statistics\?fixture=/.test(path)) return 0;
+  if (/\/fixtures\?id=/.test(path)) return 0;
+  if (/\/odds\?date=.*page=/.test(path)) return 2;
+  return 1;
+}
+
+function logProviderUsage(response) {
+  const now = Date.now();
+  if (now - lastProviderUsageLogAt < 60_000) return;
+  const minuteLimit = response.headers.get("x-ratelimit-limit");
+  const minuteRemaining = response.headers.get("x-ratelimit-remaining");
+  const dailyLimit = response.headers.get("x-ratelimit-requests-limit");
+  const dailyRemaining = response.headers.get("x-ratelimit-requests-remaining");
+  if (minuteLimit || minuteRemaining || dailyLimit || dailyRemaining) {
+    console.log(`[API USAGE] minute=${minuteRemaining ?? "?"}/${minuteLimit ?? "?"} daily=${dailyRemaining ?? "?"}/${dailyLimit ?? "?"} queue=${providerQueue.length}`);
+    lastProviderUsageLogAt = now;
+  }
+}
+
+function enqueueProviderRequest(run, priority = 1) {
+  return new Promise((resolve, reject) => {
+    providerQueue.push({ run, priority, sequence: providerQueueSequence++, resolve, reject });
+    providerQueue.sort((a, b) => a.priority - b.priority || a.sequence - b.sequence);
+    void pumpProviderQueue();
+  });
+}
+
+async function pumpProviderQueue() {
+  if (providerQueueRunning) return;
+  providerQueueRunning = true;
+  try {
+    while (providerQueue.length) {
+      const item = providerQueue.shift();
+      try {
+        const now = Date.now();
+        if (now < providerQuotaBlockedUntil) {
+          const minutes = Math.ceil((providerQuotaBlockedUntil - now) / 60000);
+          throw new Error(`API-Football günlük kotası geçici olarak durduruldu; yaklaşık ${minutes} dakika sonra yeniden denenecek.`);
+        }
+        const allowedAt = Math.max(lastProviderRequestAt + PROVIDER_MIN_INTERVAL_MS, providerCooldownUntil);
+        if (allowedAt > Date.now()) await delay(allowedAt - Date.now());
+        lastProviderRequestAt = Date.now();
+        item.resolve(await item.run());
+      } catch (error) {
+        item.reject(error);
+      }
+    }
+  } finally {
+    providerQueueRunning = false;
+    if (providerQueue.length) void pumpProviderQueue();
+  }
+}
 
 async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
   const now = Date.now();
@@ -297,16 +356,15 @@ async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
   if (providerInFlight.has(cacheKey)) return providerInFlight.get(cacheKey);
   if (!API_KEY) throw new Error("Render Environment Variables içinde API_FOOTBALL_KEY eksik.");
 
-  const task = providerQueue.then(async () => {
+  const priority = providerRequestPriority(pathname);
+  const task = enqueueProviderRequest(async () => {
     const secondCheck = providerCache.get(cacheKey);
     if (secondCheck && Date.now() - secondCheck.at < ttlMs) return secondCheck.payload;
-    const allowedAt = Math.max(lastProviderRequestAt + PROVIDER_MIN_INTERVAL_MS, providerCooldownUntil);
-    if (allowedAt > Date.now()) await delay(allowedAt - Date.now());
-    lastProviderRequestAt = Date.now();
     const response = await fetch(`${BASE_URL}${pathname}`, {
       headers: { "x-apisports-key": API_KEY, Accept: "application/json" },
       signal: AbortSignal.timeout(15000)
     });
+    logProviderUsage(response);
     const raw = await response.text();
     let payload;
     try { payload = raw ? JSON.parse(raw) : {}; } catch { throw new Error("API-Football geçerli JSON döndürmedi."); }
@@ -315,31 +373,28 @@ async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
     if (!response.ok || errors) {
       const quotaExhausted = /request limit|requests limit|quota|subscription plan|daily limit|monthly limit|you have reached/i.test(errorText);
       if (quotaExhausted) {
-        // Kota gerçekten bittiyse her 15 saniyede yeniden denemek kotayı düzeltmez.
-        // 6 saatlik devre kesici, gereksiz tekrar isteklerini durdurur.
         providerQuotaBlockedUntil = Date.now() + 6 * 60 * 60 * 1000;
         providerCooldownUntil = providerQuotaBlockedUntil;
-        throw new Error(`API-Football kotası dolu; 6 saatlik koruma devrede. ${errorText}`);
+        throw new Error(`API-Football günlük kotası dolu; 6 saatlik koruma devrede. ${errorText}`);
       }
-      if (response.status === 429 || /rate.?limit|too many requests|per-minute/i.test(errorText)) {
+      if (response.status === 429 || /rate.?limit|too many requests|per-minute|per-second/i.test(errorText)) {
         const retryHeader = Number(response.headers.get("retry-after")) || 0;
         const retryBody = Number((errorText.match(/retry after\s+(\d+)/i) || [])[1]) || 0;
         const waitMs = Math.max(90_000, (Math.max(retryHeader, retryBody) + 5) * 1000);
         providerCooldownUntil = Math.max(providerCooldownUntil, Date.now() + waitMs);
+        console.error(`[API 429] ${Math.ceil(waitMs / 1000)} sn bekleme; istek önceliği=${priority}, kuyruk=${providerQueue.length}. Aynı API anahtarını kullanan başka süreç olup olmadığını kontrol edin.`);
         throw new Error(`API-Football hız sınırı; ${Math.ceil(waitMs / 1000)} saniye bekleme uygulandı. ${errorText}`);
       }
       throw new Error(`API-Football hatası: ${errors ? errorText : `HTTP ${response.status}`}`);
     }
     providerCache.set(cacheKey, { at: Date.now(), payload });
-    // Bellek kullanımını sınırlı tut.
     if (providerCache.size > 2500) {
       const cutoff = Date.now() - 6 * 60 * 60 * 1000;
       for (const [key, value] of providerCache) if (value.at < cutoff) providerCache.delete(key);
       while (providerCache.size > 2000) providerCache.delete(providerCache.keys().next().value);
     }
     return payload;
-  });
-  providerQueue = task.catch(() => undefined);
+  }, priority);
   providerInFlight.set(cacheKey, task);
   try { return await task; }
   finally { providerInFlight.delete(cacheKey); }
