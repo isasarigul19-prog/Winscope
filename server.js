@@ -2047,6 +2047,9 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
         status: analysis.mainPick ? "VALUE_CANDIDATE" : (!oddsRow ? "LIVE_ODDS_UNAVAILABLE" : (analysis.periodStatus === "HT" ? "HALFTIME_WAIT" : "NO_VALUE")),
         mainPick: analysis.mainPick, alternative: analysis.alternative, note: analysis.note,
         reasonCounts: analysis.reasonCounts,
+        // Aynı taramada alınan canlı istatistik anlık görüntüsü; son kontrolde API
+        // geçici olarak boş dönerse yalnızca bu tarama için yedek olarak kullanılır.
+        statsSnapshot: statsRows,
         marketCoverage: analysis.marketEvaluations.map(x => x.market),
         bestRejectedMarket: analysis.marketEvaluations[0] ? { market: analysis.marketEvaluations[0].market, edge: Number((analysis.marketEvaluations[0].edge * 100).toFixed(1)), ev: Number((analysis.marketEvaluations[0].ev * 100).toFixed(1)) } : null,
         teamForm: analysis.teamForm,
@@ -2129,13 +2132,23 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
           continue;
         }
 
+        const freshStatsRows = Array.isArray(freshStatsPayload.response) && freshStatsPayload.response.length
+          ? freshStatsPayload.response
+          : (Array.isArray(candidate.statsSnapshot) ? candidate.statsSnapshot : []);
+        const statsSource = freshStatsRows === candidate.statsSnapshot ? "same-scan-snapshot" : "fresh";
         const freshAnalysis = await analyzeLiveFixture(
-          freshFixture, freshOdds, freshStatsPayload.response || [], candidate.teamForms || null
+          freshFixture, freshOdds, freshStatsRows, candidate.teamForms || null
         );
 
         if (!freshAnalysis.mainPick) {
           freshSkipped++;
-          console.log(`[AUTO LIVE SKIP] fixture=${fixtureId}: taze kontrolde değer şartı kalmadı; sıradaki adaya geçiliyor.`);
+          const bestEval = (freshAnalysis.marketEvaluations || [])[0] || null;
+          console.log(`[AUTO LIVE SKIP] fixture=${fixtureId}: taze kontrolde değer şartı kalmadı; ` +
+            `oldMarket=${candidate.mainPick || "none"} oldMinute=${candidate.minute} oldScore=${candidate.score} ` +
+            `newMinute=${freshFixture.minute} newScore=${freshFixture.homeScore}-${freshFixture.awayScore} ` +
+            `statsSource=${statsSource} markets=${(freshAnalysis.marketEvaluations || []).length} ` +
+            `rejected=${JSON.stringify(freshAnalysis.reasonCounts || {})} ` +
+            `best=${bestEval ? `${bestEval.market}|book=${bestEval.bookmaker}|odd=${bestEval.odd}|edge=${(bestEval.edge*100).toFixed(2)}%|ev=${(bestEval.ev*100).toFixed(2)}%` : "none"}; sıradaki adaya geçiliyor.`);
           continue;
         }
 
@@ -2196,7 +2209,7 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
         console.error(`[AUTO LIVE FINAL CHECK ERROR] fixture=${fixtureId}: ${freshError.message}; sıradaki adaya geçiliyor.`);
       }
     }
-    console.log(`[AUTO LIVE FINAL CHECK] candidates=${valueCandidates.length} checked=${freshChecks} skipped=${freshSkipped} selected=${top?.fixtureId || "none"} telegramSent=${Boolean(telegram?.sent)}`);
+    console.log(`[AUTO LIVE FINAL CHECK] candidates=${valueCandidates.length} checked=${freshChecks} skipped=${freshSkipped} selected=${top?.fixtureId || "none"} selectedMarket=${top?.mainPick || "none"} telegramSent=${Boolean(telegram?.sent)}`);
   }
   const reasonSummary = results.reduce((acc, x) => {
     acc[x.status] = (acc[x.status] || 0) + 1;
