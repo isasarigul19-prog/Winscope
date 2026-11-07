@@ -2059,61 +2059,144 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
         confidence: "LOW", status: "PARTIAL_DATA", reason: error.message });
     }
   }
-  const valueCandidates = results.filter(x => x.status === "VALUE_CANDIDATE").sort((a,b) => Number(b.valueScore || 0) - Number(a.valueScore || 0));
-  let top = valueCandidates[0] || null;
+  const valueCandidates = results.filter(x => x.status === "VALUE_CANDIDATE")
+    .sort((a,b) => Number(b.valueScore || 0) - Number(a.valueScore || 0));
+  let top = null;
   let telegram = null;
-  if (sendTelegramMessage && top) {
-    // Telegram öncesi tek bir taze fikstür sorgusuyla maçın hâlâ canlı, aynı periyotta
-    // ve aynı skor/dakikada olup olmadığını doğrula. Eski snapshot'la bildirim gönderme.
-    const freshPayload = await cachedProviderRequest(`final-live-fixture:${top.fixtureId}:${Date.now()}`, `/fixtures?id=${top.fixtureId}`, 0);
-    const freshRow = (freshPayload.response || [])[0];
-    if (!freshRow) {
-      console.warn(`[AUTO LIVE SKIP] fixture=${top.fixtureId}: son doğrulamada fikstür bulunamadı.`);
-      top = null;
-    } else {
-      const freshFixture = normalizeProviderMatch(freshRow);
-      if (freshFixture.status !== "LIVE" || freshFixture.periodStatus === "HT" || freshFixture.periodStatus === "FT" || freshFixture.periodStatus === "AET" || freshFixture.periodStatus === "PEN") {
-        console.log(`[AUTO LIVE SKIP] fixture=${top.fixtureId}: son doğrulamada canlı değil/periyot uygun değil (${freshFixture.periodStatus}).`);
-        top = null;
-      } else {
+  if (sendTelegramMessage && valueCandidates.length) {
+    // İlk aday son kontrolde geçersizleşirse tüm taramayı boşa çıkarma:
+    // sıradaki adayları da güncel fikstür + canlı oran + canlı istatistikle doğrula.
+    // Son kontrolde pazar değişmişse eski pazara zorlamak yerine güncel en iyi pazarı kullan.
+    let freshChecks = 0;
+    let freshSkipped = 0;
+    for (const candidate of valueCandidates) {
+      freshChecks++;
+      const fixtureId = Number(candidate.fixtureId);
+      try {
+        const freshPayload = await cachedProviderRequest(
+          `final-live-fixture:${fixtureId}:${Date.now()}`,
+          `/fixtures?id=${fixtureId}`, 0
+        );
+        const freshRow = (freshPayload.response || []).find(r =>
+          Number(r.fixture?.id ?? r.fixture?.fixture?.id ?? r.fixtureId ?? r.id) === fixtureId
+        ) || (freshPayload.response || [])[0];
+
+        if (!freshRow) {
+          freshSkipped++;
+          console.log(`[AUTO LIVE SKIP] fixture=${fixtureId}: son doğrulamada fikstür bulunamadı; sıradaki adaya geçiliyor.`);
+          continue;
+        }
+
+        const freshFixture = normalizeProviderMatch(freshRow);
+        if (freshFixture.status !== "LIVE" ||
+            ["HT", "FT", "AET", "PEN"].includes(freshFixture.periodStatus)) {
+          freshSkipped++;
+          console.log(`[AUTO LIVE SKIP] fixture=${fixtureId}: canlı değil/periyot uygun değil (${freshFixture.periodStatus}); sıradaki adaya geçiliyor.`);
+          continue;
+        }
+
         const [freshOddsPayload, freshStatsPayload] = await Promise.all([
-          cachedProviderRequest(`final-live-odds:${top.fixtureId}:${Date.now()}`, `/odds/live?fixture=${top.fixtureId}`, 0).catch(() => ({ response: [] })),
-          cachedProviderRequest(`final-live-stats:${top.fixtureId}:${Date.now()}`, `/fixtures/statistics?fixture=${top.fixtureId}`, 0).catch(() => ({ response: [] }))
+          cachedProviderRequest(`final-live-odds:${fixtureId}:${Date.now()}`, `/odds/live?fixture=${fixtureId}`, 0)
+            .catch(error => {
+              console.warn(`[AUTO LIVE FINAL ODDS] fixture=${fixtureId}: ${error.message}`);
+              return { response: [] };
+            }),
+          cachedProviderRequest(`final-live-stats:${fixtureId}:${Date.now()}`, `/fixtures/statistics?fixture=${fixtureId}`, 0)
+            .catch(error => {
+              console.warn(`[AUTO LIVE FINAL STATS] fixture=${fixtureId}: ${error.message}`);
+              return { response: [] };
+            })
         ]);
-        let freshOdds = (freshOddsPayload.response || []).find(r => Number(r.fixture?.fixture?.id ?? r.fixture?.id ?? r.fixtureId ?? r.id) === top.fixtureId) || null;
+
+        let freshOdds = (freshOddsPayload.response || []).find(r =>
+          Number(r.fixture?.fixture?.id ?? r.fixture?.id ?? r.fixtureId ?? r.id) === fixtureId
+        ) || null;
+
         if (!freshOdds) {
           try {
             const freshBulk = await cachedProviderRequest(`final-live-odds-bulk:${Date.now()}`, "/odds/live", 0);
-            freshOdds = (freshBulk.response || []).find(r => Number(r.fixture?.fixture?.id ?? r.fixture?.id ?? r.fixtureId ?? r.id) === top.fixtureId) || null;
-          } catch (bulkError) { console.warn(`[AUTO LIVE FINAL ODDS] ${bulkError.message}`); }
+            freshOdds = (freshBulk.response || []).find(r =>
+              Number(r.fixture?.fixture?.id ?? r.fixture?.id ?? r.fixtureId ?? r.id) === fixtureId
+            ) || null;
+          } catch (bulkError) {
+            console.warn(`[AUTO LIVE FINAL ODDS BULK] ${bulkError.message}`);
+          }
         }
-        const freshAnalysis = await analyzeLiveFixture(freshFixture, freshOdds, freshStatsPayload.response || [], top.teamForms || null);
-        if (!freshAnalysis.mainPick || freshAnalysis.mainPick !== top.mainPick) {
-          console.log(`[AUTO LIVE SKIP] fixture=${top.fixtureId}: taze kontrolde aday değişti/kayboldu.`);
-          top = null;
-        } else {
-          top = { ...top, minute: freshFixture.minute, score: freshAnalysis.currentScore, mainPick: freshAnalysis.mainPick,
-            valueScore: freshAnalysis.valueScore, edge: freshAnalysis.edge, periodStatus: freshFixture.periodStatus };
-          const key = `next-goal:${top.fixtureId}:${top.mainPick}`;
-          if (!autoSentFixtureKeys.has(key)) {
-            telegram = await sendTelegram(`⚡ WINSCOPE CANLI DEĞER ADAYI\n${top.home} - ${top.away}\nDakika/skor: ${top.minute}' · ${top.score}\nTercih: ${top.mainPick}\nGüven: ${freshAnalysis.stats.available ? "Orta" : "Düşük"}`);
-            if (telegram?.sent) {
-              autoSentFixtureKeys.add(key);
-              if (databasePool) {
-                try {
-                  await archiveDatabaseReady;
-                  await databasePool.query(`INSERT INTO winscope_live_predictions
-                    (fixture_id,home_team,away_team,market,signal_key,league,match_date,start_score,minute)
-                    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
-                    ON CONFLICT (fixture_id,market) DO NOTHING`,
-                    [top.fixtureId,top.home,top.away,top.mainPick,key,top.league,turkeyDateString(),top.score,top.minute]);
-                } catch (dbError) { console.error(`[LIVE TRACKING SAVE ERROR] ${dbError.message}`); }
-              }
+
+        if (!freshOdds || !oddsForFixture(freshOdds).length) {
+          freshSkipped++;
+          console.log(`[AUTO LIVE SKIP] fixture=${fixtureId}: son kontrolde kullanılabilir canlı oran yok; sıradaki adaya geçiliyor.`);
+          continue;
+        }
+
+        const freshAnalysis = await analyzeLiveFixture(
+          freshFixture, freshOdds, freshStatsPayload.response || [], candidate.teamForms || null
+        );
+
+        if (!freshAnalysis.mainPick) {
+          freshSkipped++;
+          console.log(`[AUTO LIVE SKIP] fixture=${fixtureId}: taze kontrolde değer şartı kalmadı; sıradaki adaya geçiliyor.`);
+          continue;
+        }
+
+        const currentScore = freshAnalysis.currentScore ||
+          `${freshFixture.homeScore}-${freshFixture.awayScore}`;
+        const currentPick = freshAnalysis.mainPick;
+        const key = `next-goal:${fixtureId}:${currentPick}`;
+
+        if (autoSentFixtureKeys.has(key)) {
+          freshSkipped++;
+          console.log(`[AUTO LIVE SKIP] fixture=${fixtureId}: ${currentPick} daha önce gönderilmiş; sıradaki adaya geçiliyor.`);
+          continue;
+        }
+
+        top = {
+          ...candidate,
+          minute: freshFixture.minute,
+          score: currentScore,
+          mainPick: currentPick,
+          valueScore: freshAnalysis.valueScore,
+          edge: freshAnalysis.edge,
+          periodStatus: freshFixture.periodStatus,
+          valuePick: {
+            outcome: currentPick,
+            bookmaker: freshAnalysis.source || "Canlı oran kaynağı"
+          }
+        };
+
+        try {
+          telegram = await sendTelegram(
+            `⚡ WINSCOPE CANLI DEĞER ADAYI\n${top.home} - ${top.away}\nDakika/skor: ${top.minute}' · ${top.score}\nTercih: ${top.mainPick}\nGüven: ${freshAnalysis.stats?.available ? "Orta" : "Düşük"}`
+          );
+        } catch (sendError) {
+          telegram = { sent: false, reason: sendError.message };
+          console.error(`[AUTO LIVE TELEGRAM ERROR] fixture=${fixtureId}: ${sendError.message}`);
+        }
+
+        if (telegram?.sent) {
+          autoSentFixtureKeys.add(key);
+          if (databasePool) {
+            try {
+              await archiveDatabaseReady;
+              await databasePool.query(`INSERT INTO winscope_live_predictions
+                (fixture_id,home_team,away_team,market,signal_key,league,match_date,start_score,minute)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                ON CONFLICT (fixture_id,market) DO NOTHING`,
+                [top.fixtureId,top.home,top.away,top.mainPick,key,top.league,turkeyDateString(),top.score,top.minute]);
+            } catch (dbError) {
+              console.error(`[LIVE TRACKING SAVE ERROR] ${dbError.message}`);
             }
-          } else telegram = { sent: false, duplicateSuppressed: true };
+          }
         }
+        // Bir aday taze kontrolden geçtiyse ve Telegram denemesi yapıldıysa
+        // aynı taramada ikinci bir canlı bahis bildirimi gönderme.
+        break;
+      } catch (freshError) {
+        freshSkipped++;
+        console.error(`[AUTO LIVE FINAL CHECK ERROR] fixture=${fixtureId}: ${freshError.message}; sıradaki adaya geçiliyor.`);
       }
     }
+    console.log(`[AUTO LIVE FINAL CHECK] candidates=${valueCandidates.length} checked=${freshChecks} skipped=${freshSkipped} selected=${top?.fixtureId || "none"} telegramSent=${Boolean(telegram?.sent)}`);
   }
   const reasonSummary = results.reduce((acc, x) => {
     acc[x.status] = (acc[x.status] || 0) + 1;
@@ -2124,7 +2207,7 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
   }, {});
   console.log(`[LIVE SCAN SUMMARY] liveFixtures=${fixtures.length} scanned=${results.length} oddsBulk=${bulkOdds.length} statsFetched=${statsFetchedFixtures} formEnriched=${formEnrichedFixtures} candidates=${valueCandidates.length} reasons=${JSON.stringify(reasonSummary)}`);
   return { status: "READY", type: "live", scanned: results.length, valueCandidates: valueCandidates.length,
-    message: top ? "En yüksek değerli canlı aday bulundu ve son skor/periyot kontrolünden geçirildi." : "Canlı maçlar tarandı; şu an taze oran ve değer kontrolünü geçen doğrulanmış tercih yok.",
+    message: telegram?.sent ? "Canlı aday taze fikstür, oran ve değer kontrolünden geçti; Telegram bildirimi gönderildi." : (top ? "Canlı aday bulundu ve taze kontrolden geçti; Telegram gönderimi tamamlanmadı." : "Canlı maçlar tarandı; taze oran ve değer kontrolünü geçen gönderilebilir tercih bulunmadı."),
     reasonSummary, matches: results, topPick: top, picks: top ? [{ fixtureId: top.fixtureId, league: top.league, home: top.home, away: top.away, minute: top.minute, currentScore: top.score, market: top.mainPick, source: top.valuePick?.bookmaker, oddsBasis: "Gerçek canlı oran" }] : [], telegram };
 }
 
