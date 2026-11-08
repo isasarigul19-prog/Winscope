@@ -2159,7 +2159,13 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
       const analysis = await analyzeLiveFixture(fixture, oddsRow, statsRows, teamForms);
       results.push({ fixtureId: fixture.id, league: fixture.league, home: fixture.home, away: fixture.away,
         minute: fixture.minute, periodStatus: fixture.periodStatus, score: analysis.currentScore, prediction: "Canlı gol pazarları tarandı",
-        confidence: analysis.mainPick ? (analysis.stats?.available ? "MEDIUM" : "LOW") : "LOW", valueScore: analysis.valueScore, edge: analysis.edge,
+        confidence: (() => {
+          const chosen = analysis.marketEvaluations?.find(x => x.market === analysis.mainPick);
+          return (analysis.stats?.available && analysis.teamForm?.available && chosen?.edge >= 0.10 && chosen?.ev >= 0.10 && chosen?.modelProbability >= 0.70)
+            ? "HIGH"
+            : (analysis.stats?.available && chosen?.edge >= 0.06 && chosen?.ev >= 0.06 && chosen?.modelProbability >= 0.47)
+              ? "MEDIUM" : "LOW";
+        })(), valueScore: analysis.valueScore, edge: analysis.edge,
         status: analysis.mainPick ? "VALUE_CANDIDATE" : (!oddsRow ? "LIVE_ODDS_UNAVAILABLE" : (analysis.periodStatus === "HT" ? "HALFTIME_WAIT" : "NO_VALUE")),
         mainPick: analysis.mainPick, alternative: analysis.alternative, note: analysis.note,
         reasonCounts: analysis.reasonCounts,
@@ -2182,7 +2188,7 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
     .sort((a,b) => Number(b.valueScore || 0) - Number(a.valueScore || 0));
   let top = null;
   let telegram = null;
-  if (sendTelegramMessage && valueCandidates.length) {
+  if (valueCandidates.length) {
     // İlk aday son kontrolde geçersizleşirse tüm taramayı boşa çıkarma:
     // sıradaki adayları da güncel fikstür + canlı oran + canlı istatistikle doğrula.
     // Son kontrolde pazar değişmişse eski pazara zorlamak yerine güncel en iyi pazarı kullan.
@@ -2273,7 +2279,7 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
         const currentPick = freshAnalysis.mainPick;
         const key = `next-goal:${fixtureId}:${currentPick}`;
 
-        if (autoSentFixtureKeys.has(key)) {
+        if (sendTelegramMessage && autoSentFixtureKeys.has(key)) {
           freshSkipped++;
           console.log(`[AUTO LIVE SKIP] fixture=${fixtureId}: ${currentPick} daha önce gönderilmiş; sıradaki adaya geçiliyor.`);
           continue;
@@ -2293,22 +2299,24 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
           }
         };
 
-        try {
-          const chosenEvaluation = freshAnalysis.marketEvaluations?.find(x => x.market === freshAnalysis.mainPick);
-          const confidenceLabel = (
-            chosenEvaluation?.edge >= 0.10 && chosenEvaluation?.ev >= 0.10 &&
-            chosenEvaluation?.modelProbability >= 0.70 &&
-            freshAnalysis.stats?.available && freshAnalysis.teamForm?.available
-          ) ? "Yüksek" : (
-            chosenEvaluation?.edge >= 0.06 && chosenEvaluation?.ev >= 0.06 &&
-            chosenEvaluation?.modelProbability >= 0.47 && freshAnalysis.stats?.available
-          ) ? "Orta" : "Düşük";
-          telegram = await sendTelegram(
-            `⚡ WINSCOPE CANLI DEĞER ADAYI\\n${top.home} - ${top.away}\\nDakika/skor: ${top.minute}' · ${top.score}\\nTercih: ${top.mainPick}\\nGüven: ${confidenceLabel}`
-          );
-        } catch (sendError) {
-          telegram = { sent: false, reason: sendError.message };
-          console.error(`[AUTO LIVE TELEGRAM ERROR] fixture=${fixtureId}: ${sendError.message}`);
+        if (sendTelegramMessage) {
+          try {
+            const chosenEvaluation = freshAnalysis.marketEvaluations?.find(x => x.market === freshAnalysis.mainPick);
+            const confidenceLabel = (
+              chosenEvaluation?.edge >= 0.10 && chosenEvaluation?.ev >= 0.10 &&
+              chosenEvaluation?.modelProbability >= 0.70 &&
+              freshAnalysis.stats?.available && freshAnalysis.teamForm?.available
+            ) ? "Yüksek" : (
+              chosenEvaluation?.edge >= 0.06 && chosenEvaluation?.ev >= 0.06 &&
+              chosenEvaluation?.modelProbability >= 0.47 && freshAnalysis.stats?.available
+            ) ? "Orta" : "Düşük";
+            telegram = await sendTelegram(
+              `⚡ WINSCOPE CANLI DEĞER ADAYI\\n${top.home} - ${top.away}\\nDakika/skor: ${top.minute}' · ${top.score}\\nTercih: ${top.mainPick}\\nGüven: ${confidenceLabel}`
+            );
+          } catch (sendError) {
+            telegram = { sent: false, reason: sendError.message };
+            console.error(`[AUTO LIVE TELEGRAM ERROR] fixture=${fixtureId}: ${sendError.message}`);
+          }
         }
 
         if (telegram?.sent) {
