@@ -2708,6 +2708,7 @@ async function runDailyAnalysisJob(job) {
         job.selected = selected.length;
       } catch (err) { console.warn(`[Daily analysis] fixture=${match.id}: ${err.message}`); rejected.noSupportedPick++; }
     }
+    await settleDailyMarketPredictions();
     job.result = { success:true, date, fixtures:fixtures.length, majorLeagueFixtures:fixtures.length,
       excludedOtherLeagues:job.excludedOtherLeagues || 0, selected:selected.length, rejected,
       filters:{ leagues:["Premier League", "La Liga", "Bundesliga", "Serie A", "Ligue 1", "Süper Lig"], oddsMin:DAILY_MARKET_ODDS_MIN, oddsMax:DAILY_MARKET_ODDS_MAX, balancedOpponents:true },
@@ -3054,7 +3055,7 @@ async function settleDailyMarketPredictions() {
       WHERE settled_at IS NULL
         AND match_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
         AND match_date::date <= (NOW() AT TIME ZONE 'Europe/Istanbul')::date
-      ORDER BY match_date ASC LIMIT 80`);
+      ORDER BY match_date ASC LIMIT 250`);
     const groups = new Map();
     for (const item of pending.rows) {
       const id = Number(item.fixture_id);
