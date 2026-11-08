@@ -2870,7 +2870,7 @@ setInterval(async () => {
       const previous = goalScoreCache.get(fixtureId) ?? tracked.baselineScore ?? score;
       if (score !== previous) {
         changedCount++;
-        const message = `⚽ WINSCOPE GOOOOOL!\\n🏆 ${match.league || tracked.league || "Lig"}\\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\\n📣 Skor değişti: ${previous} → ${score}\\n⏱️ Dakika: ${match.minute ?? "?"}'\\n🎯 Takip nedeni: ${tracked.sourceLabel || "Canlı maç takibi"}`;
+        const message = `⚽ WINSCOPE GOOOOOL!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Skor değişti: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}'\n🎯 Takip nedeni: ${tracked.sourceLabel || "Canlı maç takibi"}`;
         try {
           const sent = await sendTelegram(message);
           if (sent.sent) {
@@ -3000,32 +3000,6 @@ async function settleCouponPredictions() {
 setTimeout(() => { void settleCouponPredictions(); }, 30_000);
 setInterval(() => { void settleCouponPredictions(); }, 5 * 60 * 1000);
 
-app.get("/api/daily-market-tracking/summary", async (req, res) => {
-  const date = String(req.query.date || "").trim();
-  try {
-    if (databasePool) {
-      await archiveDatabaseReady;
-      const params = date ? [date] : [];
-      const where = date ? "WHERE match_date=$1" : "";
-      const result = await databasePool.query(`SELECT market,
-        COUNT(*)::int AS total,
-        COUNT(*) FILTER (WHERE outcome='won')::int AS won,
-        COUNT(*) FILTER (WHERE outcome='lost')::int AS lost,
-        COUNT(*) FILTER (WHERE settled_at IS NULL)::int AS pending
-        FROM winscope_daily_market_predictions ${where}
-        GROUP BY market ORDER BY market`, params);
-      return res.json({ success:true, date:date || null, markets:result.rows });
-    }
-    const rows = dailyMarketTracking.filter(x => !date || x.matchDate === date);
-    const markets = [...new Set(rows.map(x=>x.market))].map(m => {
-      const subset=rows.filter(x=>x.market===m);
-      return { market:m,total:subset.length,won:subset.filter(x=>x.outcome==='won').length,
-        lost:subset.filter(x=>x.outcome==='lost').length,pending:subset.filter(x=>!x.settled).length };
-    });
-    res.json({ success:true,date:date||null,markets });
-  } catch (error) { res.status(500).json({success:false,error:error.message,markets:[]}); }
-});
-
 app.use("/api", (_req, res) => res.status(404).json({ error: "API uç noktası bulunamadı." }));
 function evaluateTrackedLiveMarket(market, homeGoals, awayGoals, halfHome, halfAway) {
   const m = String(market || "").toLocaleUpperCase("tr-TR").replace(/İ/g, "I").replace(/Ü/g, "U").replace(/Ş/g, "S").replace(/Ğ/g, "G").replace(/Ç/g, "C").replace(/Ö/g, "O");
@@ -3110,7 +3084,31 @@ async function settleDailyMarketPredictions() {
     }
   } catch (error) { console.error(`[Daily market settlement] ${error.message}`); }
 }
-
+app.get("/api/daily-market-tracking/summary", async (req, res) => {
+  const date = String(req.query.date || "").trim();
+  try {
+    if (databasePool) {
+      await archiveDatabaseReady;
+      const params = date ? [date] : [];
+      const where = date ? "WHERE match_date=$1" : "";
+      const result = await databasePool.query(`SELECT market,
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE outcome='won')::int AS won,
+        COUNT(*) FILTER (WHERE outcome='lost')::int AS lost,
+        COUNT(*) FILTER (WHERE settled_at IS NULL)::int AS pending
+        FROM winscope_daily_market_predictions ${where}
+        GROUP BY market ORDER BY market`, params);
+      return res.json({ success:true, date:date || null, markets:result.rows });
+    }
+    const rows = dailyMarketTracking.filter(x => !date || x.matchDate === date);
+    const markets = [...new Set(rows.map(x=>x.market))].map(m => {
+      const subset=rows.filter(x=>x.market===m);
+      return { market:m,total:subset.length,won:subset.filter(x=>x.outcome==='won').length,
+        lost:subset.filter(x=>x.outcome==='lost').length,pending:subset.filter(x=>!x.settled).length };
+    });
+    res.json({ success:true,date:date||null,markets });
+  } catch (error) { res.status(500).json({success:false,error:error.message,markets:[]}); }
+});
 
 async function settleApprovedPredictions() {
   if (!predictionTracking.some(x => !x.settled)) return;
