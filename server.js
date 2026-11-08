@@ -2828,36 +2828,70 @@ setInterval(() => { void runAutomaticDailyCoupon(); }, 2 * 60 * 60 * 1000);
 setTimeout(() => { void scanSurpriseScenarios(); }, 45000);
 setInterval(() => { void scanSurpriseScenarios(); }, 10 * 60 * 1000);
 
-// Her 60 saniyede bir Telegram'a gönderilmiş kupon maçlarının skor değişimini kontrol et.
-// Böylece gol alarmı yalnızca kupon mesajı atmakla kalmaz, maçtaki skor değişimini de bildirir.
+// Takip edilen canlı maçların skorunu 45 saniyede bir kontrol et.
+// Canlı listede görünmeyen fixture'lar ayrıca ID ile sorgulanır; sessizce atlanmaz.
 setInterval(async () => {
   if (goalScanInFlight || goalTrackedFixtures.size === 0) return;
   goalScanInFlight = true;
+  const trackedCount = goalTrackedFixtures.size;
+  let matchedCount = 0;
+  let changedCount = 0;
   try {
-    // Cache TTL is deliberately shorter than the scan interval; otherwise each
-    // scan could repeatedly receive the same cached score snapshot.
     const payload = await cachedProviderRequest("liveList:goal-alert", "/fixtures?live=all", 20_000);
     const liveMatches = (payload.response || []).map(normalizeProviderMatch);
     const liveById = new Map(liveMatches.map(m => [Number(m.id), m]));
+
     for (const [fixtureId, tracked] of goalTrackedFixtures.entries()) {
-      const match = liveById.get(fixtureId);
-      // Compare scores whenever the fixture remains in the live feed, including HT/extra-time labels.
-      if (!match) continue;
+      let match = liveById.get(fixtureId);
+
+      // API'nin genel canlı listesinden düşen takipli maçı fixture ID ile tekrar kontrol et.
+      if (!match) {
+        try {
+          const direct = await cachedProviderRequest(
+            `goal-alert-fixture:${fixtureId}`,
+            `/fixtures?id=${encodeURIComponent(fixtureId)}`,
+            10_000
+          );
+          const row = direct.response?.[0];
+          if (row) match = normalizeProviderMatch(row);
+        } catch (lookupError) {
+          console.warn(`[GOOOOL FIXTURE LOOKUP ERROR] ${fixtureId}: ${lookupError.message}`);
+          continue;
+        }
+      }
+
+      if (!match) {
+        console.warn(`[GOOOOL TRACKING MISS] fixture=${fixtureId}; canlı liste ve ID sorgusunda bulunamadı.`);
+        continue;
+      }
+      matchedCount++;
+
       const score = `${match.homeScore}-${match.awayScore}`;
       const previous = goalScoreCache.get(fixtureId) ?? tracked.baselineScore ?? score;
-      if (score === previous) continue;
-      const message = `⚽ WINSCOPE GOOOOOL!\n🏆 ${match.league || tracked.league || "Lig"}\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\n📣 Skor değişti: ${previous} → ${score}\n⏱️ Dakika: ${match.minute ?? "?"}'\n🎯 Takip nedeni: ${tracked.sourceLabel}`;
-      try {
-        const sent = await sendTelegram(message);
-        if (sent.sent) {
-          goalScoreCache.set(fixtureId, score);
-          tracked.baselineScore = score;
-          console.log(`[GOOOOL Alert OK] ${fixtureId} ${previous} -> ${score}`);
+      if (score !== previous) {
+        changedCount++;
+        const message = `⚽ WINSCOPE GOOOOOL!\\n🏆 ${match.league || tracked.league || "Lig"}\\n⚽ ${match.home || tracked.home} - ${match.away || tracked.away}\\n📣 Skor değişti: ${previous} → ${score}\\n⏱️ Dakika: ${match.minute ?? "?"}'\\n🎯 Takip nedeni: ${tracked.sourceLabel || "Canlı maç takibi"}`;
+        try {
+          const sent = await sendTelegram(message);
+          if (sent.sent) {
+            goalScoreCache.set(fixtureId, score);
+            tracked.baselineScore = score;
+            console.log(`[GOOOOL Alert OK] ${fixtureId} ${previous} -> ${score}`);
+          } else {
+            console.error(`[GOOOOL Alert NOT SENT] ${fixtureId}: ${sent.reason || "Telegram gönderimi başarısız"}`);
+          }
+        } catch (error) {
+          console.error(`[GOOOOL Alert Error] ${fixtureId}: ${error.message}`);
         }
-      } catch (error) {
-        console.error(`[GOOOOL Alert Error] ${fixtureId}: ${error.message}`);
+      }
+
+      if (["FT", "AET", "PEN", "CANC", "ABD", "AWD", "WO"].includes(String(match.periodStatus || match.status || "").toUpperCase())) {
+        goalTrackedFixtures.delete(fixtureId);
+        goalScoreCache.delete(fixtureId);
+        console.log(`[GOOOOL TRACKING CLOSED] fixture=${fixtureId} finalScore=${score}`);
       }
     }
+    console.log(`[GOOOOL SCAN] tracked=${trackedCount} matched=${matchedCount} scoreChanges=${changedCount}`);
   } catch (error) {
     console.error(`[GOOOOL Scan Error] ${error.message}`);
   } finally {
