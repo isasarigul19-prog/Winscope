@@ -284,7 +284,6 @@ let providerQueue = [];
 let providerQueueRunning = false;
 let lastProviderRequestAt = 0;
 let providerCooldownUntil = 0;
-let providerQuotaBlockedUntil = 0;
 const PROVIDER_MIN_INTERVAL_MS = Math.max(1000, Number(process.env.API_FOOTBALL_MIN_INTERVAL_MS) || 1200);
 let providerQueueSequence = 0;
 let lastProviderUsageLogAt = 0;
@@ -327,10 +326,6 @@ async function pumpProviderQueue() {
       const item = providerQueue.shift();
       try {
         const now = Date.now();
-        if (now < providerQuotaBlockedUntil) {
-          const minutes = Math.ceil((providerQuotaBlockedUntil - now) / 60000);
-          throw new Error(`API-Football günlük kotası geçici olarak durduruldu; yaklaşık ${minutes} dakika sonra yeniden denenecek.`);
-        }
         const allowedAt = Math.max(lastProviderRequestAt + PROVIDER_MIN_INTERVAL_MS, providerCooldownUntil);
         if (allowedAt > Date.now()) await delay(allowedAt - Date.now());
         lastProviderRequestAt = Date.now();
@@ -347,10 +342,6 @@ async function pumpProviderQueue() {
 
 async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
   const now = Date.now();
-  if (now < providerQuotaBlockedUntil) {
-    const minutes = Math.ceil((providerQuotaBlockedUntil - now) / 60000);
-    throw new Error(`API-Football kotası geçici olarak durduruldu; yeni istek gönderilmiyor. Yaklaşık ${minutes} dakika sonra yeniden denenecek.`);
-  }
   const cached = providerCache.get(cacheKey);
   if (cached && now - cached.at < ttlMs) return cached.payload;
   if (providerInFlight.has(cacheKey)) return providerInFlight.get(cacheKey);
@@ -371,12 +362,6 @@ async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
     const errors = payload.errors && Object.keys(payload.errors).length ? payload.errors : null;
     const errorText = errors ? JSON.stringify(errors) : "";
     if (!response.ok || errors) {
-      const quotaExhausted = /request limit|requests limit|quota|subscription plan|daily limit|monthly limit|you have reached/i.test(errorText);
-      if (quotaExhausted) {
-        providerQuotaBlockedUntil = Date.now() + 6 * 60 * 60 * 1000;
-        providerCooldownUntil = providerQuotaBlockedUntil;
-        throw new Error(`API-Football günlük kotası dolu; 6 saatlik koruma devrede. ${errorText}`);
-      }
       if (response.status === 429 || /rate.?limit|too many requests|per-minute|per-second/i.test(errorText)) {
         const retryHeader = Number(response.headers.get("retry-after")) || 0;
         const retryBody = Number((errorText.match(/retry after\s+(\d+)/i) || [])[1]) || 0;
