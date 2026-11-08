@@ -30,6 +30,8 @@ const providerInFlight = new Map();
 const archives = { analyses: [], coupons: [] };
 const predictionTracking = [];
 const livePredictionTracking = [];
+const dailyAnalysisJobs = new Map();
+const dailyAnalysisRunCache = new Map();
 const { Pool } = pg;
 const databasePool = process.env.DATABASE_URL
   ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL) ? false : { rejectUnauthorized: false } })
@@ -45,6 +47,15 @@ if (databasePool) {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`);
       await databasePool.query("CREATE INDEX IF NOT EXISTS winscope_archive_category_id_idx ON winscope_archive(category, id DESC)");
+      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_daily_analysis_runs (
+        match_date DATE PRIMARY KEY,
+        status TEXT NOT NULL,
+        result JSONB,
+        error TEXT,
+        started_at TIMESTAMPTZ,
+        finished_at TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`);
 
       await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_surprise_scenarios (
         fixture_id BIGINT PRIMARY KEY,
@@ -162,14 +173,19 @@ if (databasePool) {
         END IF;
       END $$`);
       await databasePool.query(`CREATE UNIQUE INDEX IF NOT EXISTS winscope_live_predictions_fixture_market_uidx ON winscope_live_predictions(fixture_id, market)`);
-      const [analysisRows, couponRows, sentRows, predictionRows, livePredictionRows] = await Promise.all([
+      const [analysisRows, couponRows, sentRows, predictionRows, livePredictionRows, dailyRunRows] = await Promise.all([
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'analysis' ORDER BY id DESC LIMIT 100"),
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'coupon' ORDER BY id DESC LIMIT 50"),
         databasePool.query("SELECT fixture_id, coupon_type, market, match_date FROM winscope_telegram_delivery_sent"),
         databasePool.query("SELECT * FROM winscope_predictions ORDER BY created_at DESC LIMIT 500"),
-        databasePool.query("SELECT * FROM winscope_live_predictions ORDER BY created_at DESC LIMIT 500")
+        databasePool.query("SELECT * FROM winscope_live_predictions ORDER BY created_at DESC LIMIT 500"),
+        databasePool.query("SELECT match_date::text, status, result, error, started_at, finished_at FROM winscope_daily_analysis_runs ORDER BY match_date DESC LIMIT 30")
       ]);
       archives.analyses = analysisRows.rows.map(row => row.payload);
+      for (const row of dailyRunRows.rows) dailyAnalysisRunCache.set(String(row.match_date).slice(0,10), {
+        date:String(row.match_date).slice(0,10), status:row.status, result:row.result || null,
+        error:row.error || null, startedAt:row.started_at, finishedAt:row.finished_at
+      });
       archives.coupons = couponRows.rows.map(row => row.payload);
       let couponBackfilled = 0;
       for (const archivedCoupon of archives.coupons) {
@@ -2556,11 +2572,54 @@ function dailyOpponentBalance(oddsRow) {
   }
   return { balanced:false };
 }
-const dailyAnalysisJobs = new Map();
+async function persistDailyAnalysisRun(job) {
+  dailyAnalysisRunCache.set(job.date, job);
+  if (!databasePool) return { persisted:false, reason:"DATABASE_URL tanımlı değil" };
+  try {
+    await archiveDatabaseReady;
+    await databasePool.query(`INSERT INTO winscope_daily_analysis_runs(match_date,status,result,error,started_at,finished_at,updated_at)
+      VALUES($1,$2,$3::jsonb,$4,$5,$6,NOW())
+      ON CONFLICT(match_date) DO UPDATE SET status=EXCLUDED.status,result=EXCLUDED.result,error=EXCLUDED.error,
+      started_at=EXCLUDED.started_at,finished_at=EXCLUDED.finished_at,updated_at=NOW()`,
+      [job.date,job.status,job.result ? JSON.stringify(job.result) : null,job.error || null,job.startedAt || null,job.finishedAt || null]);
+    return { persisted:true };
+  } catch (error) {
+    console.error(`[Daily analysis] Günlük çalışma kaydı yazılamadı: ${error.message}`);
+    return { persisted:false, error:error.message };
+  }
+}
+async function findDailyAnalysisRun(date) {
+  const active = dailyAnalysisJobs.get(date);
+  if (active && ["queued","running"].includes(active.status)) return active;
+  if (databasePool) {
+    try {
+      await archiveDatabaseReady;
+      const q = await databasePool.query("SELECT match_date::text,status,result,error,started_at,finished_at FROM winscope_daily_analysis_runs WHERE match_date=$1::date", [date]);
+      if (q.rows[0]) {
+        const r=q.rows[0];
+        const job={date,status:r.status,result:r.result||null,error:r.error||null,startedAt:r.started_at,finishedAt:r.finished_at};
+        dailyAnalysisRunCache.set(date,job);
+        dailyAnalysisJobs.set(date,job);
+        return job;
+      }
+    } catch (error) { console.warn(`[Daily analysis] Günlük kayıt okunamadı: ${error.message}`); }
+  }
+  return dailyAnalysisRunCache.get(date) || null;
+}
+async function startDailyAnalysisIfNeeded(date, { force=false } = {}) {
+  const existing = await findDailyAnalysisRun(date);
+  if (existing && !force && ["queued","running","completed"].includes(existing.status)) return existing;
+  const job = { date, status:"queued", current:0, total:0, selected:0, currentMatch:"", startedAt:new Date().toISOString() };
+  dailyAnalysisJobs.set(date, job);
+  await persistDailyAnalysisRun(job);
+  setImmediate(() => runDailyAnalysisJob(job));
+  return job;
+}
 async function runDailyAnalysisJob(job) {
   const { date } = job;
   try {
     job.status = "running";
+    await persistDailyAnalysisRun(job);
     const payload = await cachedProviderRequest(`fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 60000);
     const scheduledFixtures = (payload.response || []).map(normalizeProviderMatch).filter(m => String(m.status || "").toUpperCase() === "NS");
     const fixtures = scheduledFixtures.filter(isDailyMajorLeague);
@@ -2615,41 +2674,41 @@ async function runDailyAnalysisJob(job) {
       filters:{ leagues:["Premier League", "La Liga", "Bundesliga", "Serie A", "Ligue 1", "Süper Lig"], oddsMin:DAILY_MARKET_ODDS_MIN, oddsMax:DAILY_MARKET_ODDS_MAX, balancedOpponents:true },
       persistentStorage:Boolean(databasePool) };
     job.status = "completed";
+    await persistDailyAnalysisRun(job);
   } catch (error) {
     job.status = "failed";
     job.error = error.message;
     console.error(`[Daily analysis job] ${date}: ${error.message}`);
   } finally {
     job.finishedAt = new Date().toISOString();
+    await persistDailyAnalysisRun(job);
   }
 }
 app.post("/api/analyses/daily/start", async (req, res) => {
   const date = String(req.body?.date || "");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error:"Tarih YYYY-MM-DD biçiminde olmalı." });
-  const existing = dailyAnalysisJobs.get(date);
-  if (existing && ["queued","running"].includes(existing.status)) return res.json({ success:true, job:existing });
-  const job = { date, status:"queued", current:0, total:0, selected:0, currentMatch:"", startedAt:new Date().toISOString() };
-  dailyAnalysisJobs.set(date, job);
-  // İş HTTP isteğinden bağımsız çalışır; istemci ayrılsa bile sunucu devam eder.
-  setImmediate(() => runDailyAnalysisJob(job));
+  const job = await startDailyAnalysisIfNeeded(date);
+  res.status(["queued","running"].includes(job.status) ? 202 : 200).json({ success:true, alreadyScanned:job.status==="completed", job });
+});
+app.post("/api/analyses/daily/retry", async (req, res) => {
+  const date = String(req.body?.date || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error:"Tarih YYYY-MM-DD biçiminde olmalı." });
+  const job = await startDailyAnalysisIfNeeded(date,{force:true});
   res.status(202).json({ success:true, job });
 });
-app.get("/api/analyses/daily/status", (req, res) => {
+app.get("/api/analyses/daily/status", async (req, res) => {
   const date = String(req.query.date || "");
-  const job = dailyAnalysisJobs.get(date);
+  const job = await findDailyAnalysisRun(date);
   if (!job) return res.json({ found:false, date });
   res.json({ found:true, job });
 });
-// Eski istemciler için geriye dönük uyumluluk: bu yol da işi başlatır ve hemen döner.
-app.get("/api/analyses/daily", (req, res) => {
+// Geriye dönük uyumluluk: GET artık sadece kayıtlı durumu döndürür, yeni tarama başlatmaz.
+app.get("/api/analyses/daily", async (req, res) => {
   const date = String(req.query.date || "");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error:"Tarih YYYY-MM-DD biçiminde olmalı." });
-  const existing = dailyAnalysisJobs.get(date);
-  if (existing && ["queued","running"].includes(existing.status)) return res.json({ success:true, pending:true, job:existing });
-  const job = { date, status:"queued", current:0, total:0, selected:0, currentMatch:"", startedAt:new Date().toISOString() };
-  dailyAnalysisJobs.set(date, job);
-  setImmediate(() => runDailyAnalysisJob(job));
-  res.status(202).json({ success:true, pending:true, job });
+  const job = await findDailyAnalysisRun(date);
+  if (!job) return res.json({ success:true, found:false, date, analyses:archives.analyses.filter(x=>String(x.match_date||x.analysis?.matchDate||"").slice(0,10)===date) });
+  res.json({ success:true, found:true, job });
 });
 
 app.get("/api/archives", async (_req, res) => {
@@ -2671,6 +2730,22 @@ function turkeyDateString() {
   const get = type => parts.find(p => p.type === type)?.value;
   return `${get("year")}-${get("month")}-${get("day")}`;
 }
+// Günün majör lig analizini sunucu açılışında ve Türkiye tarihi değiştiğinde otomatik başlat.
+let dailyAutoScanDate = "";
+async function ensureAutomaticDailyAnalysis() {
+  const date = turkeyDateString();
+  if (dailyAutoScanDate === date) return;
+  dailyAutoScanDate = date;
+  try {
+    const job = await startDailyAnalysisIfNeeded(date);
+    console.log(`[Daily analysis auto] ${date}: ${job.status}${job.status === "completed" ? " (önceden taranmış)" : ""}`);
+  } catch (error) {
+    dailyAutoScanDate = "";
+    console.warn(`[Daily analysis auto] ${date}: ${error.message}`);
+  }
+}
+setTimeout(() => { void ensureAutomaticDailyAnalysis(); }, 45000);
+setInterval(() => { void ensureAutomaticDailyAnalysis(); }, 5 * 60 * 1000);
 
 async function runAutomaticLivePick() {
   if (autoLiveTaskInFlight) return;
