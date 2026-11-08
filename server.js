@@ -2697,8 +2697,7 @@ async function runDailyAnalysisJob(job) {
               (fixture_id,match_date,home_team,away_team,league,market)
               VALUES($1,$2,$3,$4,$5,$6)
               ON CONFLICT(fixture_id,market) DO UPDATE SET match_date=EXCLUDED.match_date,
-              home_team=EXCLUDED.home_team,away_team=EXCLUDED.away_team,league=EXCLUDED.league,
-              actual_score=NULL,outcome=NULL,settled_at=NULL`,
+              home_team=EXCLUDED.home_team,away_team=EXCLUDED.away_team,league=EXCLUDED.league`,
               [tracked.fixtureId,tracked.matchDate,tracked.home,tracked.away,tracked.league,tracked.market]);
           }
         }
@@ -3084,11 +3083,51 @@ async function settleDailyMarketPredictions() {
     }
   } catch (error) { console.error(`[Daily market settlement] ${error.message}`); }
 }
+
+async function backfillDailyMarketPredictions(matchDate) {
+  if (!databasePool || !/^\d{4}-\d{2}-\d{2}$/.test(String(matchDate || ""))) return { inserted:0, scanned:0 };
+  await archiveDatabaseReady;
+  const archived = await databasePool.query(`
+    SELECT payload FROM winscope_archive
+    WHERE category='analysis'
+      AND COALESCE(payload->>'match_date', payload->'analysis'->>'matchDate')=$1
+    ORDER BY id ASC
+  `, [matchDate]);
+  let inserted=0, scanned=0;
+  const allowed = new Set(["KG VAR","KG YOK","MS 2.5 ÜST","EV 1.5 ÜST","DEP 1.5 ÜST"]);
+  for (const record of archived.rows) {
+    const payload = record.payload || {};
+    const a = payload.analysis || payload;
+    const fixtureId = Number(payload.fixture_id || payload.fixtureId || a.fixtureId);
+    const home = String(payload.home_team || a.home || "");
+    const away = String(payload.away_team || a.away || "");
+    const league = String(a.league || payload.league || "");
+    if (!fixtureId || !home || !away) continue;
+    scanned++;
+    const markets = [...new Set([a.mainPick, a.alternative].map(x=>String(x || "").trim()).filter(x=>allowed.has(x)))];
+    for (const market of markets) {
+      const result = await databasePool.query(`
+        INSERT INTO winscope_daily_market_predictions
+          (fixture_id,match_date,home_team,away_team,league,market)
+        VALUES($1,$2,$3,$4,$5,$6)
+        ON CONFLICT(fixture_id,market) DO NOTHING
+      `, [fixtureId, matchDate, home, away, league, market]);
+      inserted += result.rowCount || 0;
+    }
+  }
+  if (inserted) console.log(`[Daily market backfill] ${matchDate}: arşiv=${scanned}, yeni takip=${inserted}`);
+  return { inserted, scanned };
+}
+
 app.get("/api/daily-market-tracking/summary", async (req, res) => {
   const date = String(req.query.date || "").trim();
   try {
     if (databasePool) {
       await archiveDatabaseReady;
+      if (date) {
+        await backfillDailyMarketPredictions(date);
+        await settleDailyMarketPredictions();
+      }
       const params = date ? [date] : [];
       const where = date ? "WHERE match_date=$1" : "";
       const result = await databasePool.query(`SELECT market,
