@@ -2326,7 +2326,7 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
               chosenEvaluation?.modelProbability >= 0.47 && freshAnalysis.stats?.available
             ) ? "Orta" : "Düşük";
             telegram = await sendTelegram(
-              `⚡ WINSCOPE CANLI TERCİH\\n🏟️ ${top.home}  VS  ${top.away}\\n⏱️ Dakika: ${top.minute}'\\n⚽ Anlık skor: ${top.score}\\n🎯 ANA TERCİH: ${top.mainPick}\\n🛡️ Güven: ${confidenceLabel}\\n\\nWinScope · Canlı maç analizi`
+              `⚡ WINSCOPE CANLI TERCİH\n🏟️ ${top.home} VS ${top.away}\n⏱️ Dakika: ${top.minute}'\n⚽ Anlık skor: ${top.score}\n🎯 ANA TERCİH: ${top.mainPick}\n🛡️ Güven: ${confidenceLabel}\nWinScope · Canlı maç analizi`
             );
           } catch (sendError) {
             telegram = { sent: false, reason: sendError.message };
