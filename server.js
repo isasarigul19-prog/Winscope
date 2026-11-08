@@ -1508,6 +1508,12 @@ function rankSingleMatchChoices(choices, mode = "prematch") {
 
 
 async function sendCouponAutomatically(coupon, chosen) {
+  // Günün maç önü kuponu bildirimleri analiz dönemi boyunca kapalı.
+  // Canlı tek tercih ve 10 maçlık sürpriz bildirimleri etkilenmez.
+  if (coupon?.type === "prematch") {
+    console.log(`[AUTO DAILY DISABLED] Günün kuponu Telegram gönderimi kapalı: date=${coupon.date || "?"}`);
+    return { sent: false, disabled: true, reason: "Günün maç önü kuponu Telegram bildirimi geçici olarak kapalı." };
+  }
   await archiveDatabaseReady;
   const originalPicks = coupon.picks || [];
   const alreadySent = new Set(telegramSentKeys);
@@ -2810,6 +2816,8 @@ async function runAutomaticLivePick() {
 }
 
 async function runAutomaticDailyCoupon() {
+  console.log("[AUTO DAILY DISABLED] Günün kuponu otomatik taraması kapalı.");
+  return;
   if (autoPrematchTaskInFlight) return;
   autoPrematchTaskInFlight = true;
   try {
@@ -2831,9 +2839,9 @@ async function runAutomaticDailyCoupon() {
 setTimeout(() => { void runAutomaticLivePick(); }, 20000);
 // Günün maç önü kuponunu da sunucu açıldıktan kısa süre sonra dene;
 // yalnızca interval kullanılırsa ilk bildirim 2 saate kadar gecikebilirdi.
-setTimeout(() => { void runAutomaticDailyCoupon(); }, 30000);
+// Günün maç önü kuponu otomatik bildirimi devre dışı bırakıldı.
 setInterval(() => { void runAutomaticLivePick(); }, 90 * 1000);
-setInterval(() => { void runAutomaticDailyCoupon(); }, 2 * 60 * 60 * 1000);
+// Günün maç önü kuponu 2 saatlik otomatik döngüsü devre dışı bırakıldı.
 setTimeout(() => { void scanSurpriseScenarios(); }, 45000);
 setInterval(() => { void scanSurpriseScenarios(); }, 10 * 60 * 1000);
 
