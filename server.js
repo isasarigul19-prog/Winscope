@@ -78,29 +78,6 @@ if (databasePool) {
         settled_at TIMESTAMPTZ
       )`);
       await databasePool.query("CREATE INDEX IF NOT EXISTS winscope_surprise_date_idx ON winscope_surprise_scenarios(match_date, kickoff_at)");
-      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_surprise_thesis_matches (
-        fixture_id BIGINT PRIMARY KEY,
-        match_date TEXT NOT NULL,
-        kickoff_at TIMESTAMPTZ,
-        league TEXT,
-        home_team TEXT NOT NULL,
-        away_team TEXT NOT NULL,
-        opening_1x2 JSONB NOT NULL DEFAULT '{}'::jsonb,
-        closing_1x2 JSONB NOT NULL DEFAULT '{}'::jsonb,
-        opening_probs JSONB NOT NULL DEFAULT '{}'::jsonb,
-        closing_probs JSONB NOT NULL DEFAULT '{}'::jsonb,
-        opening_favorite TEXT,
-        closing_favorite TEXT,
-        final_score TEXT,
-        halftime_score TEXT,
-        htft_result TEXT,
-        settled BOOLEAN NOT NULL DEFAULT FALSE,
-        last_snapshot_at TIMESTAMPTZ,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        settled_at TIMESTAMPTZ
-      )`);
-      await databasePool.query("CREATE INDEX IF NOT EXISTS winscope_thesis_date_idx ON winscope_surprise_thesis_matches(match_date, kickoff_at)");
-
       await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_coupon_predictions (
         tracking_id BIGSERIAL PRIMARY KEY,
         coupon_key TEXT NOT NULL,
@@ -1488,159 +1465,6 @@ async function scanSurpriseScenarios() {
   }
 }
 
-
-// ── Sürpriz Tez Araştırması: tüm 1X2 oranlı maçları ayrı tabloda izler ──
-// Mevcut SURPRISE SCAN tablosuna, loglarına veya aday filtrelerine dokunmaz.
-let surpriseThesisInFlight = false;
-let surpriseThesisDiagnostics = { at: null, dates: [], fixtures: 0, oddsRows: 0, stored: 0, noOdds: 0, no1x2: 0, pages: 0, settled: 0, errors: [] };
-
-function thesisNormalize1x2(oneXtwo) {
-  if (!oneXtwo) return null;
-  const h = Number(oneXtwo.home), d = Number(oneXtwo.draw), a = Number(oneXtwo.away);
-  if (![h,d,a].every(x => Number.isFinite(x) && x > 1.01)) return null;
-  const inv = [1/h, 1/d, 1/a], sum = inv.reduce((x,y) => x+y, 0);
-  return {
-    home: Number((inv[0]/sum).toFixed(6)),
-    draw: Number((inv[1]/sum).toFixed(6)),
-    away: Number((inv[2]/sum).toFixed(6))
-  };
-}
-function thesisFavorite(probs) {
-  if (!probs) return null;
-  return probs.home < probs.away ? "2" : "1";
-}
-
-async function scanSurpriseThesis() {
-  if (!databasePool || surpriseThesisInFlight) return;
-  surpriseThesisInFlight = true;
-  const diag = { at: new Date().toISOString(), dates: [], fixtures: 0, oddsRows: 0, stored: 0, noOdds: 0, no1x2: 0, pages: 0, settled: 0, errors: [] };
-  try {
-    await archiveDatabaseReady;
-    const today = turkeyDateString();
-    const tomorrowDate = new Date(`${today}T12:00:00+03:00`);
-    tomorrowDate.setDate(tomorrowDate.getDate()+1);
-    const tomorrow = new Intl.DateTimeFormat("en-CA", { timeZone:"Europe/Istanbul" }).format(tomorrowDate);
-    diag.dates = [today,tomorrow];
-
-    for (const date of diag.dates) {
-      const fixturesPayload = await cachedProviderRequest(
-        `surprise-fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 5*60*1000
-      );
-      const first = await cachedProviderRequest(
-        `surprise-odds:${date}:page:1`, `/odds?date=${date}&page=1`, 5*60*1000
-      ).catch(err => { diag.errors.push(`${date} odds page 1: ${err.message}`); return {response:[],paging:{total:1}}; });
-      const oddsById = new Map();
-      for (const row of first.response || []) if (row.fixture?.id) oddsById.set(Number(row.fixture.id),row);
-      const totalPages = Math.max(1, Number(first.paging?.total || 1));
-      diag.pages += totalPages;
-      for (let page=2; page<=totalPages; page++) {
-        try {
-          const payload = await cachedProviderRequest(`surprise-odds:${date}:page:${page}`, `/odds?date=${date}&page=${page}`, 5*60*1000);
-          for (const row of payload.response || []) if (row.fixture?.id) oddsById.set(Number(row.fixture.id),row);
-        } catch(err) { diag.errors.push(`${date} odds page ${page}: ${err.message}`); break; }
-      }
-      const fixtures = fixturesPayload.response || [];
-      diag.fixtures += fixtures.length;
-      diag.oddsRows += oddsById.size;
-      for (const raw of fixtures) {
-        const match = normalizeProviderMatch(raw);
-        if (!match.id || match.status !== "NS") continue;
-        const oddsRow = oddsById.get(match.id);
-        if (!oddsRow) { diag.noOdds++; continue; }
-        const oneXtwo = surpriseOddsSnapshot(oddsRow).oneXtwo;
-        const probs = thesisNormalize1x2(oneXtwo);
-        if (!oneXtwo || !probs) { diag.no1x2++; continue; }
-        const kickoff = match.fixtureDate ? new Date(match.fixtureDate) : null;
-        const existing = await databasePool.query(
-          "SELECT opening_1x2, closing_1x2, opening_probs, closing_probs FROM winscope_surprise_thesis_matches WHERE fixture_id=$1",
-          [match.id]
-        );
-        const current = existing.rows[0];
-        const openOdds = current?.opening_1x2 || oneXtwo;
-        const openProbs = current?.opening_probs || probs;
-        const isFuture = kickoff && kickoff.getTime() > Date.now();
-        const closeOdds = isFuture ? oneXtwo : (current?.closing_1x2 || oneXtwo);
-        const closeProbs = isFuture ? probs : (current?.closing_probs || probs);
-        await databasePool.query(
-          `INSERT INTO winscope_surprise_thesis_matches
-           (fixture_id,match_date,kickoff_at,league,home_team,away_team,opening_1x2,closing_1x2,opening_probs,closing_probs,opening_favorite,closing_favorite,last_snapshot_at)
-           VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,$11,$12,NOW())
-           ON CONFLICT(fixture_id) DO UPDATE SET
-             kickoff_at=COALESCE(EXCLUDED.kickoff_at,winscope_surprise_thesis_matches.kickoff_at),
-             opening_1x2=winscope_surprise_thesis_matches.opening_1x2,
-             opening_probs=winscope_surprise_thesis_matches.opening_probs,
-             closing_1x2=CASE WHEN winscope_surprise_thesis_matches.kickoff_at > NOW() THEN EXCLUDED.closing_1x2 ELSE winscope_surprise_thesis_matches.closing_1x2 END,
-             closing_probs=CASE WHEN winscope_surprise_thesis_matches.kickoff_at > NOW() THEN EXCLUDED.closing_probs ELSE winscope_surprise_thesis_matches.closing_probs END,
-             closing_favorite=CASE WHEN winscope_surprise_thesis_matches.kickoff_at > NOW() THEN EXCLUDED.closing_favorite ELSE winscope_surprise_thesis_matches.closing_favorite END,
-             last_snapshot_at=NOW()`,
-          [match.id,date,kickoff,match.league,match.home,match.away,
-            JSON.stringify(openOdds),JSON.stringify(closeOdds),JSON.stringify(openProbs),JSON.stringify(closeProbs),
-            thesisFavorite(openProbs),thesisFavorite(closeProbs)]
-        );
-        diag.stored++;
-      }
-    }
-
-    const pending = await databasePool.query(
-      "SELECT fixture_id,match_date FROM winscope_surprise_thesis_matches WHERE settled=FALSE"
-    );
-    const dates = [...new Set(pending.rows.map(r=>String(r.match_date).slice(0,10)))];
-    for (const date of dates) {
-      const payload = await cachedProviderRequest(
-        `surprise-settle:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 2*60*1000
-      ).catch(()=>({response:[]}));
-      const byId = new Map((payload.response||[]).map(x=>[Number(x.fixture?.id),x]));
-      for (const row of pending.rows.filter(r=>String(r.match_date).slice(0,10)===date)) {
-        const raw = byId.get(Number(row.fixture_id));
-        if (!raw || !["FT","AET","PEN"].includes(String(raw.fixture?.status?.short||"").toUpperCase())) continue;
-        const ftH=raw.goals?.home, ftA=raw.goals?.away, htH=raw.score?.halftime?.home, htA=raw.score?.halftime?.away;
-        if (![ftH,ftA].every(v=>v!==null && v!==undefined && Number.isFinite(Number(v)))) continue;
-        const hasHT = [htH,htA].every(v=>v!==null && v!==undefined && Number.isFinite(Number(v)));
-        const ft=`${ftH}-${ftA}`, ht=hasHT?`${htH}-${htA}`:null;
-        const htft=hasHT?htftLabel(htH,htA,ftH,ftA):null;
-        await databasePool.query(
-          `UPDATE winscope_surprise_thesis_matches SET final_score=$2,halftime_score=$3,htft_result=$4,settled=TRUE,settled_at=NOW()
-           WHERE fixture_id=$1 AND settled=FALSE`,
-          [row.fixture_id,ft,ht,htft]
-        );
-        diag.settled++;
-      }
-    }
-    surpriseThesisDiagnostics = diag;
-    console.log(`[SURPRISE THESIS] ${JSON.stringify(diag)}`);
-  } catch(error) {
-    diag.errors.push(error.message);
-    surpriseThesisDiagnostics = diag;
-    console.error(`[SURPRISE THESIS ERROR] ${error.message}`);
-  } finally {
-    surpriseThesisInFlight = false;
-  }
-}
-
-app.get("/api/surprise-thesis", async (req,res) => {
-  if (!databasePool) return res.status(503).json({error:"Araştırma modülü için DATABASE_URL gerekli.",rows:[]});
-  try {
-    await archiveDatabaseReady;
-    const date=String(req.query.date||turkeyDateString());
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({error:"Tarih YYYY-MM-DD biçiminde olmalı."});
-    const result=await databasePool.query(
-      "SELECT * FROM winscope_surprise_thesis_matches WHERE match_date=$1 ORDER BY kickoff_at NULLS LAST,home_team",[date]
-    );
-    const overall=await databasePool.query(
-      "SELECT COUNT(*) FILTER (WHERE settled=TRUE)::int AS settled, COUNT(*)::int AS total FROM winscope_surprise_thesis_matches"
-    );
-    const allSettled=await databasePool.query(
-      "SELECT htft_result,opening_favorite,closing_favorite FROM winscope_surprise_thesis_matches WHERE settled=TRUE"
-    );
-    const htft={};
-    for (const r of allSettled.rows) if (r.htft_result) htft[r.htft_result]=(htft[r.htft_result]||0)+1;
-    const count=(key)=>allSettled.rows.filter(r=>r.htft_result===key).length;
-    res.json({date,rows:result.rows,diagnostics:surpriseThesisDiagnostics,
-      sample:{total:Number(overall.rows[0]?.total||0),settled:Number(overall.rows[0]?.settled||0),htft,
-        homeToAwayTurnarounds:count("1/2"),awayToHomeTurnarounds:count("2/1")}});
-  } catch(error) { res.status(500).json({error:error.message,rows:[]}); }
-});
-
 app.get("/api/surprise-scenarios", async (req, res) => {
   if (!databasePool) return res.status(503).json({ error: "Sürpriz Senaryo Takibi için DATABASE_URL gerekli.", rows: [] });
   try {
@@ -3003,9 +2827,6 @@ setInterval(() => { void runAutomaticLivePick(); }, 90 * 1000);
 setInterval(() => { void runAutomaticDailyCoupon(); }, 2 * 60 * 60 * 1000);
 setTimeout(() => { void scanSurpriseScenarios(); }, 45000);
 setInterval(() => { void scanSurpriseScenarios(); }, 10 * 60 * 1000);
-// Tez araştırması ayrı döngüde çalışır; mevcut sürpriz tarama loglarına müdahale etmez.
-setTimeout(() => { void scanSurpriseThesis(); }, 120000);
-setInterval(() => { void scanSurpriseThesis(); }, 15 * 60 * 1000);
 
 // Takip edilen canlı maçların skorunu 45 saniyede bir kontrol et.
 // Canlı listede görünmeyen fixture'lar ayrıca ID ile sorgulanır; sessizce atlanmaz.
@@ -3179,7 +3000,6 @@ async function settleCouponPredictions() {
 setTimeout(() => { void settleCouponPredictions(); }, 30_000);
 setInterval(() => { void settleCouponPredictions(); }, 5 * 60 * 1000);
 
-app.use("/api", (_req, res) => res.status(404).json({ error: "API uç noktası bulunamadı." }));
 function evaluateTrackedLiveMarket(market, homeGoals, awayGoals, halfHome, halfAway) {
   const m = String(market || "").toLocaleUpperCase("tr-TR").replace(/İ/g, "I").replace(/Ü/g, "U").replace(/Ş/g, "S").replace(/Ğ/g, "G").replace(/Ç/g, "C").replace(/Ö/g, "O");
   if (m.includes("KG VAR")) return homeGoals > 0 && awayGoals > 0;
@@ -3314,4 +3134,6 @@ setInterval(() => { void settleLivePredictions(); }, 15 * 60 * 1000);
 setInterval(() => { void settleDailyMarketPredictions(); }, 15 * 60 * 1000);
 
 setTimeout(() => { void settleDailyMarketPredictions(); }, 60000);
+app.use("/api", (_req, res) => res.status(404).json({ error: "API uç noktası bulunamadı." }));
+
 app.listen(PORT, () => console.log(`WinScope server running on port ${PORT}`));
