@@ -1928,8 +1928,15 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
         if (!scenarioSide && item.market !== "KG VAR") directionBonus = -0.035;
       }
       const score = edge * 100 + ev * 100 + modelProbability * 20 + directionBonus * 100;
+      const confidence = (
+        stats.available && activeStats && formsAvailable &&
+        edge >= 0.10 && ev >= 0.10 && modelProbability >= 0.70
+      ) ? "HIGH" : (
+        stats.available && activeStats &&
+        edge >= 0.06 && ev >= 0.06 && modelProbability >= minProbability + 0.05
+      ) ? "MEDIUM" : "LOW";
       candidates.push({ market: item.market, bookmaker: item.bookmaker, modelProbability, marketProbability, edge, ev,
-        odd, confidence: formsAvailable ? "MEDIUM" : "LOW", statsAvailable: true, teamFormAvailable: formsAvailable,
+        odd, confidence, statsAvailable: true, teamFormAvailable: formsAvailable,
         minEdgeRequired: minEdge, minEVRequired: minEv, scenarioSide, selectionScore: score });
     }
   }
@@ -2271,8 +2278,17 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
         };
 
         try {
+          const chosenEvaluation = freshAnalysis.marketEvaluations?.find(x => x.market === freshAnalysis.mainPick);
+          const confidenceLabel = (
+            chosenEvaluation?.edge >= 0.10 && chosenEvaluation?.ev >= 0.10 &&
+            chosenEvaluation?.modelProbability >= 0.70 &&
+            freshAnalysis.stats?.available && freshAnalysis.teamForm?.available
+          ) ? "Yüksek" : (
+            chosenEvaluation?.edge >= 0.06 && chosenEvaluation?.ev >= 0.06 &&
+            chosenEvaluation?.modelProbability >= 0.47 && freshAnalysis.stats?.available
+          ) ? "Orta" : "Düşük";
           telegram = await sendTelegram(
-            `⚡ WINSCOPE CANLI DEĞER ADAYI\n${top.home} - ${top.away}\nDakika/skor: ${top.minute}' · ${top.score}\nTercih: ${top.mainPick}\nGüven: ${freshAnalysis.stats?.available && freshAnalysis.teamForm?.available ? "Orta" : "Düşük"}`
+            `⚡ WINSCOPE CANLI DEĞER ADAYI\\n${top.home} - ${top.away}\\nDakika/skor: ${top.minute}' · ${top.score}\\nTercih: ${top.mainPick}\\nGüven: ${confidenceLabel}`
           );
         } catch (sendError) {
           telegram = { sent: false, reason: sendError.message };
@@ -2281,6 +2297,16 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
 
         if (telegram?.sent) {
           autoSentFixtureKeys.add(key);
+          // Canlı tek tercih mesajı gönderilen maç, sonraki skor değişimleri için
+          // gol taramasına da alınır. Başlangıç skoru mesaj anındaki gerçek skordur.
+          const trackedScore = String(top.score || "0-0");
+          goalTrackedFixtures.set(Number(top.fixtureId), {
+            home: top.home, away: top.away, league: top.league,
+            sourceLabel: "Canlı en güvenilir tek tercih",
+            baselineScore: trackedScore
+          });
+          goalScoreCache.set(Number(top.fixtureId), trackedScore);
+          console.log(`[GOOOOL TRACKING ADDED] fixture=${top.fixtureId} score=${trackedScore}`);
           if (databasePool) {
             try {
               await archiveDatabaseReady;
