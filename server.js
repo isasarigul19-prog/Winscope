@@ -129,6 +129,30 @@ if (databasePool) {
         settled_at TIMESTAMPTZ,
         PRIMARY KEY (fixture_id, market)
       )`);
+      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_score6_predictions (
+        fixture_id BIGINT PRIMARY KEY,
+        match_date TEXT NOT NULL,
+        home_team TEXT NOT NULL,
+        away_team TEXT NOT NULL,
+        league TEXT,
+        predicted_ht TEXT,
+        predicted_ft TEXT,
+        alternative_ft TEXT,
+        predicted_htft TEXT,
+        six_plus_candidate BOOLEAN NOT NULL DEFAULT FALSE,
+        six_plus_probability NUMERIC,
+        actual_ht TEXT,
+        actual_ft TEXT,
+        actual_htft TEXT,
+        exact_ht BOOLEAN,
+        exact_ft BOOLEAN,
+        exact_alternative_ft BOOLEAN,
+        six_plus_won BOOLEAN,
+        settled BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        settled_at TIMESTAMPTZ
+      )`);
+      await databasePool.query("CREATE INDEX IF NOT EXISTS winscope_score6_date_idx ON winscope_score6_predictions(match_date, settled)");
       await databasePool.query("CREATE INDEX IF NOT EXISTS winscope_daily_market_date_idx ON winscope_daily_market_predictions(match_date, market, outcome)");
       await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_predictions (
         fixture_id BIGINT PRIMARY KEY, home_team TEXT NOT NULL, away_team TEXT NOT NULL,
@@ -3255,6 +3279,96 @@ function score6Predict(odds){
     model:'USER_ODDS_RESULT_NEAREST_NEIGHBOR_V2'
   };
 }
+function score6PlainScore(value) {
+  const m=String(value||'').match(/(\d+)\s*-\s*(\d+)/);
+  return m ? `${Number(m[1])}-${Number(m[2])}` : null;
+}
+function score6ResultCode(score) {
+  const v=score6PlainScore(score); if(!v) return null;
+  const [h,a]=v.split('-').map(Number); return h>a?'1':h<a?'2':'X';
+}
+async function ensureScore6TrackingForDate(date) {
+  if(!databasePool) return {inserted:0,scanned:0};
+  const archived=await databasePool.query(`SELECT payload FROM winscope_archive
+    WHERE category='analysis'
+      AND COALESCE(payload->>'match_date', payload->'analysis'->>'matchDate')=$1
+    ORDER BY id ASC`,[date]);
+  let inserted=0,scanned=0;
+  for(const row of archived.rows){
+    const p=row.payload||{}, a=p.analysis||p;
+    const fixtureId=Number(p.fixture_id||p.fixtureId||a.fixtureId);
+    const odds=a.rawOdds1x2;
+    if(!fixtureId||!odds) continue;
+    const pred=score6Predict(odds); if(!pred) continue;
+    const ht=score6PlainScore(pred.halfTimeScore), ft=score6PlainScore(pred.fullTimeScore), alt=score6PlainScore(pred.alternativeFullTimeScore);
+    if(!ht||!ft) continue;
+    scanned++;
+    const result=await databasePool.query(`INSERT INTO winscope_score6_predictions
+      (fixture_id,match_date,home_team,away_team,league,predicted_ht,predicted_ft,alternative_ft,predicted_htft,six_plus_candidate,six_plus_probability)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      ON CONFLICT(fixture_id) DO UPDATE SET
+        match_date=EXCLUDED.match_date,home_team=EXCLUDED.home_team,away_team=EXCLUDED.away_team,
+        league=EXCLUDED.league,predicted_ht=EXCLUDED.predicted_ht,predicted_ft=EXCLUDED.predicted_ft,
+        alternative_ft=EXCLUDED.alternative_ft,predicted_htft=EXCLUDED.predicted_htft,
+        six_plus_candidate=EXCLUDED.six_plus_candidate,six_plus_probability=EXCLUDED.six_plus_probability
+      WHERE winscope_score6_predictions.settled=FALSE`,
+      [fixtureId,date,p.home_team||a.home||'',p.away_team||a.away||'',a.league||null,ht,ft,alt,
+       `${score6ResultCode(ht)}/${score6ResultCode(ft)}`,pred.sixPlusCandidate===true,Number(pred.sixPlusProbability)||0]);
+    inserted+=result.rowCount||0;
+  }
+  return {inserted,scanned};
+}
+async function settleScore6Tracking(date) {
+  if(!databasePool) return {settled:0,checked:0};
+  const pending=await databasePool.query(`SELECT fixture_id FROM winscope_score6_predictions
+    WHERE settled=FALSE AND match_date=$1 ORDER BY fixture_id LIMIT 300`,[date]);
+  let settled=0,checked=0;
+  for(const item of pending.rows){
+    const fixtureId=Number(item.fixture_id);
+    try{
+      const payload=await cachedProviderRequest(`score6-settle:${fixtureId}`,`/fixtures?id=${fixtureId}`,5*60*1000);
+      const row=payload.response?.[0]; checked++;
+      const status=String(row?.fixture?.status?.short||'').toUpperCase();
+      if(!row||!['FT','AET','PEN'].includes(status)||row.goals?.home==null||row.goals?.away==null) continue;
+      const fh=Number(row.goals.home), fa=Number(row.goals.away);
+      const hth=row.score?.halftime?.home==null?null:Number(row.score.halftime.home);
+      const hta=row.score?.halftime?.away==null?null:Number(row.score.halftime.away);
+      const actualFT=`${fh}-${fa}`, actualHT=hth==null||hta==null?null:`${hth}-${hta}`;
+      const actualHTFT=actualHT?`${score6ResultCode(actualHT)}/${score6ResultCode(actualFT)}`:null;
+      const updated=await databasePool.query(`UPDATE winscope_score6_predictions SET
+        actual_ht=$2,actual_ft=$3,actual_htft=$4,
+        exact_ht=CASE WHEN $2 IS NULL THEN NULL ELSE predicted_ht=$2 END,
+        exact_ft=(predicted_ft=$3),
+        exact_alternative_ft=CASE WHEN alternative_ft IS NULL THEN NULL ELSE alternative_ft=$3 END,
+        six_plus_won=CASE WHEN six_plus_candidate THEN ($5>=6) ELSE NULL END,
+        settled=TRUE,settled_at=NOW() WHERE fixture_id=$1 AND settled=FALSE`,
+        [fixtureId,actualHT,actualFT,actualHTFT,fh+fa]);
+      settled+=updated.rowCount||0;
+    }catch(e){console.warn(`[Score6 tracking] fixture=${fixtureId}: ${e.message}`);}
+  }
+  return {settled,checked};
+}
+app.get("/api/score-six/tracking", async (req,res)=>{
+  await archiveDatabaseReady;
+  const date=String(req.query.date||'');
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({error:'Tarih YYYY-MM-DD biçiminde olmalı.'});
+  if(!databasePool) return res.status(503).json({error:'Kalıcı takip için PostgreSQL gerekli.'});
+  try{
+    const backfill=await ensureScore6TrackingForDate(date);
+    const settlement=await settleScore6Tracking(date);
+    const q=await databasePool.query(`SELECT * FROM winscope_score6_predictions WHERE match_date=$1 ORDER BY fixture_id`,[date]);
+    const rows=q.rows;
+    const settled=rows.filter(x=>x.settled), pending=rows.filter(x=>!x.settled);
+    const count=(fn)=>settled.filter(fn).length;
+    const buckets={};
+    for(const code of ['1/1','X/1','2/1','1/X','X/X','2/X','1/2','X/2','2/2']){
+      const group=settled.filter(x=>x.predicted_htft===code);
+      buckets[code]={predicted:group.length,correct:group.filter(x=>x.actual_htft===code).length,incorrect:group.filter(x=>x.actual_htft!==code).length,accuracy:group.length?Number((group.filter(x=>x.actual_htft===code).length/group.length*100).toFixed(1)):null};
+    }
+    res.json({success:true,date,backfill,settlement,summary:{total:rows.length,settled:settled.length,pending:pending.length,exactHT:count(x=>x.exact_ht===true),htEvaluated:settled.filter(x=>x.exact_ht!==null).length,exactFT:count(x=>x.exact_ft===true),exactAlternativeFT:count(x=>x.exact_alternative_ft===true),sixPlusCandidates:rows.filter(x=>x.six_plus_candidate).length,sixPlusWon:count(x=>x.six_plus_won===true),sixPlusLost:count(x=>x.six_plus_won===false),htftPredictedCorrect:count(x=>x.predicted_htft&&x.actual_htft===x.predicted_htft)},htftBuckets:buckets,matches:rows});
+  }catch(e){res.status(500).json({success:false,error:e.message});}
+});
+
 app.get("/api/score-six", async (req,res)=>{
   await archiveDatabaseReady;
   const date=String(req.query.date||'');
