@@ -3228,23 +3228,58 @@ function score6Distance(a,b){
 function score6Predict(odds){
   if(!odds || ![odds.home,odds.draw,odds.away].every(v=>Number.isFinite(Number(v))&&Number(v)>1.01)) return null;
   const target={home:Number(odds.home),draw:Number(odds.draw),away:Number(odds.away)};
+  // Use a distance-sensitive weight: closer odds patterns contribute more; do not flatten
+  // all neighbors with a large fixed distance floor.
   const rows=SCORE6_REFERENCE_ROWS.map(r=>({r,d:score6Distance(target,r)})).sort((a,b)=>a.d-b.d).slice(0,18);
-  const weighted=(field)=>{const map=new Map();for(const x of rows){const v=x.r[field];if(!v)continue;const w=1/Math.max(.025,x.d);map.set(v,(map.get(v)||0)+w);}return [...map].sort((a,b)=>b[1]-a[1]);};
-  const ft=weighted(3), ht=weighted(5), htft=weighted(4);
-  const total=rows.reduce((s,x)=>s+1/Math.max(.025,x.d),0)||1;
-  const six=rows.reduce((s,x)=>s+((x.r[7]===true || (x.r[3] && Number(x.r[3].split('-')[0])+Number(x.r[3].split('-')[1])>=6))?1/Math.max(.025,x.d):0),0)/total;
-  const fmt=x=>x?x.replace(/^(.+)$/,'$1 (benzer oran örnekleri)'):'Yeterli İY örneği yok';
-  return {halfTimeScore:fmt(ht[0]?.[0]),fullTimeScore:fmt(ft[0]?.[0]),alternativeFullTimeScore:ft[1]?.[0]||'Yeterli alternatif örnek yok',sixPlusProbability:six,sixPlusCandidate:six>=0.25,htft:htft[0]?.[0]||null,neighborCount:rows.length,referenceCount:SCORE6_REFERENCE_ROWS.length,model:'USER_ODDS_RESULT_NEAREST_NEIGHBOR_V1'};
+  const weight=x=>1/(0.01+x.d);
+  const weighted=(field)=>{const map=new Map();for(const x of rows){const v=x.r[field];if(!v)continue;const w=weight(x);map.set(v,(map.get(v)||0)+w);}return [...map].sort((a,b)=>b[1]-a[1]);};
+  const ft=weighted(3), ht=weighted(5), explicitHtft=weighted(4);
+  const total=rows.reduce((s,x)=>s+weight(x),0)||1;
+  const six=rows.reduce((s,x)=>s+((x.r[7]===true || (x.r[3] && Number(x.r[3].split('-')[0])+Number(x.r[3].split('-')[1])>=6))?weight(x):0),0)/total;
+  const fmt=x=>x?`${x} (benzer oran örnekleri)`:'Yeterli skor örneği yok';
+  const htScore=ht[0]?.[0]||null, ftScore=ft[0]?.[0]||null;
+  // HT/FT code must agree with the selected HT and FT scores. Never independently
+  // combine a modal score pair with an unrelated modal 1/2 or 2/1 label.
+  const resultCode=score=>{if(!score)return null;const [h,a]=score.split('-').map(Number);return h>a?'1':h<a?'2':'X';};
+  const derivedHtft=htScore&&ftScore?`${resultCode(htScore)}/${resultCode(ftScore)}`:null;
+  const htft=derivedHtft || explicitHtft[0]?.[0] || null;
+  const nearestDistances=rows.map(x=>x.d);
+  const distinctOddsPatterns=new Set(rows.map(x=>x.r.slice(0,3).map(v=>Number(v).toFixed(2)).join('|'))).size;
+  return {
+    halfTimeScore:fmt(htScore),fullTimeScore:fmt(ftScore),
+    alternativeFullTimeScore:ft[1]?.[0]||'Yeterli alternatif örnek yok',
+    sixPlusProbability:Number(six.toFixed(4)),sixPlusCandidate:six>=0.25,
+    htft,htftSource:derivedHtft?'selected_scores_consistent':'reference_label_fallback',
+    neighborCount:rows.length,referenceCount:SCORE6_REFERENCE_ROWS.length,
+    distinctOddsPatterns,nearestDistance:Number((nearestDistances[0]??0).toFixed(4)),
+    model:'USER_ODDS_RESULT_NEAREST_NEIGHBOR_V2'
+  };
 }
 app.get("/api/score-six", async (req,res)=>{
   await archiveDatabaseReady;
   const date=String(req.query.date||'');
   if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({error:'Tarih YYYY-MM-DD biçiminde olmalı.'});
   const rows=dedupeAnalysisArchiveRows(archives.analyses||[]).filter(x=>String(x.match_date||x.analysis?.matchDate||'').slice(0,10)===date);
-  const results=rows.map(x=>{const a=x.analysis||{};const pred=score6Predict(a.rawOdds1x2);return {home:x.home_team||a.home,away:x.away_team||a.away,league:a.league,fixtureId:x.fixture_id||a.fixtureId,...(pred||{error:'Arşivde 1X2 ham oranı bulunamadı'})};});
-  res.json({date,results,referenceCount:SCORE6_REFERENCE_ROWS.length,model:'USER_ODDS_RESULT_NEAREST_NEIGHBOR_V1'});
+  const results=rows.map(x=>{const a=x.analysis||{};const odds=a.rawOdds1x2;const pred=score6Predict(odds);return {home:x.home_team||a.home,away:x.away_team||a.away,league:a.league,fixtureId:x.fixture_id||a.fixtureId,rawOddsAvailable:Boolean(odds),...(pred||{error:'Arşivde 1X2 ham oranı bulunamadı'})};});
+  const valid=results.filter(x=>!x.error);
+  const countBy=key=>{const m={};for(const x of valid){const v=x[key];if(v)m[v]=(m[v]||0)+1;}return Object.entries(m).sort((a,b)=>b[1]-a[1]).map(([value,count])=>({value,count}));};
+  const oddsKeys=valid.map(x=>x.fixtureId).filter(Boolean);
+  const uniqueOdds=new Set(rows.map(x=>{const o=x.analysis?.rawOdds1x2;return o&&[o.home,o.draw,o.away].map(v=>Number(v).toFixed(2)).join('|');}).filter(Boolean));
+  const uniqueScores=new Set(valid.map(x=>`${String(x.halfTimeScore||'').split(' ')[0]}|${String(x.fullTimeScore||'').split(' ')[0]}`));
+  res.json({date,results,referenceCount:SCORE6_REFERENCE_ROWS.length,model:'USER_ODDS_RESULT_NEAREST_NEIGHBOR_V2',diagnostics:{totalMatches:rows.length,matchesWithOdds:valid.length,matchesWithoutOdds:rows.length-valid.length,uniqueOddsTriplets:uniqueOdds.size,uniquePredictedHTFTPairs:uniqueScores.size,scorePairDistribution:countBy('fullTimeScore'),htftDistribution:countBy('htft'),sixPlusCandidates:valid.filter(x=>x.sixPlusCandidate).length,htftScoreConsistency:'HT/MS kalıbı seçilen İY ve MS skorlarından türetilir; bağımsız etiket birleştirilmez.'}});
 });
-
+app.get("/api/score-six/diagnostics", async (req,res)=>{
+  await archiveDatabaseReady;
+  const date=String(req.query.date||'');
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({error:'Tarih YYYY-MM-DD biçiminde olmalı.'});
+  const rows=dedupeAnalysisArchiveRows(archives.analyses||[]).filter(x=>String(x.match_date||x.analysis?.matchDate||'').slice(0,10)===date);
+  const predictions=rows.map(x=>({analysis:x.analysis||{},pred:score6Predict((x.analysis||{}).rawOdds1x2)}));
+  const valid=predictions.filter(x=>x.pred);
+  const distribution=key=>{const m={};for(const x of valid){const v=String(x.pred[key]||'').split(' (')[0];if(v)m[v]=(m[v]||0)+1;}return Object.entries(m).sort((a,b)=>b[1]-a[1]).map(([value,count])=>({value,count}));};
+  const oddsTriplets=valid.map(x=>x.analysis.rawOdds1x2).filter(Boolean).map(o=>[o.home,o.draw,o.away].map(v=>Number(v).toFixed(2)).join('|'));
+  const uniqueOdds=new Set(oddsTriplets), uniqueScores=new Set(valid.map(x=>`${String(x.pred.halfTimeScore).split(' ')[0]}|${String(x.pred.fullTimeScore).split(' ')[0]}`));
+  res.json({date,model:'USER_ODDS_RESULT_NEAREST_NEIGHBOR_V2',referenceCount:SCORE6_REFERENCE_ROWS.length,summary:{totalMatches:rows.length,matchesWithOdds:valid.length,matchesWithoutOdds:rows.length-valid.length,uniqueOddsTriplets:uniqueOdds.size,uniquePredictedScorePairs:uniqueScores.size,scorePairDiversity:valid.length?Number((uniqueScores.size/valid.length).toFixed(3)):0,sixPlusCandidates:valid.filter(x=>x.pred.sixPlusCandidate).length},fullTimeScoreDistribution:distribution('fullTimeScore'),halfTimeScoreDistribution:distribution('halfTimeScore'),htftDistribution:distribution('htft'),checks:{independentHtftLabelCombination:false,htftDerivedFromSelectedScores:true,rawOddsUsedOnlyForScoreAndSixPlus:true}});
+});
 app.get("/api/archives", async (_req, res) => {
   await archiveDatabaseReady;
   const analyses = dedupeAnalysisArchiveRows(archives.analyses || []).slice(0,100);
