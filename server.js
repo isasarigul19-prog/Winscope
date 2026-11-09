@@ -197,14 +197,26 @@ if (databasePool) {
       END $$`);
       await databasePool.query(`CREATE UNIQUE INDEX IF NOT EXISTS winscope_live_predictions_fixture_market_uidx ON winscope_live_predictions(fixture_id, market)`);
       const [analysisRows, couponRows, sentRows, predictionRows, livePredictionRows, dailyRunRows] = await Promise.all([
-        databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'analysis' ORDER BY id DESC LIMIT 100"),
+        databasePool.query(`SELECT payload FROM (
+          SELECT DISTINCT ON (
+            COALESCE(payload->>'match_date', payload->'analysis'->>'matchDate'),
+            COALESCE(payload->>'fixture_id', payload->'analysis'->>'fixtureId')
+          ) payload, id
+          FROM winscope_archive
+          WHERE category='analysis'
+          ORDER BY
+            COALESCE(payload->>'match_date', payload->'analysis'->>'matchDate'),
+            COALESCE(payload->>'fixture_id', payload->'analysis'->>'fixtureId'),
+            id DESC
+        ) unique_analyses
+        ORDER BY id DESC LIMIT 100`),
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'coupon' ORDER BY id DESC LIMIT 50"),
         databasePool.query("SELECT fixture_id, coupon_type, market, match_date FROM winscope_telegram_delivery_sent"),
         databasePool.query("SELECT * FROM winscope_predictions ORDER BY created_at DESC LIMIT 500"),
         databasePool.query("SELECT * FROM winscope_live_predictions ORDER BY created_at DESC LIMIT 500"),
         databasePool.query("SELECT match_date::text, status, result, error, started_at, finished_at FROM winscope_daily_analysis_runs ORDER BY match_date DESC LIMIT 30")
       ]);
-      archives.analyses = analysisRows.rows.map(row => row.payload);
+      archives.analyses = dedupeAnalysisArchiveRows(analysisRows.rows.map(row => row.payload));
       for (const row of dailyRunRows.rows) dailyAnalysisRunCache.set(String(row.match_date).slice(0,10), {
         date:String(row.match_date).slice(0,10), status:row.status, result:row.result || null,
         error:row.error || null, startedAt:row.started_at, finishedAt:row.finished_at
@@ -259,6 +271,23 @@ if (databasePool) {
       console.error(`[Archive] PostgreSQL başlatılamadı; servis bellek içi arşivle devam edecek: ${error.message}`);
     }
   })();
+}
+function dedupeAnalysisArchiveRows(rows = []) {
+  const byFixture = new Map();
+  for (const row of rows) {
+    const analysis = row?.analysis || row || {};
+    const fixtureId = Number(row?.fixture_id ?? row?.fixtureId ?? analysis?.fixtureId ?? analysis?.fixture_id ?? 0);
+    const matchDate = String(row?.match_date ?? analysis?.matchDate ?? analysis?.match_date ?? "").slice(0,10);
+    const home = String(row?.home_team ?? analysis?.home ?? row?.home ?? "");
+    const away = String(row?.away_team ?? analysis?.away ?? row?.away ?? "");
+    const key = fixtureId ? `${matchDate}|${fixtureId}` : `${matchDate}|${home.toLowerCase()}|${away.toLowerCase()}`;
+    const stamp = Date.parse(row?.created_at || analysis?.created_at || "") || 0;
+    const previous = byFixture.get(key);
+    if (!previous || stamp >= previous.stamp) byFixture.set(key, { row, stamp });
+  }
+  return [...byFixture.values()]
+    .sort((a,b)=>b.stamp-a.stamp)
+    .map(x=>x.row);
 }
 async function saveArchiveItem(category, payload) {
   if (!databasePool) return { persisted: false, reason: "DATABASE_URL tanımlı değil; kayıt yalnızca çalışan süreç belleğinde tutulur." };
@@ -2905,7 +2934,13 @@ async function runDailyAnalysisJob(job) {
     job.status = "running";
     await persistDailyAnalysisRun(job);
     const payload = await cachedProviderRequest(`fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 60000);
-    const scheduledFixtures = (payload.response || []).map(normalizeProviderMatch).filter(m => String(m.status || "").toUpperCase() === "NS");
+    const scheduledFixtureMap = new Map();
+    for (const raw of (payload.response || [])) {
+      const match = normalizeProviderMatch(raw);
+      if (!match?.id || String(match.status || "").toUpperCase() !== "NS") continue;
+      if (!scheduledFixtureMap.has(Number(match.id))) scheduledFixtureMap.set(Number(match.id), match);
+    }
+    const scheduledFixtures = [...scheduledFixtureMap.values()];
     const fixtures = scheduledFixtures.filter(isDailyMajorLeague)
       .sort((a,b) => dailyAnalysisLeaguePriority(a)-dailyAnalysisLeaguePriority(b));
     const leagueCounts = {};
@@ -3014,7 +3049,14 @@ async function runDailyAnalysisJob(job) {
           }
         }
         const archiveRow = { fixture_id:match.id, home_team:match.home, away_team:match.away, match_date:date, analysis, created_at:analysis.created_at };
-        archives.analyses = [archiveRow, ...archives.analyses.filter(x=>Number(x.fixture_id ?? x.fixtureId)!==Number(match.id))].slice(0,100);
+        archives.analyses = dedupeAnalysisArchiveRows([
+          archiveRow,
+          ...(archives.analyses || []).filter(x => {
+            const d = String(x.match_date || x.analysis?.matchDate || "").slice(0,10);
+            const id = Number(x.fixture_id ?? x.fixtureId ?? x.analysis?.fixtureId ?? 0);
+            return !(d === date && id === Number(match.id));
+          })
+        ]).slice(0,100);
         await saveArchiveItem("analysis", archiveRow);
         job.selected = selected.length;
       } catch (err) { console.warn(`[Daily analysis] fixture=${match.id}: ${err.message}`); rejected.noSupportedPick++; }
@@ -3060,13 +3102,14 @@ app.get("/api/analyses/daily", async (req, res) => {
   const date = String(req.query.date || "");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error:"Tarih YYYY-MM-DD biçiminde olmalı." });
   const job = await findDailyAnalysisRun(date);
-  if (!job) return res.json({ success:true, found:false, date, analyses:archives.analyses.filter(x=>String(x.match_date||x.analysis?.matchDate||"").slice(0,10)===date) });
+  if (!job) return res.json({ success:true, found:false, date, analyses:dedupeAnalysisArchiveRows(archives.analyses.filter(x=>String(x.match_date||x.analysis?.matchDate||"").slice(0,10)===date)) });
   res.json({ success:true, found:true, job });
 });
 
 app.get("/api/archives", async (_req, res) => {
   await archiveDatabaseReady;
-  res.json({ analyses: archives.analyses, coupons: archives.coupons, persistentStorage: Boolean(databasePool) });
+  const analyses = dedupeAnalysisArchiveRows(archives.analyses || []).slice(0,100);
+  res.json({ analyses, coupons: archives.coupons, persistentStorage: Boolean(databasePool) });
 });
 
 app.get("/api/match/:id/stats", async (req, res) => {
