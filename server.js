@@ -48,6 +48,14 @@ if (databasePool) {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`);
       await databasePool.query("CREATE INDEX IF NOT EXISTS winscope_archive_category_id_idx ON winscope_archive(category, id DESC)");
+      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_daily_analysis_coupon_sessions (
+        match_date DATE NOT NULL,
+        session TEXT NOT NULL CHECK (session IN ('early','second')),
+        picks JSONB NOT NULL,
+        telegram_message_id BIGINT,
+        sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY(match_date, session)
+      )`);
       await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_daily_analysis_runs (
         match_date DATE PRIMARY KEY,
         status TEXT NOT NULL,
@@ -2695,6 +2703,10 @@ async function runDailyAnalysisJob(job) {
           halfTimeScore:scores.halfTimeScore, fullTimeScore:scores.fullTimeScore,
           alternativeFullTimeScore:scores.alternativeFullTimeScore || null,
           mainPick, alternative:altRow ? other : "Aralıkta doğrulanmış alternatif yok",
+          selectionScore: supported && Number.isFinite(Number(supported.score)) ? Number(supported.score) : null,
+          marketProbability: supported && Number.isFinite(Number(supported.probability)) ? Number(supported.probability) : null,
+          formSupport: supported && Number.isFinite(Number(supported.formPct)) ? Number(supported.formPct) : null,
+          selectionBookmaker: supported?.bookmaker || null,
           surprise:scores.surprise || null,
           scoreBasis:"Maç önü oranları ve erişilebilen son 5 maç formu",
           selectionBasis:"KG VAR / MS 2.5 ÜST 1.50–1.73 ve dengeli rakip oranları",
@@ -2815,8 +2827,166 @@ async function runAutomaticLivePick() {
   }
 }
 
+const dailyAnalysisCouponRefreshStarted = new Set();
+const dailyAnalysisCouponInFlight = new Set();
+const dailyAnalysisCouponSentMemory = new Map();
+
+function turkeyClockParts() {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone:"Europe/Istanbul", hour:"2-digit", minute:"2-digit", hourCycle:"h23"
+  }).formatToParts(new Date());
+  const get = type => Number(parts.find(p=>p.type===type)?.value || 0);
+  return { hour:get("hour"), minute:get("minute") };
+}
+
+async function dailyAnalysisRowsForCoupon(date) {
+  if (databasePool) {
+    await archiveDatabaseReady;
+    const q = await databasePool.query(`
+      SELECT DISTINCT ON (COALESCE(payload->>'fixture_id', payload->'analysis'->>'fixtureId'))
+        payload
+      FROM winscope_archive
+      WHERE category='analysis'
+        AND COALESCE(payload->>'match_date', payload->'analysis'->>'matchDate')=$1
+      ORDER BY COALESCE(payload->>'fixture_id', payload->'analysis'->>'fixtureId'),
+               id DESC
+    `,[date]);
+    return q.rows.map(r=>r.payload?.analysis || r.payload).filter(Boolean);
+  }
+  const byFixture = new Map();
+  for (const row of archives.analyses || []) {
+    const a = row?.analysis || row;
+    if (String(a?.matchDate || row?.match_date || "").slice(0,10)!==date) continue;
+    const id=Number(a?.fixtureId || row?.fixture_id || 0);
+    if (id && !byFixture.has(id)) byFixture.set(id,a);
+  }
+  return [...byFixture.values()];
+}
+
+async function sendDailyAnalysisTopThree(session, date) {
+  const key=`${date}:${session}`;
+  if (dailyAnalysisCouponInFlight.has(key)) return;
+  dailyAnalysisCouponInFlight.add(key);
+  try {
+    if (databasePool) {
+      await archiveDatabaseReady;
+      const sent=await databasePool.query(
+        "SELECT 1 FROM winscope_daily_analysis_coupon_sessions WHERE match_date=$1::date AND session=$2",
+        [date,session]
+      );
+      if (sent.rowCount) {
+        console.log(`[DAILY ANALYSIS 3] ${key} zaten gönderilmiş; tekrar yok.`);
+        return;
+      }
+    } else if (dailyAnalysisCouponSentMemory.has(key)) return;
+
+    const job=await findDailyAnalysisRun(date);
+    if (!job || job.status!=="completed") {
+      console.log(`[DAILY ANALYSIS 3] ${key} beklemede; analiz durumu=${job?.status || "yok"}.`);
+      return;
+    }
+
+    const rows=await dailyAnalysisRowsForCoupon(date);
+    const fixturePayload=await cachedProviderRequest(`fixtures:${date}`,`/fixtures?date=${date}&timezone=Europe/Istanbul`,30000);
+    const upcoming=new Set((fixturePayload.response||[]).map(normalizeProviderMatch)
+      .filter(m=>String(m.status||"").toUpperCase()==="NS").map(m=>Number(m.id)));
+    const alreadyUsed=new Set();
+    if (session==="second") {
+      if (databasePool) {
+        const prior=await databasePool.query(
+          "SELECT picks FROM winscope_daily_analysis_coupon_sessions WHERE match_date=$1::date AND session='early'",
+          [date]
+        );
+        for (const r of prior.rows) for (const p of (r.picks||[])) alreadyUsed.add(Number(p.fixtureId));
+      } else {
+        for (const p of dailyAnalysisCouponSentMemory.get(`${date}:early`)||[]) alreadyUsed.add(Number(p.fixtureId));
+      }
+    }
+    const valid=rows.filter(a=>
+      Number(a.fixtureId)>0 && upcoming.has(Number(a.fixtureId)) &&
+      !alreadyUsed.has(Number(a.fixtureId)) &&
+      ["KG VAR","MS 2.5 ÜST"].includes(String(a.mainPick||"")) &&
+      a.selectionScore !== null && a.selectionScore !== undefined &&
+      Number.isFinite(Number(a.selectionScore))
+    );
+    const deduped=[...new Map(valid.map(a=>[Number(a.fixtureId),a])).values()];
+    deduped.sort((a,b)=>
+      Number(b.selectionScore)-Number(a.selectionScore) ||
+      Number(b.marketProbability||0)-Number(a.marketProbability||0) ||
+      Number(b.formSupport||0)-Number(a.formSupport||0)
+    );
+    const chosen=deduped.slice(0,3);
+    if (chosen.length<3) {
+      console.warn(`[DAILY ANALYSIS 3] ${key} gönderilmedi; güvenilir ve başlamamış aday=${chosen.length}/3.`);
+      return;
+    }
+    const sessionLabel=session==="early"?"ERKEN SEANS":"GÜNÜN İKİNCİ KUPONU";
+    const lines=[`📊 WINSCOPE ${sessionLabel} · 3 MAÇ`,`Tarih: ${date}`,"","Seçimler Günün Analizleri içindeki en yüksek doğrulanmış seçim puanına göre yapıldı.",""];
+    chosen.forEach((a,i)=>{
+      lines.push(`${i+1}. ${a.home} VS ${a.away}`);
+      lines.push(`Ana tercih: ${a.mainPick}`);
+      lines.push(`Tahmin İY / MS: ${a.halfTimeScore || "—"} / ${a.fullTimeScore || "—"}`);
+      lines.push(`Lig: ${a.league || "—"}`,"");
+    });
+    lines.push("Not: Yalnızca başlamamış, oran ve son 5 maç formu desteği bulunan analizler seçildi. Sayısal oran gösterilmez; başarı garantisi yoktur.");
+    const picks=chosen.map(a=>({
+      fixtureId:Number(a.fixtureId),home:a.home,away:a.away,league:a.league,
+      market:a.mainPick,startScore:"0-0",currentScore:"0-0",
+      predictedHalfTimeScore:a.halfTimeScore||null,predictedFullTimeScore:a.fullTimeScore||null
+    }));
+    const sent=await sendTelegram(lines.join("\n"));
+    if (!sent.sent) {
+      console.warn(`[DAILY ANALYSIS 3] ${key} Telegram gönderilemedi: ${sent.reason||"bilinmeyen neden"}`);
+      return;
+    }
+    if (databasePool) {
+      await databasePool.query(
+        `INSERT INTO winscope_daily_analysis_coupon_sessions(match_date,session,picks,telegram_message_id)
+         VALUES($1::date,$2,$3::jsonb,$4) ON CONFLICT(match_date,session) DO NOTHING`,
+        [date,session,JSON.stringify(picks),sent.messageId]
+      );
+    }
+    dailyAnalysisCouponSentMemory.set(key,picks);
+    const trackingCoupon={draftId:`daily-analysis-${key}`,date,type:`daily3_${session}`,picks,autoGenerated:true};
+    await saveCouponTracking(trackingCoupon).catch(e=>console.warn(`[DAILY ANALYSIS 3] takip kaydı: ${e.message}`));
+    await saveArchiveItem("coupon",{date,type:`daily3_${session}`,picks,createdAt:new Date().toISOString()});
+    console.log(`[DAILY ANALYSIS 3 SENT] session=${session} date=${date} fixtures=${picks.map(p=>p.fixtureId).join(",")} telegramMessageId=${sent.messageId}`);
+  } catch(error) {
+    console.error(`[DAILY ANALYSIS 3 ERROR] ${key}: ${error.message}`);
+  } finally {
+    dailyAnalysisCouponInFlight.delete(key);
+  }
+}
+
+async function runDailyAnalysisCouponSchedule() {
+  const date=turkeyDateString();
+  const {hour,minute}=turkeyClockParts();
+  const now=hour*60+minute;
+  const sessions=[
+    {key:"early",refreshAt:9*60+15,sendAt:10*60},
+    {key:"second",refreshAt:15*60+15,sendAt:16*60}
+  ];
+  for (const session of sessions) {
+    const refreshKey=`${date}:${session.key}`;
+    if (now>=session.refreshAt && now<session.sendAt && !dailyAnalysisCouponRefreshStarted.has(refreshKey)) {
+      dailyAnalysisCouponRefreshStarted.add(refreshKey);
+      try {
+        const job=await startDailyAnalysisIfNeeded(date,{force:true});
+        console.log(`[DAILY ANALYSIS 3 REFRESH] session=${session.key} date=${date} status=${job.status}`);
+      } catch(error) {
+        dailyAnalysisCouponRefreshStarted.delete(refreshKey);
+        console.error(`[DAILY ANALYSIS 3 REFRESH ERROR] ${refreshKey}: ${error.message}`);
+      }
+    }
+    if (now>=session.sendAt) await sendDailyAnalysisTopThree(session.key,date);
+  }
+}
+
+setTimeout(()=>{ void runDailyAnalysisCouponSchedule(); },30000);
+setInterval(()=>{ void runDailyAnalysisCouponSchedule(); },30000);
+
 async function runAutomaticDailyCoupon() {
-  console.log("[AUTO DAILY DISABLED] Günün kuponu otomatik taraması kapalı.");
+  console.log("[AUTO DAILY DISABLED] Eski Günün Kuponu otomasyonu kapalı; 10:00/16:00 analiz kuponları ayrı çalışır.");
   return;
   if (autoPrematchTaskInFlight) return;
   autoPrematchTaskInFlight = true;
