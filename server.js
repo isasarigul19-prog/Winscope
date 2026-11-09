@@ -818,13 +818,15 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     if(Number.isFinite(p)&&p>=0.03&&p<=0.97) targets.push({key,p,weight});
   };
   if(outcome){
-    addTarget("home",outcome.home,2.2); addTarget("draw",outcome.draw,2.2); addTarget("away",outcome.away,2.2);
+    // 1X2 piyasa yönü skor motorunun ana girdisidir. Önceki 2.2 ağırlığı,
+    // gol çizgileri ve form öncülünün 1X2 favori bilgisini bastırmasına izin veriyordu.
+    addTarget("home",outcome.home,5.5); addTarget("draw",outcome.draw,5.5); addTarget("away",outcome.away,5.5);
   }
   addTarget("over15",pre["MS 1.5 ÜST"],1.0);
-  addTarget("over25",pre["MS 2.5 ÜST"],1.8);
+  addTarget("over25",pre["MS 2.5 ÜST"],2.2);
   addTarget("over35",pre["MS 3.5 ÜST"],1.2);
   addTarget("over55",pre["MS 5.5 ÜST"],0.45);
-  addTarget("btts",pre["KG VAR"],1.45);
+  addTarget("btts",pre["KG VAR"],1.8);
   addTarget("home15",pre["EV 1.5 ÜST"],1.0);
   addTarget("away15",pre["DEP 1.5 ÜST"],1.0);
 
@@ -836,8 +838,9 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     const stats=matrixStats(lh,la);
     let loss=0,weight=0;
     for(const t of targets){loss+=t.weight*Math.pow(stats[t.key]-t.p,2);weight+=t.weight;}
-    if(priorHome!=null){loss+=0.22*Math.pow(lh-priorHome,2);weight+=0.22;}
-    if(priorAway!=null){loss+=0.22*Math.pow(la-priorAway,2);weight+=0.22;}
+    // Son 5 maç formu yalnızca destekleyici öncül; piyasa sinyalini geçersiz kılamaz.
+    if(priorHome!=null){loss+=0.12*Math.pow(lh-priorHome,2);weight+=0.12;}
+    if(priorAway!=null){loss+=0.12*Math.pow(la-priorAway,2);weight+=0.12;}
     return weight?loss/weight:Infinity;
   };
   let lambdaHome=null,lambdaAway=null,bestLoss=Infinity;
@@ -963,7 +966,7 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     scoreProbability:Number(best.probability.toFixed(4)),
     alternativeScoreProbability:Number(alternative.probability.toFixed(4)),
     scoreCondition:preferredMarket || "UNCONDITIONAL",
-    modelVersion:"V4_MARKET_FIT_2D",
+    modelVersion:"V5_1X2_PRIORITY_2D",
     modelFitError:Number(bestLoss.toFixed(6)),
     marketTargetsUsed:targets.map(x=>x.key),
     oddsBookmaker:outcomeRow?.bookmaker || rows.find(x=>/bet365/i.test(String(x.bookmaker||"")))?.bookmaker || rows[0]?.bookmaker || null,
@@ -2941,10 +2944,10 @@ async function runDailyAnalysisJob(job) {
           scoreProbability:scores.scoreProbability ?? null,
           alternativeScoreProbability:scores.alternativeScoreProbability ?? null,
           scoreCondition:scores.scoreCondition || mainPick,
+          scoreModelVersion:scores.modelVersion || "V5_1X2_PRIORITY_2D",
+          scoreModelFitError:scores.modelFitError ?? null,
           oddsBookmaker:scores.oddsBookmaker || supported?.bookmaker || null,
           market1x2:scores.market1x2 || null,
-          scoreModelVersion:scores.modelVersion || "V4_MARKET_FIT_2D",
-          scoreModelFitError:scores.modelFitError ?? null,
           scoreMarketsUsed:scores.marketTargetsUsed || [],
           selectionBasis:"KG VAR / MS 2.5 ÜST 1.50–1.73 ve dengeli rakip oranları",
           created_at:new Date().toISOString()
