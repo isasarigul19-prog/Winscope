@@ -1695,7 +1695,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   const fixturePayload = await cachedProviderRequest(fixtureKey, fixturePath, isLiveMode ? 60_000 : 60_000);
   const allFixtures = (fixturePayload.response || []).map(normalizeProviderMatch)
     .filter(m => m.id && !isExcludedAnalysisCompetition(m) &&
-      (isLiveMode ? m.status === "LIVE" && Number(m.minute || 0) >= 20 && Number(m.minute || 0) <= 90 : m.status === "NS"));
+      (isLiveMode ? isFreshLiveFixture(m) && Number(m.minute || 0) >= 20 && Number(m.minute || 0) <= 90 : m.status === "NS"));
   // Büyük ligleri önceliklendir; aynı öncelikte erken başlayacak maçları öne al.
   allFixtures.sort((a, b) => automaticLeaguePriority(a) - automaticLeaguePriority(b) ||
     String(a.fixtureDate || "").localeCompare(String(b.fixtureDate || "")));
@@ -2171,11 +2171,23 @@ app.get("/api/match/:id/analyze", async (req, res) => {
   }
 });
 
+function isFreshLiveFixture(match, nowMs = Date.now()) {
+  if (match.status !== "LIVE") return false;
+  const kickoff = Date.parse(match.fixtureDate || "");
+  // API-Football bazen önceki güne ait kapanmış/eskimiş canlı satırı döndürebiliyor.
+  // Gerçekten devam eden maçlar normal koşullarda başlangıçtan itibaren 6 saati aşmaz.
+  if (Number.isFinite(kickoff) && nowMs - kickoff > 6 * 60 * 60 * 1000) return false;
+  return true;
+}
+
 app.get("/api/live", async (_req, res) => {
   try {
-    const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 60_000);
-    const matches = (payload.response || []).map(normalizeProviderMatch);
-    res.json({ source: "API-Football", results: matches.length, matches, fetchedAt: new Date().toISOString() });
+    const payload = await cachedProviderRequest("liveList", "/fixtures?live=all", 20_000);
+    const raw = (payload.response || []).map(normalizeProviderMatch);
+    const matches = raw.filter(m => isFreshLiveFixture(m));
+    const staleLiveExcluded = raw.length - matches.length;
+    if (staleLiveExcluded) console.warn(`[LIVE FIXTURE CLEANUP] staleLiveExcluded=${staleLiveExcluded} raw=${raw.length}`);
+    res.json({ source: "API-Football", results: matches.length, matches, staleLiveExcluded, fetchedAt: new Date().toISOString() });
   } catch (e) { res.status(502).json({ error: "Canlı maçlar alınamadı", detail: e.message, matches: [] }); }
 });
 
@@ -2205,7 +2217,7 @@ app.get("/api/coupon/surprise", async (req, res) => {
 async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
   const payload = await cachedProviderRequest("next-goal-live-fixtures", "/fixtures?live=all", 20000);
   const fixtures = (payload.response || []).map(normalizeProviderMatch)
-    .filter(f => f.id && f.status === "LIVE" && Number(f.minute || 0) >= 10 && Number(f.minute || 0) <= 95 && !isExcludedAnalysisCompetition(f));
+    .filter(f => f.id && isFreshLiveFixture(f) && Number(f.minute || 0) >= 10 && Number(f.minute || 0) <= 95 && !isExcludedAnalysisCompetition(f));
   let bulkOdds = [];
   try { const bulk = await cachedProviderRequest("odds-live-all", "/odds/live", 10000); bulkOdds = bulk.response || []; }
   catch (e) { console.warn(`[Live odds bulk] ${e.message}`); }
@@ -2627,9 +2639,26 @@ app.get("/api/coupon-tracking/summary", async (req, res) => {
 
 // Günün Analizleri: yalnızca majör ligler ve seçilen maç önü oran/dengelilik koşulları.
 // API-Football lig ID'leri: Premier League, La Liga, Bundesliga, Serie A, Ligue 1, Süper Lig.
-const DAILY_MAJOR_LEAGUE_IDS = new Set([39, 140, 78, 135, 61, 203]);
-const DAILY_MAJOR_LEAGUE_NAMES = new Set(["premier league", "la liga", "bundesliga", "serie a", "ligue 1", "super lig", "süper lig"]);
+// Günün analiz havuzu: büyük Avrupa ligleri + seçilmiş üst seviye ulusal ligler.
+// Genç/reserve organizasyonları isim kontrolüyle her durumda dışarıda tutulur.
+const DAILY_MAJOR_LEAGUE_IDS = new Set([
+  2, 3, 848,                         // UEFA Champions / Europa / Conference League
+  39, 40, 140, 78, 135, 61, 203,     // Big 5 + Championship + Süper Lig
+  88, 94, 144, 179, 207, 218, 119,   // Netherlands, Portugal, Belgium, Scotland, Switzerland, Austria, Denmark
+  197, 106, 128, 71, 253, 307,       // Greece, Poland, Argentina, Brazil, MLS, Saudi Pro League
+  98, 292, 262                       // Japan, Korea, Mexico
+]);
+const DAILY_MAJOR_LEAGUE_NAMES = new Set([
+  "premier league", "championship", "la liga", "bundesliga", "serie a", "ligue 1",
+  "super lig", "süper lig", "eredivisie", "primeira liga", "jupiler pro league",
+  "pro league", "scottish premiership", "super league", "bundesliga austria",
+  "superliga", "super league 1", "ekstraklasa", "liga profesional argentina",
+  "brasileirão série a", "serie a", "major league soccer", "mls", "saudi pro league",
+  "j1 league", "k league 1", "liga mx", "uefa champions league", "uefa europa league",
+  "uefa conference league"
+]);
 function isDailyMajorLeague(match) {
+  if (isExcludedAnalysisCompetition(match)) return false;
   if (DAILY_MAJOR_LEAGUE_IDS.has(Number(match.leagueId))) return true;
   const name = String(match.league || "").trim().toLocaleLowerCase("tr-TR");
   return DAILY_MAJOR_LEAGUE_NAMES.has(name);
@@ -2713,6 +2742,12 @@ async function runDailyAnalysisJob(job) {
     const payload = await cachedProviderRequest(`fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 60000);
     const scheduledFixtures = (payload.response || []).map(normalizeProviderMatch).filter(m => String(m.status || "").toUpperCase() === "NS");
     const fixtures = scheduledFixtures.filter(isDailyMajorLeague);
+    const leagueCounts = {};
+    for (const m of scheduledFixtures) leagueCounts[m.league] = (leagueCounts[m.league] || 0) + 1;
+    job.fixtureFeedCount = (payload.response || []).length;
+    job.scheduledCount = scheduledFixtures.length;
+    job.majorLeagueCount = fixtures.length;
+    job.leagueBreakdown = Object.entries(leagueCounts).sort((a,b)=>b[1]-a[1]).slice(0,30);
     job.total = fixtures.length;
     job.majorLeagueCount = fixtures.length;
     job.excludedOtherLeagues = scheduledFixtures.length - fixtures.length;
@@ -2779,8 +2814,9 @@ async function runDailyAnalysisJob(job) {
       } catch (err) { console.warn(`[Daily analysis] fixture=${match.id}: ${err.message}`); rejected.noSupportedPick++; }
     }
     await settleDailyMarketPredictions();
-    job.result = { success:true, date, fixtures:fixtures.length, majorLeagueFixtures:fixtures.length,
-      excludedOtherLeagues:job.excludedOtherLeagues || 0, selected:selected.length, rejected,
+    job.result = { success:true, date, fixtureFeedCount:job.fixtureFeedCount || 0,
+      scheduledCount:job.scheduledCount || 0, fixtures:fixtures.length, majorLeagueFixtures:fixtures.length,
+      leagueBreakdown:job.leagueBreakdown || [], excludedOtherLeagues:job.excludedOtherLeagues || 0, selected:selected.length, rejected,
       filters:{ leagues:["Premier League", "La Liga", "Bundesliga", "Serie A", "Ligue 1", "Süper Lig"], oddsMin:DAILY_MARKET_ODDS_MIN, oddsMax:DAILY_MARKET_ODDS_MAX, balancedOpponents:true },
       persistentStorage:Boolean(databasePool) };
     job.status = "completed";
