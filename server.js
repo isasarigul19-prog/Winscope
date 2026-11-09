@@ -928,21 +928,42 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   const best=selectedScores[0];
   const alternative=selectedScores.find(x=>x.home!==best.home||x.away!==best.away) || scores.find(x=>x.home!==best.home||x.away!==best.away);
 
-  // İlk yarı oranları varsa iki çizgiyi birlikte en iyi açıklayan gol lambda'sı
-  // seçilir. Tek çizgi varsa ondan çıkarılır; yoksa tam maç beklentisinin
-  // ihtiyatlı 0.44 payı kullanılır. Önceki kod iki farklı lambda'yı ortalıyordu.
+  // İlk yarı modeli: önce maç önü İY gol çizgileri, yoksa son 5 maçın
+  // gerçek devre arası gol frekansları kullanılır. Sabit %44 varsayımı artık
+  // tek başına kullanılmaz; yalnızca veri yoksa emniyetli yedek olarak kalır.
   const ht05=pre["İY 0.5 ÜST"], ht15=pre["İY 1.5 ÜST"];
-  let htTotal=null;
-  if(Number.isFinite(ht05)&&Number.isFinite(ht15)){
-    let bestError=Infinity;
+  const fitLambdaFromRates = (p05, p15) => {
+    if (!Number.isFinite(p05) && !Number.isFinite(p15)) return null;
+    let bestLambda=null, bestError=Infinity;
     for(let l=0.05;l<=4.00;l+=0.005){
-      const p05=poissonProbabilityAtLeast(1,l,0), p15=poissonProbabilityAtLeast(2,l,0);
-      const error=Math.pow(p05-ht05,2)+Math.pow(p15-ht15,2);
-      if(error<bestError){bestError=error;htTotal=l;}
+      let error=0, count=0;
+      if(Number.isFinite(p05)){ error+=Math.pow(poissonProbabilityAtLeast(1,l,0)-p05,2); count++; }
+      if(Number.isFinite(p15)){ error+=Math.pow(poissonProbabilityAtLeast(2,l,0)-p15,2); count++; }
+      if(count && error/count<bestError){bestError=error/count;bestLambda=l;}
     }
-  } else if(Number.isFinite(ht05)) htTotal=lambdaFromMarketProbability(ht05,1,0);
-  else if(Number.isFinite(ht15)) htTotal=lambdaFromMarketProbability(ht15,2,0);
-  if(!Number.isFinite(htTotal)) htTotal=0.44*(lambdaHome+lambdaAway);
+    return bestLambda;
+  };
+  const marketHtLambda=fitLambdaFromRates(ht05,ht15);
+  const formHt05Vals=[homeForm?.htOver05Pct,awayForm?.htOver05Pct]
+    .filter(Number.isFinite).map(x=>Number(x)/100);
+  const formHt15Vals=[homeForm?.htOver15Pct,awayForm?.htOver15Pct]
+    .filter(Number.isFinite).map(x=>Number(x)/100);
+  const formHt05=formHt05Vals.length ? formHt05Vals.reduce((a,b)=>a+b,0)/formHt05Vals.length : null;
+  const formHt15=formHt15Vals.length ? formHt15Vals.reduce((a,b)=>a+b,0)/formHt15Vals.length : null;
+  const formHtLambda=fitLambdaFromRates(formHt05,formHt15);
+  let htTotal=null, halfTimeBasis="yedek %44 tam maç gol payı";
+  if(Number.isFinite(marketHtLambda) && Number.isFinite(formHtLambda)){
+    htTotal=0.65*marketHtLambda+0.35*formHtLambda;
+    halfTimeBasis="maç önü İY gol oranları + son 5 maç devre arası gol frekansı";
+  } else if(Number.isFinite(marketHtLambda)){
+    htTotal=marketHtLambda;
+    halfTimeBasis="maç önü İY gol oranları";
+  } else if(Number.isFinite(formHtLambda)){
+    htTotal=0.75*formHtLambda+0.25*0.44*(lambdaHome+lambdaAway);
+    halfTimeBasis="son 5 maç devre arası gol frekansı + tam maç beklentisi";
+  } else {
+    htTotal=0.44*(lambdaHome+lambdaAway);
+  }
   htTotal=Math.max(0.05,Math.min(lambdaHome+lambdaAway,htTotal));
   const share= lambdaHome+lambdaAway>0 ? lambdaHome/(lambdaHome+lambdaAway) : 0.5;
   const htHome=htTotal*share, htAway=htTotal*(1-share);
@@ -957,13 +978,16 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   if(marketHomeLambda!=null||marketAwayLambda!=null) basis.push("takım gol çizgileri");
   if(hasForm) basis.push("son 5 maç hücum/savunma desteği");
   if(constraints.length) basis.push("gol/KG/1X2 olasılıklarıyla ortak skor matrisi");
-  if(Number.isFinite(ht05)||Number.isFinite(ht15)) basis.push("ilk yarı gol oranlarıyla ayrı İY modeli");
+  if(Number.isFinite(ht05)||Number.isFinite(ht15)||Number.isFinite(formHtLambda)) basis.push(halfTimeBasis);
   return {
     halfTimeScore:`${htScores[0].home}-${htScores[0].away} (tahmin)`,
     fullTimeScore:`${best.home}-${best.away} (tahmin)`,
     alternativeFullTimeScore:`${alternative.home}-${alternative.away} (alternatif tahmin)`,
     scoreBasis:basis.join(" + ")||"Maç önü oranları ve son 5 maç formu",
     expectedGoals:{home:Number(lambdaHome.toFixed(2)),away:Number(lambdaAway.toFixed(2))},
+    expectedHalfTimeGoals:{home:Number(htHome.toFixed(2)),away:Number(htAway.toFixed(2)),total:Number(htTotal.toFixed(2))},
+    halfTimeBasis,
+    topScoreCandidates:selectedScores.slice(0,3).map(x=>({score:`${x.home}-${x.away}`,probability:Number(x.probability.toFixed(4))})),
     scoreProbability:Number(best.probability.toFixed(4)),
     alternativeScoreProbability:Number(alternative.probability.toFixed(4)),
     scoreCondition:preferredMarket || "UNCONDITIONAL",
@@ -2921,7 +2945,7 @@ async function runDailyAnalysisJob(job) {
           ? supported.market : market.market;
         // Ana tercih belirlendikten sonra tam skor aynı pazar koşulu altında seçilir.
         scores = scorePrediction(prematchFixture, homeForm, awayForm, null, oddsRow, mainPick);
-        console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | pick=${mainPick} | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} | basis=${scores.scoreBasis}`);
+        console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | candidates=${JSON.stringify(scores.topScoreCandidates)} | pick=${mainPick} | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} | basis=${scores.scoreBasis} | HTbasis=${scores.halfTimeBasis}`);
         const other = mainPick === "KG VAR" ? "MS 2.5 ÜST" : "KG VAR";
         const altRow = oddsForFixture(oddsRow).find(x=>x.market===other && Number(x.odd)>=DAILY_MARKET_ODDS_MIN && Number(x.odd)<=DAILY_MARKET_ODDS_MAX);
         const analysis = {
@@ -2936,6 +2960,9 @@ async function runDailyAnalysisJob(job) {
           surprise:scores.surprise || null,
           scoreBasis:scores.scoreBasis || "Maç önü oranları ve erişilebilen son 5 maç formu",
           expectedGoals:scores.expectedGoals || null,
+          expectedHalfTimeGoals:scores.expectedHalfTimeGoals || null,
+          halfTimeBasis:scores.halfTimeBasis || null,
+          topScoreCandidates:scores.topScoreCandidates || [],
           scoreProbability:scores.scoreProbability ?? null,
           alternativeScoreProbability:scores.alternativeScoreProbability ?? null,
           scoreCondition:scores.scoreCondition || mainPick,
@@ -2945,7 +2972,7 @@ async function runDailyAnalysisJob(job) {
           created_at:new Date().toISOString()
         };
         selected.push(analysis);
-        console.log(`[Daily analysis saved] fixture=${match.id} ${match.home} vs ${match.away} | pick=${analysis.mainPick} | HT=${analysis.halfTimeScore} | FT=${analysis.fullTimeScore} | xG=${JSON.stringify(analysis.expectedGoals)} | 1X2=${JSON.stringify(analysis.market1x2)} | book=${analysis.oddsBookmaker||"n/a"}`);
+        console.log(`[Daily analysis saved] fixture=${match.id} ${match.home} vs ${match.away} | pick=${analysis.mainPick} | HT=${analysis.halfTimeScore} | FT=${analysis.fullTimeScore} | xG=${JSON.stringify(analysis.expectedGoals)} | HT-xG=${JSON.stringify(analysis.expectedHalfTimeGoals)} | candidates=${JSON.stringify(analysis.topScoreCandidates)} | 1X2=${JSON.stringify(analysis.market1x2)} | book=${analysis.oddsBookmaker||"n/a"}`);
         const trackedMarkets = [analysis.mainPick, analysis.alternative]
           .filter(m => ["KG VAR", "KG YOK", "MS 2.5 ÜST", "EV 1.5 ÜST", "DEP 1.5 ÜST"].includes(String(m || "").trim()));
         for (const trackedMarket of [...new Set(trackedMarkets)]) {
