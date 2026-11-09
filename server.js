@@ -2770,6 +2770,14 @@ async function runDailyAnalysisJob(job) {
     job.total = fixtures.length;
     job.majorLeagueCount = fixtures.length;
     job.excludedOtherLeagues = scheduledFixtures.length - fixtures.length;
+    // Tanı amaçlı: hangi organizasyonların kadın/U filtresine takıldığını açıkça göster.
+    const excludedLeagueCounts = {};
+    for (const m of scheduledFixtures.filter(isExcludedAnalysisCompetition)) {
+      const key = `${m.country || "Ülke bilinmiyor"} · ${m.league || "Lig bilinmiyor"}`;
+      excludedLeagueCounts[key] = (excludedLeagueCounts[key] || 0) + 1;
+    }
+    job.excludedLeagueBreakdown = Object.entries(excludedLeagueCounts)
+      .sort((a,b) => b[1]-a[1]).slice(0,30);
     const selected = [], rejected = { noOdds:0, outsideRange:0, unbalanced:0, noForm:0, noSupportedPick:0 };
     for (let i=0; i<fixtures.length; i++) {
       const match = fixtures[i];
@@ -2835,7 +2843,8 @@ async function runDailyAnalysisJob(job) {
     await settleDailyMarketPredictions();
     job.result = { success:true, date, fixtureFeedCount:job.fixtureFeedCount || 0,
       scheduledCount:job.scheduledCount || 0, fixtures:fixtures.length, majorLeagueFixtures:fixtures.length,
-      leagueBreakdown:job.leagueBreakdown || [], excludedOtherLeagues:job.excludedOtherLeagues || 0, selected:selected.length, rejected,
+      leagueBreakdown:job.leagueBreakdown || [], excludedLeagueBreakdown:job.excludedLeagueBreakdown || [],
+      excludedOtherLeagues:job.excludedOtherLeagues || 0, selected:selected.length, rejected,
       filters:{ leagues:["Premier League", "La Liga", "Bundesliga", "Serie A", "Ligue 1", "Süper Lig"], oddsMin:DAILY_MARKET_ODDS_MIN, oddsMax:DAILY_MARKET_ODDS_MAX, balancedOpponents:true },
       persistentStorage:Boolean(databasePool) };
     job.status = "completed";
