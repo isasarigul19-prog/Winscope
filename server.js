@@ -1506,6 +1506,50 @@ app.get("/api/surprise-scenarios", async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message, rows: [] }); }
 });
 
+
+app.get("/api/surprise-thesis", async (req, res) => {
+  if (!databasePool) return res.status(503).json({error:"Sürpriz tez araştırması için DATABASE_URL gerekli.",rows:[]});
+  try {
+    await archiveDatabaseReady;
+    const date=String(req.query.date||turkeyDateString());
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({error:"Tarih YYYY-MM-DD biçiminde olmalı.",rows:[]});
+    const result=await databasePool.query(
+      "SELECT * FROM winscope_surprise_scenarios WHERE match_date=$1 ORDER BY kickoff_at NULLS LAST,home_team",
+      [date]
+    );
+    const all=await databasePool.query(
+      "SELECT htft_result,opening_odds,closing_odds FROM winscope_surprise_scenarios WHERE settled=TRUE"
+    );
+    const favorite=snapshot=>{
+      const x=snapshot?.oneXtwo;
+      if (!x) return null;
+      const vals=[["1",Number(x.home)],["X",Number(x.draw)],["2",Number(x.away)]]
+        .filter(([,v])=>Number.isFinite(v)&&v>1);
+      vals.sort((a,b)=>a[1]-b[1]);
+      return vals[0]?.[0]||null;
+    };
+    const rows=result.rows.map(r=>({
+      ...r,
+      opening_favorite:favorite(r.opening_odds),
+      closing_favorite:favorite(r.closing_odds),
+      halftime_score:r.halftime_score||null,
+      final_score:r.final_score||null
+    }));
+    const htft={};
+    for (const r of all.rows) if (r.htft_result) htft[r.htft_result]=(htft[r.htft_result]||0)+1;
+    const count=key=>all.rows.filter(r=>r.htft_result===key).length;
+    const diag=surpriseScanDiagnostics||{};
+    res.json({
+      date,rows,diagnostics:{
+        at:diag.at||null,fixtures:Number(diag.fixtures||0),oddsRows:Number(diag.oddsRows||0),
+        with1x2:Number(diag.matchedOdds||0),saved:Number(diag.candidates||0),errors:diag.errors||[],
+        note:"Bu görünüm mevcut sürpriz senaryo taramasında saklanan maçları gösterir; tüm fikstürlerdeki tüm 1X2 oranlarının bağımsız tam örneklemi değildir."
+      },
+      sample:{total:all.rowCount,settled:all.rowCount,htft,homeToAwayTurnarounds:count("1/2"),awayToHomeTurnarounds:count("2/1")}
+    });
+  } catch(error) { res.status(500).json({error:error.message,rows:[]}); }
+});
+
 function rankSingleMatchChoices(choices, mode = "prematch") {
   const allowed = choices.filter(x => x.odd >= 1.15 && x.odd <= 2.10);
   return allowed.sort((a, b) => {
@@ -2703,9 +2747,9 @@ async function runDailyAnalysisJob(job) {
           halfTimeScore:scores.halfTimeScore, fullTimeScore:scores.fullTimeScore,
           alternativeFullTimeScore:scores.alternativeFullTimeScore || null,
           mainPick, alternative:altRow ? other : "Aralıkta doğrulanmış alternatif yok",
-          selectionScore: supported && Number.isFinite(Number(supported.score)) ? Number(supported.score) : null,
-          marketProbability: supported && Number.isFinite(Number(supported.probability)) ? Number(supported.probability) : null,
-          formSupport: supported && Number.isFinite(Number(supported.formPct)) ? Number(supported.formPct) : null,
+          selectionScore: supported && Number.isFinite(Number(supported.selectionScore)) ? Number(supported.selectionScore) : null,
+          marketProbability: supported && Number.isFinite(Number(supported.marketProbability)) ? Number(supported.marketProbability) : null,
+          formSupport: supported?.teamFormAvailable === true ? 1 : 0,
           selectionBookmaker: supported?.bookmaker || null,
           surprise:scores.surprise || null,
           scoreBasis:"Maç önü oranları ve erişilebilen son 5 maç formu",
@@ -2827,7 +2871,7 @@ async function runAutomaticLivePick() {
   }
 }
 
-const dailyAnalysisCouponRefreshStarted = new Set();
+const dailyAnalysisCouponRefreshStarted = new Map();
 const dailyAnalysisCouponInFlight = new Set();
 const dailyAnalysisCouponSentMemory = new Map();
 
@@ -2968,8 +3012,9 @@ async function runDailyAnalysisCouponSchedule() {
   ];
   for (const session of sessions) {
     const refreshKey=`${date}:${session.key}`;
-    if (now>=session.refreshAt && now<session.sendAt && !dailyAnalysisCouponRefreshStarted.has(refreshKey)) {
-      dailyAnalysisCouponRefreshStarted.add(refreshKey);
+    const lastRefresh=dailyAnalysisCouponRefreshStarted.get(refreshKey)||0;
+    if (now>=session.refreshAt && now<session.sendAt && Date.now()-lastRefresh>=5*60*1000) {
+      dailyAnalysisCouponRefreshStarted.set(refreshKey,Date.now());
       try {
         const job=await startDailyAnalysisIfNeeded(date,{force:true});
         console.log(`[DAILY ANALYSIS 3 REFRESH] session=${session.key} date=${date} status=${job.status}`);
@@ -2978,7 +3023,13 @@ async function runDailyAnalysisCouponSchedule() {
         console.error(`[DAILY ANALYSIS 3 REFRESH ERROR] ${refreshKey}: ${error.message}`);
       }
     }
-    if (now>=session.sendAt) await sendDailyAnalysisTopThree(session.key,date);
+    // If fewer than three qualified matches exist at the exact session time,
+    // retry every five minutes for up to one hour; never manufacture a pick.
+    const lastAttempt=dailyAnalysisCouponRefreshStarted.get(`${refreshKey}:send`)||0;
+    if (now>=session.sendAt && now<session.sendAt+60 && Date.now()-lastAttempt>=5*60*1000) {
+      dailyAnalysisCouponRefreshStarted.set(`${refreshKey}:send`,Date.now());
+      await sendDailyAnalysisTopThree(session.key,date);
+    }
   }
 }
 
