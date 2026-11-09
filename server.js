@@ -571,7 +571,7 @@ function bookmakerRows(oddsRow) {
   return [];
 }
 
-function oddsForFixture(oddsRow) {
+function oddsForFixture(oddsRow, { includeFirstHalfBtts = false } = {}) {
   const markets = new Map();
   const add = (book, key, side, odd) => {
     if (!Number.isFinite(odd) || odd <= 1.01) return;
@@ -601,8 +601,9 @@ function oddsForFixture(oddsRow) {
           continue;
         }
         if (isBtts) {
-          if (/^(yes|y|both teams to score - yes)$/.test(label)) add(book, "KG VAR", "yes", odd);
-          else if (/^(no|n|both teams to score - no)$/.test(label)) add(book, "KG VAR", "no", odd);
+          const bttsMarket = isHalf && includeFirstHalfBtts ? "İY KG VAR" : "KG VAR";
+          if (/^(yes|y|both teams to score - yes)$/.test(label)) add(book, bttsMarket, "yes", odd);
+          else if (/^(no|n|both teams to score - no)$/.test(label)) add(book, bttsMarket, "no", odd);
           continue;
         }
         const overMatch = label.match(/over\s*([0-9]+[.,][0-9]+)/);
@@ -796,6 +797,66 @@ async function fetchTeamRecentForm(teamId, fixtureId, leagueId = null, season = 
   } catch (e) {
     console.warn(`[Team form] team=${teamId}: ${e.message}`);
     return { available: false, sampleSize: 0 };
+  }
+}
+
+
+// LIVE-ONLY goal profile: last 10 completed matches are the base sample;
+// last 5 are retained separately as a recent-form signal. This deliberately
+// does not change the shared prematch analysis/form functions.
+async function fetchLiveGoalProfile(teamId, fixtureId) {
+  if (!teamId) return { available: false, sampleSize: 0, recentSampleSize: 0 };
+  try {
+    const payload = await cachedProviderRequest(
+      `live-goal-profile:${teamId}`,
+      `/fixtures?team=${encodeURIComponent(teamId)}&last=10`,
+      6 * 60 * 60 * 1000
+    );
+    const rows = (payload.response || [])
+      .filter(row => Number(row.fixture?.id) !== Number(fixtureId) &&
+        ["FT", "AET", "PEN"].includes(String(row.fixture?.status?.short || "").toUpperCase()) &&
+        row.goals?.home != null && row.goals?.away != null)
+      .sort((a,b) => new Date(b.fixture?.date || 0) - new Date(a.fixture?.date || 0))
+      .slice(0,10);
+    const toMetrics = sample => {
+      const vals = sample.map(row => {
+        const isHome = Number(row.teams?.home?.id) === Number(teamId);
+        const gf = Number(isHome ? row.goals.home : row.goals.away);
+        const ga = Number(isHome ? row.goals.away : row.goals.home);
+        const htH = row.score?.halftime?.home, htA = row.score?.halftime?.away;
+        const htFor = htH == null || htA == null ? null : Number(isHome ? htH : htA);
+        const htAgainst = htH == null || htA == null ? null : Number(isHome ? htA : htH);
+        const htTotal = htH == null || htA == null ? null : Number(htH) + Number(htA);
+        return { gf, ga, btts: Number(row.goals.home)>0 && Number(row.goals.away)>0,
+          htFor, htAgainst, htTotal };
+      });
+      const pct = fn => vals.length ? Math.round(100 * vals.filter(fn).length / vals.length) : null;
+      const ht = vals.filter(x => x.htTotal != null);
+      const htPct = fn => ht.length ? Math.round(100 * ht.filter(fn).length / ht.length) : null;
+      return {
+        sampleSize: vals.length,
+        teamScoredPct: pct(x => x.gf >= 1),
+        teamScored2PlusPct: pct(x => x.gf >= 2),
+        teamConcededPct: pct(x => x.ga >= 1),
+        over15Pct: pct(x => x.gf + x.ga >= 2),
+        over25Pct: pct(x => x.gf + x.ga >= 3),
+        bttsPct: pct(x => x.btts),
+        htSampleSize: ht.length,
+        htOver05Pct: htPct(x => x.htTotal >= 1),
+        htOver15Pct: htPct(x => x.htTotal >= 2),
+        htBttsPct: htPct(x => x.htFor >= 1 && x.htAgainst >= 1),
+        htTeamScoredPct: htPct(x => x.htFor >= 1),
+        avgGoalsFor: vals.length ? Number((vals.reduce((s,x)=>s+x.gf,0)/vals.length).toFixed(2)) : null,
+        avgGoalsAgainst: vals.length ? Number((vals.reduce((s,x)=>s+x.ga,0)/vals.length).toFixed(2)) : null,
+        htAvgGoalsFor: ht.length ? Number((ht.reduce((s,x)=>s+x.htFor,0)/ht.length).toFixed(2)) : null
+      };
+    };
+    const base = toMetrics(rows);
+    const recent = toMetrics(rows.slice(0,5));
+    return { available: rows.length >= 5, ...base, recentSampleSize: recent.sampleSize, recent };
+  } catch (error) {
+    console.warn(`[Live goal profile] team=${teamId}: ${error.message}`);
+    return { available: false, sampleSize: 0, recentSampleSize: 0 };
   }
 }
 
@@ -1209,6 +1270,12 @@ function liveMarketAlreadySettled(market, fixture) {
   const home = Number(fixture.homeScore || 0), away = Number(fixture.awayScore || 0), total = home + away;
   const minute = Number(fixture.minute || 0);
   if (market === "KG VAR" && home > 0 && away > 0) return true;
+  if (market === "İY KG VAR") {
+    const phase = String(fixture.periodStatus || "").toUpperCase();
+    if (["HT", "2H", "ET", "FT", "AET", "PEN"].includes(phase)) return true;
+    const hg = Number(fixture.htHomeScore ?? home), ag = Number(fixture.htAwayScore ?? away);
+    if (hg > 0 && ag > 0) return true;
+  }
   if ((market === "EV 0.5 ÜST" || market === "EV 1.5 ÜST") && home >= (market.includes("1.5") ? 2 : 1)) return true;
   if ((market === "DEP 0.5 ÜST" || market === "DEP 1.5 ÜST") && away >= (market.includes("1.5") ? 2 : 1)) return true;
   const ms = market.match(/^MS ([0-9]+[.,][0-9]+) ÜST$/);
@@ -2199,8 +2266,8 @@ app.get("/api/health", (_req, res) => res.json({
 // It performs a real live-data check and never invents odds or statistics.
 async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = null) {
   const stats = liveStatsMetrics(statsRows || [], fixture);
-  const markets = oddsForFixture(liveOddsRow || null).filter(x =>
-    ["İY 0.5 ÜST", "İY 1.5 ÜST", "MS 0.5 ÜST", "MS 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "MS 5.5 ÜST", "EV 0.5 ÜST", "DEP 0.5 ÜST", "EV 1.5 ÜST", "DEP 1.5 ÜST", "KG VAR"].includes(x.market)
+  const markets = oddsForFixture(liveOddsRow || null, { includeFirstHalfBtts: true }).filter(x =>
+    ["İY 0.5 ÜST", "İY 1.5 ÜST", "İY KG VAR", "MS 0.5 ÜST", "MS 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "MS 5.5 ÜST", "EV 0.5 ÜST", "DEP 0.5 ÜST", "EV 1.5 ÜST", "DEP 1.5 ÜST", "KG VAR"].includes(x.market)
   );
   const minute = Number(fixture.minute || 0);
   const homeGoals = Number(fixture.homeScore || 0), awayGoals = Number(fixture.awayScore || 0);
@@ -2220,8 +2287,19 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
     const formRate = formsAvailable
       ? Math.max(0.08, 0.58 * Number(ownForm?.avgGoalsFor || 0) + 0.42 * Number(opponentForm?.avgGoalsAgainst || 0))
       : null;
-    const formLambda = formRate == null ? null : formRate * remaining / 90 * pressureMultiplier;
-    return Math.max(0.001, formLambda == null ? liveLambda : 0.55 * liveLambda + 0.45 * formLambda);
+    const recentFormRate = formsAvailable && ownForm?.recent?.avgGoalsFor != null && opponentForm?.recent?.avgGoalsAgainst != null
+      ? Math.max(0.08, 0.58 * Number(ownForm.recent.avgGoalsFor) + 0.42 * Number(opponentForm.recent.avgGoalsAgainst))
+      : null;
+    const blendedRate = formRate == null ? null :
+      (recentFormRate == null ? formRate : 0.70 * formRate + 0.30 * recentFormRate);
+    const formLambda = blendedRate == null ? null : blendedRate * remaining / 90 * pressureMultiplier;
+    let combined = formLambda == null ? liveLambda : 0.55 * liveLambda + 0.45 * formLambda;
+    // Finishing/first-half scoring profile can lift the estimate even when shot volume is modest.
+    if (ownForm?.available && ownForm.htTeamScoredPct != null) {
+      const htFinishFactor = 0.90 + Math.min(0.22, Math.max(0, ownForm.htTeamScoredPct - 50) / 250);
+      combined *= htFinishFactor;
+    }
+    return Math.max(0.001, combined);
   };
   const lambdaHome = sideLambda(stats.home, teamForms?.home, teamForms?.away);
   const lambdaAway = sideLambda(stats.away, teamForms?.away, teamForms?.home);
@@ -2230,9 +2308,18 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
   const homeScoresAgainProbability = poissonProbabilityAtLeast(1, lambdaHome, 0);
   const awayScoresAgainProbability = poissonProbabilityAtLeast(1, lambdaAway, 0);
   const anyNextGoalProbability = 1 - Math.exp(-(lambdaHome + lambdaAway));
+  const strongGoalProfile = formsAvailable && (
+    Number(teamForms.home.htOver15Pct || 0) >= 50 ||
+    Number(teamForms.away.htOver15Pct || 0) >= 50 ||
+    Number(teamForms.home.recent?.htOver15Pct || 0) >= 60 ||
+    Number(teamForms.away.recent?.htOver15Pct || 0) >= 60 ||
+    Number(teamForms.home.htTeamScoredPct || 0) >= 70 ||
+    Number(teamForms.away.htTeamScoredPct || 0) >= 70
+  );
   const activeStats = stats.available && (
     Number(stats.shotsOnTarget || 0) >= 2 || Number(stats.totalShots || 0) >= 8 || Number(stats.corners || 0) >= 6
   );
+  const liveSignalAvailable = activeStats || strongGoalProfile;
   const goalDirection = homeScoresAgainProbability >= awayScoresAgainProbability * 1.20 && homeScoresAgainProbability - awayScoresAgainProbability >= 0.08
     ? "home"
     : awayScoresAgainProbability >= homeScoresAgainProbability * 1.20 && awayScoresAgainProbability - homeScoresAgainProbability >= 0.08
@@ -2246,7 +2333,7 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
   // Late-match probability naturally falls with remaining time. Do not require
   // a fixed 62% chance of ANY goal before even evaluating priced markets.
   // Real live odds + usable live stats + market-specific EV/edge remain mandatory.
-  if (!stats.available || !activeStats || minute < 10 || minute > 90 || isHalftime) {
+  if ((!stats.available && !strongGoalProfile) || !liveSignalAvailable || minute < 10 || minute > 90 || isHalftime) {
     rejected.weakGoalSignal = 1;
   } else {
     for (const item of markets) {
@@ -2257,7 +2344,8 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
       const ht = item.market.match(/^İY ([0-9]+(?:[.,][0-9]+)?) ÜST$/);
       const isHomeMarket = item.market.startsWith("EV ");
       const isAwayMarket = item.market.startsWith("DEP ");
-      if ((isFirstHalf && (!ht || isHomeMarket || isAwayMarket)) || (isSecondHalf && ht) || isHalftime) {
+      if ((isFirstHalf && (!(ht || item.market === "İY KG VAR") || isHomeMarket || isAwayMarket)) ||
+          (isSecondHalf && (ht || item.market === "İY KG VAR")) || isHalftime) {
         rejected.wrongPeriod++; continue;
       }
       if (!isFirstHalf && !isSecondHalf) { rejected.wrongPeriod++; continue; }
@@ -2280,6 +2368,16 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
         if (sideGoalProbability < 0.25 || (goalDirection !== "balanced" && scenarioSide !== goalDirection && sideGoalProbability < otherGoalProbability * 0.90)) {
           rejected.wrongGoalDirection++; continue;
         }
+      } else if (item.market === "İY KG VAR") {
+        const htHome = Number(fixture.htHomeScore ?? homeGoals);
+        const htAway = Number(fixture.htAwayScore ?? awayGoals);
+        if (htHome > 0 && htAway > 0) { rejected.settled++; continue; }
+        const htRemaining = Math.max(1, 45 - minute);
+        const htScale = Math.min(1, htRemaining / remaining);
+        const htHomeP = htHome > 0 ? 1 : poissonProbabilityAtLeast(1, lambdaHome * htScale, 0);
+        const htAwayP = htAway > 0 ? 1 : poissonProbabilityAtLeast(1, lambdaAway * htScale, 0);
+        modelProbability = htHomeP * htAwayP;
+        lambdaUsed = (lambdaHome + lambdaAway) * htScale;
       } else if (item.market === "KG VAR") {
         if (homeGoals > 0 && awayGoals > 0) { rejected.settled++; continue; }
         modelProbability = (homeGoals > 0 ? 1 : homeScoresAgainProbability) * (awayGoals > 0 ? 1 : awayScoresAgainProbability);
@@ -2309,8 +2407,8 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
       // live price. Edge and EV, not an arbitrary 60% probability floor, decide.
       const minEdge = formsAvailable ? 0.025 : 0.035;
       const minEv = formsAvailable ? 0.035 : 0.045;
-      const minProbability = item.market === "KG VAR"
-        ? 0.25
+      const minProbability = (item.market === "KG VAR" || item.market === "İY KG VAR")
+        ? (item.market === "İY KG VAR" ? 0.20 : 0.25)
         : (isHomeMarket || isAwayMarket ? 0.30 : 0.25);
       if (modelProbability < minProbability || edge < minEdge || ev < minEv) { rejected.noValue++; continue; }
 
@@ -2329,7 +2427,7 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
         edge >= 0.06 && ev >= 0.06 && modelProbability >= minProbability + 0.05
       ) ? "MEDIUM" : "LOW";
       candidates.push({ market: item.market, bookmaker: item.bookmaker, modelProbability, marketProbability, edge, ev,
-        odd, confidence, statsAvailable: true, teamFormAvailable: formsAvailable,
+        odd, confidence, statsAvailable: stats.available, teamFormAvailable: formsAvailable, strongGoalProfile,
         minEdgeRequired: minEdge, minEVRequired: minEv, scenarioSide, selectionScore: score });
     }
   }
@@ -2344,7 +2442,11 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
     oddsTiming: liveOddsRow ? "live" : "unavailable",
     stats: { available: stats.available, totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners,
       pressure: Number((stats.pressure || 0).toFixed(1)), home: stats.home, away: stats.away },
-    teamForm: { available: formsAvailable, homeSample: teamForms?.home?.sampleSize || 0, awaySample: teamForms?.away?.sampleSize || 0 },
+    teamForm: { available: formsAvailable,
+      homeSample: teamForms?.home?.sampleSize || 0, awaySample: teamForms?.away?.sampleSize || 0,
+      homeRecentSample: teamForms?.home?.recentSampleSize || 0, awayRecentSample: teamForms?.away?.recentSampleSize || 0,
+      homeHT15: teamForms?.home?.htOver15Pct ?? null, awayHT15: teamForms?.away?.htOver15Pct ?? null,
+      homeHTBTTS: teamForms?.home?.htBttsPct ?? null, awayHTBTTS: teamForms?.away?.htBttsPct ?? null },
     goalScenario: { direction: goalDirection, label: directionLabel,
       homeNextGoalProbability: Number((homeScoresAgainProbability * 100).toFixed(1)),
       awayNextGoalProbability: Number((awayScoresAgainProbability * 100).toFixed(1)),
@@ -2352,9 +2454,9 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
       activeStats },
     marketEvaluations: evaluations,
     goalSignal: { level: chosen ? "Değer adayı" : "Tercih yok", score: chosen ? Math.round(chosen.edge * 100) : 0,
-      note: chosen ? `${directionLabel}; canlı oran, canlı istatistik${formsAvailable ? " ve son 5 maç formu" : ""} birlikte değerlendirildi.`
+      note: chosen ? `${directionLabel}; canlı oran, canlı istatistik ve son 10 maç + son 5 maç gol profili birlikte değerlendirildi.`
         : (!liveOddsRow ? "Gerçek canlı oran bulunamadı." : isHalftime ? "Devre arası; canlı tercih bekletildi." :
-          "Gol olasılığı, takım yönü, canlı istatistik ve değer eşiklerini birlikte karşılayan tercih bulunmadı.") },
+          "Gol olasılığı, son 10/5 maç gol profili, canlı istatistik ve değer eşiklerini birlikte karşılayan tercih bulunmadı.") },
     oddsBasis: liveOddsRow ? "Yalnızca gerçek canlı oranlar kullanıldı; maç önü oranı yedek yapılmadı." : "Canlı oran bulunamadı; maç önü oranı kullanılmadı.",
     reasonCounts: rejected,
     note: chosen ? `En güçlü canlı aday: ${chosen.market}; gol senaryosu: ${directionLabel}. Kesin sonuç değildir.`
@@ -2378,7 +2480,12 @@ app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
     if (!liveOddsRow) {
       try { const all = await cachedProviderRequest("odds-live-all", "/odds/live", 10000); liveOddsRow = (all.response || []).find(x => Number(x.fixture?.fixture?.id ?? x.fixture?.id ?? x.fixtureId ?? x.id) === fixtureId) || null; } catch {}
     }
-    return res.json(await analyzeLiveFixture(fixture, liveOddsRow, statsPayload.response || []));
+    const [homeGoalProfile, awayGoalProfile] = await Promise.all([
+      fetchLiveGoalProfile(fixture.homeId, fixture.id),
+      fetchLiveGoalProfile(fixture.awayId, fixture.id)
+    ]);
+    const liveGoalForms = { home: homeGoalProfile, away: awayGoalProfile };
+    return res.json(await analyzeLiveFixture(fixture, liveOddsRow, statsPayload.response || [], liveGoalForms));
   } catch (error) {
     const message = String(error?.message || error);
     const limited = /429|rate.?limit|quota|istek sınırı/i.test(message);
@@ -2537,12 +2644,16 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
         statsRows = statsPayload.response || [];
       }
       let teamForms = null;
-      const hasTeamGoalMarket = oddsRow && oddsForFixture(oddsRow).some(x => x.market.startsWith("EV ") || x.market.startsWith("DEP "));
-      if (hasTeamGoalMarket && formEnrichedFixtures < 10 && fixture.homeId && fixture.awayId && fixture.leagueId && fixture.season) {
+      const liveMarkets = oddsRow ? oddsForFixture(oddsRow, { includeFirstHalfBtts: true }) : [];
+      const hasLiveGoalMarkets = liveMarkets.some(x =>
+        ["İY 0.5 ÜST", "İY 1.5 ÜST", "İY KG VAR", "KG VAR"].includes(x.market) ||
+        x.market.startsWith("EV ") || x.market.startsWith("DEP ")
+      );
+      if (hasLiveGoalMarkets && fixture.homeId && fixture.awayId) {
         formEnrichedFixtures++;
         const [homeForm, awayForm] = await Promise.all([
-          fetchTeamRecentForm(fixture.homeId, fixture.id, fixture.leagueId, fixture.season, "home"),
-          fetchTeamRecentForm(fixture.awayId, fixture.id, fixture.leagueId, fixture.season, "away")
+          fetchLiveGoalProfile(fixture.homeId, fixture.id),
+          fetchLiveGoalProfile(fixture.awayId, fixture.id)
         ]);
         teamForms = { home: homeForm, away: awayForm };
       }
