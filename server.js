@@ -701,7 +701,10 @@ async function fetchTeamRecentForm(teamId, fixtureId, leagueId = null, season = 
       const ga = Number(isHome ? r.goals.away : r.goals.home);
       const total = Number(r.goals.home) + Number(r.goals.away);
       const hth = r.score?.halftime?.home, hta = r.score?.halftime?.away;
+      const htFor = hth == null || hta == null ? null : Number(isHome ? hth : hta);
+      const htAgainst = hth == null || hta == null ? null : Number(isHome ? hta : hth);
       return { gf, ga, total, btts: Number(r.goals.home)>0 && Number(r.goals.away)>0,
+        htFor, htAgainst,
         htTotal: hth == null || hta == null ? null : Number(hth)+Number(hta) };
     });
     const htVals = vals.filter(x => x.htTotal != null);
@@ -721,6 +724,9 @@ async function fetchTeamRecentForm(teamId, fixtureId, leagueId = null, season = 
       bttsPct: pct(x => x.btts),
       htOver05Pct: htVals.length ? Math.round(100 * htVals.filter(x=>x.htTotal>=1).length / htVals.length) : null,
       htOver15Pct: htVals.length ? Math.round(100 * htVals.filter(x=>x.htTotal>=2).length / htVals.length) : null,
+      htAvgGoalsFor: htVals.length ? Number((htVals.reduce((sum,x)=>sum+x.htFor,0)/htVals.length).toFixed(2)) : null,
+      htAvgGoalsAgainst: htVals.length ? Number((htVals.reduce((sum,x)=>sum+x.htAgainst,0)/htVals.length).toFixed(2)) : null,
+      htSampleSize: htVals.length,
       avgGoalsFor: blend(recentAvgGoalsFor, seasonStats?.avgGoalsFor),
       avgGoalsAgainst: blend(recentAvgGoalsAgainst, seasonStats?.avgGoalsAgainst),
       recentAvgGoalsFor, recentAvgGoalsAgainst,
@@ -830,10 +836,31 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   const formAway = hasForm
     ? Math.max(0.08,0.58*Number(awayForm.avgGoalsFor||0)+0.42*Number(homeForm.avgGoalsAgainst||0)) : null;
   const pmf=(k,l)=>Math.exp(-l)*Math.pow(l,k)/factorial(k);
+  // Conservative Dixon-Coles low-score dependence correction. The coefficient
+  // remains experimental until it is fitted by league on a clean historical set.
+  const dcRho=(lh,la)=>-Math.min(0.06,0.75/Math.max(0.01,lh*la));
+  const dcTau=(h,a,lh,la,rho)=>{
+    if(h===0&&a===0) return 1-lh*la*rho;
+    if(h===0&&a===1) return 1+lh*rho;
+    if(h===1&&a===0) return 1+la*rho;
+    if(h===1&&a===1) return 1-rho;
+    return 1;
+  };
+  const dcGrid=(lh,la,maxGoals=10)=>{
+    const rho=dcRho(lh,la), cells=[];
+    let mass=0;
+    for(let h=0;h<=maxGoals;h++) for(let a=0;a<=maxGoals;a++){
+      const p=Math.max(0,pmf(h,lh)*pmf(a,la)*dcTau(h,a,lh,la,rho));
+      cells.push({home:h,away:a,probability:p}); mass+=p;
+    }
+    const norm=mass||1;
+    for(const cell of cells) cell.probability/=norm;
+    return cells;
+  };
   const matrixStats=(lh,la)=>{
     let home=0,draw=0,away=0,over15=0,over25=0,over35=0,over55=0,btts=0,home15=0,away15=0;
-    for(let h=0;h<=10;h++) for(let a=0;a<=10;a++){
-      const p=pmf(h,lh)*pmf(a,la), total=h+a;
+    for(const cell of dcGrid(lh,la,10)){
+      const {home:h,away:a,probability:p}=cell, total=h+a;
       if(h>a) home+=p; else if(h===a) draw+=p; else away+=p;
       if(total>=2) over15+=p; if(total>=3) over25+=p; if(total>=4) over35+=p; if(total>=6) over55+=p;
       if(h>0&&a>0) btts+=p; if(h>=2) home15+=p; if(a>=2) away15+=p;
@@ -895,9 +922,9 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   lambdaHome=Math.max(0.08,Math.min(4.5,lambdaHome));
   lambdaAway=Math.max(0.08,Math.min(4.5,lambdaAway));
 
-  const scores=[];
-  for(let h=0;h<=9;h++) for(let a=0;a<=9;a++)
-    scores.push({home:h,away:a,probability:pmf(h,lambdaHome)*pmf(a,lambdaAway)});
+  const scores=dcGrid(lambdaHome,lambdaAway,10)
+    .filter(x=>x.home<=9&&x.away<=9)
+    .map(x=>({home:x.home,away:x.away,probability:x.probability}));
   const scoreMeetsMarket=(x,market)=>{
     const total=x.home+x.away;
     if(market==="KG VAR") return x.home>0&&x.away>0;
@@ -990,12 +1017,23 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     htTotal=0.44*(lambdaHome+lambdaAway);
   }
   htTotal=Math.max(0.05,Math.min(lambdaHome+lambdaAway,htTotal));
-  const share= lambdaHome+lambdaAway>0 ? lambdaHome/(lambdaHome+lambdaAway) : 0.5;
-  const htHome=htTotal*share, htAway=htTotal*(1-share);
-  const htScores=[];
-  for(let h=0;h<=5;h++) for(let a=0;a<=5;a++)
-    htScores.push({home:h,away:a,p:pmf(h,htHome)*pmf(a,htAway)});
+  const htHomeForm = Number.isFinite(homeForm?.htAvgGoalsFor) && Number.isFinite(awayForm?.htAvgGoalsAgainst)
+    ? Math.max(0.03,0.55*Number(homeForm.htAvgGoalsFor)+0.45*Number(awayForm.htAvgGoalsAgainst)) : null;
+  const htAwayForm = Number.isFinite(awayForm?.htAvgGoalsFor) && Number.isFinite(homeForm?.htAvgGoalsAgainst)
+    ? Math.max(0.03,0.55*Number(awayForm.htAvgGoalsFor)+0.45*Number(homeForm.htAvgGoalsAgainst)) : null;
+  const htTeamFormAvailable = htHomeForm != null && htAwayForm != null;
+  const ftShare = lambdaHome/(lambdaHome+lambdaAway);
+  let htShare=ftShare;
+  if(htTeamFormAvailable && (htHomeForm+htAwayForm)>0){
+    const formShare=htHomeForm/(htHomeForm+htAwayForm);
+    htShare=0.65*formShare+0.35*ftShare;
+  }
+  const htHome=htTotal*htShare, htAway=htTotal*(1-htShare);
+  const htScores=dcGrid(htHome,htAway,6)
+    .filter(x=>x.home<=5&&x.away<=5)
+    .map(x=>({home:x.home,away:x.away,p:x.probability}));
   htScores.sort((a,b)=>b.p-a.p||(a.home+a.away)-(b.home+b.away)||b.home-a.home);
+  if(htTeamFormAvailable) halfTimeBasis += " + takım bazında son 5 İY golü";
 
   const basis=[];
   if(outcome) basis.push("Bet365 öncelikli, marjı ayıklanmış maç önü 1X2 güç dağılımı");
@@ -1033,7 +1071,11 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     scoreCondition:preferredMarket || "UNCONDITIONAL",
     scoreProbabilityType:preferredMarket ? "MARKET_CONDITIONAL_FOR_PREDICTED_SCORE" : "UNCONDITIONAL",
     unconditionalScoreProbability:Number(best.probability.toFixed(4)),
-    modelVersion:"V5_MARKET_CONSISTENT_PREDICTION",
+    modelVersion:"V6_DC_HT_TEAM_SPLIT_EXPERIMENTAL",
+    scoreModelMethod:"DIXON_COLES_LOW_SCORE_CORRECTION",
+    dixonColesRho:Number(dcRho(lambdaHome,lambdaAway).toFixed(4)),
+    htTeamFormUsed:Boolean(htTeamFormAvailable),
+    htFormSampleSize:{home:Number(homeForm?.htSampleSize||0),away:Number(awayForm?.htSampleSize||0)},
     modelFitError:Number(bestLoss.toFixed(6)),
     marketTargetsUsed:targets.map(x=>x.key),
     oddsBookmaker:outcomeRow?.bookmaker || rows.find(x=>/bet365/i.test(String(x.bookmaker||"")))?.bookmaker || rows[0]?.bookmaker || null,
