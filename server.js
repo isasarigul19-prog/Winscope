@@ -917,6 +917,7 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   }
   if(!Number.isFinite(lambdaHome)||!Number.isFinite(lambdaAway)) return {
     halfTimeScore:"Tahmin üretilemedi",fullTimeScore:"Tahmin üretilemedi",alternativeFullTimeScore:"Tahmin üretilemedi",
+    sixPlusProbability:null,sixPlusCandidate:false,
     scoreBasis:"Maç önü oranı veya iki takımın son 5 maç gol verisi yetersiz"
   };
   lambdaHome=Math.max(0.08,Math.min(4.5,lambdaHome));
@@ -978,6 +979,8 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     || unconditionalAlternative;
   const best=unconditionalBest;
   const alternative=unconditionalAlternative;
+  const sixPlusProbability=scores.reduce((sum,x)=>sum+(x.home+x.away>=6?x.probability:0),0);
+  const sixPlusCandidate=sixPlusProbability>=0.20;
   const constraints=targets;
 
   // İlk yarı modeli: önce maç önü İY gol çizgileri, yoksa son 5 maçın
@@ -1051,6 +1054,8 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     unconditionalFullTimeScore:`${best.home}-${best.away}`,
     unconditionalAlternativeFullTimeScore:`${alternative.home}-${alternative.away}`,
     predictedScoreProbability:Number((preferredMarket ? marketScenarioBest.probability : best.probability).toFixed(4)),
+    sixPlusProbability:Number(sixPlusProbability.toFixed(4)),
+    sixPlusCandidate,
     marketScenarioScore:`${marketScenarioBest.home}-${marketScenarioBest.away} (tercih senaryosu)`,
     marketScenarioAlternativeScore:`${marketScenarioAlternative.home}-${marketScenarioAlternative.away} (tercih senaryosu alternatifi)`,
     scoreBasis:basis.join(" + ")||"Maç önü oranları ve son 5 maç formu",
@@ -3057,6 +3062,8 @@ async function runDailyAnalysisJob(job) {
           fixtureId:match.id, matchDate:date, home:match.home, away:match.away, league:match.league,
           halfTimeScore:scores.halfTimeScore, fullTimeScore:scores.fullTimeScore,
           alternativeFullTimeScore:scores.alternativeFullTimeScore || null,
+          sixPlusProbability:scores.sixPlusProbability ?? null,
+          sixPlusCandidate:scores.sixPlusCandidate === true,
           mainPick, alternative:altRow ? other : "Aralıkta doğrulanmış alternatif yok",
           selectionScore: supported && Number.isFinite(Number(supported.selectionScore)) ? Number(supported.selectionScore) : null,
           marketProbability: supported && Number.isFinite(Number(supported.marketProbability)) ? Number(supported.marketProbability) : null,
