@@ -1084,7 +1084,8 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     modelFitError:Number(bestLoss.toFixed(6)),
     marketTargetsUsed:targets.map(x=>x.key),
     oddsBookmaker:outcomeRow?.bookmaker || rows.find(x=>/bet365/i.test(String(x.bookmaker||"")))?.bookmaker || rows[0]?.bookmaker || null,
-    market1x2:outcome?{home:Number(outcome.home.toFixed(4)),draw:Number(outcome.draw.toFixed(4)),away:Number(outcome.away.toFixed(4))}:null
+    market1x2:outcome?{home:Number(outcome.home.toFixed(4)),draw:Number(outcome.draw.toFixed(4)),away:Number(outcome.away.toFixed(4))}:null,
+    rawOdds1x2:outcomeRow?{home:Number(outcomeRow.homeOdd),draw:Number(outcomeRow.drawOdd),away:Number(outcomeRow.awayOdd),bookmaker:outcomeRow.bookmaker}:null
   };
 }
 
@@ -3087,6 +3088,7 @@ async function runDailyAnalysisJob(job) {
           scoreModelFitError:scores.modelFitError ?? null,
           oddsBookmaker:scores.oddsBookmaker || supported?.bookmaker || null,
           market1x2:scores.market1x2 || null,
+          rawOdds1x2:scores.rawOdds1x2 || null,
           scoreMarketsUsed:scores.marketTargetsUsed || [],
           selectionBasis:"KG VAR / MS 2.5 ÜST 1.50–1.73 ve dengeli rakip oranları",
           created_at:new Date().toISOString()
@@ -3164,6 +3166,38 @@ app.get("/api/analyses/daily", async (req, res) => {
   const job = await findDailyAnalysisRun(date);
   if (!job) return res.json({ success:true, found:false, date, analyses:dedupeAnalysisArchiveRows(archives.analyses.filter(x=>String(x.match_date||x.analysis?.matchDate||"").slice(0,10)===date)) });
   res.json({ success:true, found:true, job });
+});
+
+// User-supplied odds/result examples. This isolated reference set is used ONLY by Score & 6+.
+const SCORE6_REFERENCE_ROWS = [
+  [1.61,4.33,4.75,'3-1'],[1.67,3.9,4.75,'2-1','2/1'],[1.55,3.8,5.55,'3-1'],[1.44,4.33,7.5,'3-1'],[1.25,5.5,12,'2-1'],[1.6,4.1,5.5,'2-1'],[2.1,3.4,2.9,'2-1','2/1'],[1.6,3.6,5.25,'2-1'],[1.25,5.75,7,'2-1'],[3.2,3.7,2.1,'2-1',null,'1-0'],[2.2,3.4,2.87,'1-2',null,'1-1'],[1.72,3.6,5,'1-2','1/2'],[2.37,3.4,3,'1-2'],[2.7,3.6,2.45,'1-2'],[2.4,3.1,3.2,'2-2'],[8,4.75,1.36,'1-2','1/2'],[1.22,6,13,'2-1',null,null,'D-U'],[1.5,3.8,6.5,'2-1',null,null,'D-U'],[1.65,4.75,4.33,'1-2',null,null,'U-U'],[4,3.3,1.9,'1-2','1/2',null,'U-U'],[5.25,4.1,1.57,'1-2',null,null,'D-D'],[1.66,4,4.5,'1-2',null,'1-1','D-U'],[2.25,3.4,3.1,'2-1',null,'1-0','D-D'],[2.35,3.4,3,'3-1',null,'2-1'],[2.15,3.5,3,'1-2','1/2',null,'U-U'],[1.71,3.7,4.5,'2-1',null,'2-0'],[3.1,3.5,2.3,'2-1','2/1'],[1.67,4.33,4.33,'3-1',null,'1-1'],[3.9,3.5,1.95,'3-1'],[2.2,3.4,2.88,'1-3',null,'1-2'],[1.13,7,15,'3-1',null,'1-0'],[2.85,3.8,2.1,'1-2',null,'1-1'],[1.3,5,9,'3-1'],[1.95,3.2,4.33,'1-2'],
+  [1.14,7.5,13,null,null,'2-0',null,true],[1.27,5,7.5,null,null,null,null,true],[1.53,4.5,4,null,null,null,null,true],[1.9,3.5,4.1,null,null,null,null,true],[1.7,3.6,5,null,null,null,null,true],[1.2,6,9,null,null,'2-0',null,true],[1.5,3.9,7,null,null,null,null,true],[2.32,3.3,3.95,null,null,null,null,true],[1.85,3.5,4.5,'3-2'],[3.75,3.5,1.8,'1-2',null,'0-2','D-D'],[2.55,3.2,2.35,'2-4'],[5,4.2,1.62,null,null,null,null,true],[1.73,4.33,4.2,'4-4',null,'2-1'],
+  [1.38,5,7.5,'4-0'],[1.22,5.75,9,'3-0'],[1.42,5,6,'3-0'],[1.36,4.33,8,'4-0',null,'1-0'],[3,3.5,2.2,'0-3'],[1.17,6.5,17,'3-0'],[1.25,6,12,'2-0',null,'2-0'],[3.9,3.5,2,'0-2'],[6.25,3.7,1.45,'0-2'],[2.45,3.5,2.87,'1-0'],[1.65,3.75,5.5,'1-0',null,'0-0'],[1.85,3.9,3.7,'0-1'],[2.1,3.7,3.1,'3-0',null,null,'D-U'],[2.15,3.3,3,'1-0',null,null,'D-D'],[4.5,3.9,1.66,'0-2',null,null,'D-D'],[1.7,3.75,4.75,'4-0',null,'2-0','D-U'],[1.61,4,5.25,'2-0',null,'1-0','D-U'],[10,6.25,1.25,'0-2',null,null,'U-D'],[3.9,3.6,1.91,'0-2'],[1.95,3.6,3.75,'4-0'],[1.42,4.5,7.5,'2-0',null,'1-0'],[4,3.75,1.85,'0-3',null,'0-2'],[2.35,3.3,2.85,'2-0'],[3.5,3.25,2.05,'0-3'],[1.19,7,10,'4-0',null,'3-0'],[4,3.8,1.85,'0-3'],
+  [1.53,4.33,5.75,'1-1',null,'0-0'],[2.62,3.6,2.3,'2-2'],[2.95,3.25,2.3,'2-2'],[1.45,4.2,5.5,'1-1'],[2.2,3,3.3,'1-1'],[1.95,3.7,3.5,'1-1'],[2.2,3.25,3.25,'1-1',null,null,'U-D'],[2.8,3.4,2.45,'2-3'],[3,3.5,2.3,'2-2',null,'0-1','U-D'],[2.75,2.9,2.87,'3-2',null,null,'D-D'],[3.9,2.85,2.05,'2-2',null,'1-1','U-D'],[2.7,3.6,2.45,'4-4',null,'2-2','U-D'],[1.91,4,3.6,'1-1',null,'0-0','U-D'],[2,3.3,3.9,'1-1'],[2.2,3.5,2.95,'1-1'],[1.71,3.5,4.75,'1-1'],[2.7,3.3,2.4,'1-1'],[1.53,4,6.5,'1-3'],[2.05,3.2,3.6,'3-2','2/1'],[1.67,3.25,5.5,'4-1'],[1.45,5,5,'3-2','2/1'],[1.81,4.5,3.3,'3-1'],[3.1,2.7,2.2,'2-3','1/2'],[3.9,3.5,1.91,'1-1',null,'0-0'],[1.85,3.75,4,'2-2'],[3.6,3.6,1.91,'2-2',null,'1-1'],[1.4,5.25,6.5,'1-1'],[2.2,3.3,3,'2-3'],[3.8,3.75,1.85,'3-3'],[1.68,4.33,4,'2-3','1/2'],[2.15,3.2,3.6,'4-1'],[1.5,4.33,6,'2-2'],[3.3,3.4,2.2,'2-3','1/2'],[1.33,4.75,9,'3-2','2/1'],[1.27,6,9,'4-1']
+];
+function score6Distance(a,b){
+  const x=[a.home,a.draw,a.away], y=[b[0],b[1],b[2]];
+  let d=0; for(let i=0;i<3;i++) d+=Math.pow(Math.log(x[i]/y[i]),2);
+  return Math.sqrt(d/3);
+}
+function score6Predict(odds){
+  if(!odds || ![odds.home,odds.draw,odds.away].every(v=>Number.isFinite(Number(v))&&Number(v)>1.01)) return null;
+  const target={home:Number(odds.home),draw:Number(odds.draw),away:Number(odds.away)};
+  const rows=SCORE6_REFERENCE_ROWS.map(r=>({r,d:score6Distance(target,r)})).sort((a,b)=>a.d-b.d).slice(0,18);
+  const weighted=(field)=>{const map=new Map();for(const x of rows){const v=x.r[field];if(!v)continue;const w=1/Math.max(.025,x.d);map.set(v,(map.get(v)||0)+w);}return [...map].sort((a,b)=>b[1]-a[1]);};
+  const ft=weighted(3), ht=weighted(5), htft=weighted(4);
+  const total=rows.reduce((s,x)=>s+1/Math.max(.025,x.d),0)||1;
+  const six=rows.reduce((s,x)=>s+((x.r[7]===true || (x.r[3] && Number(x.r[3].split('-')[0])+Number(x.r[3].split('-')[1])>=6))?1/Math.max(.025,x.d):0),0)/total;
+  const fmt=x=>x?x.replace(/^(.+)$/,'$1 (benzer oran örnekleri)'):'Yeterli İY örneği yok';
+  return {halfTimeScore:fmt(ht[0]?.[0]),fullTimeScore:fmt(ft[0]?.[0]),alternativeFullTimeScore:ft[1]?.[0]||'Yeterli alternatif örnek yok',sixPlusProbability:six,sixPlusCandidate:six>=0.25,htft:htft[0]?.[0]||null,neighborCount:rows.length,referenceCount:SCORE6_REFERENCE_ROWS.length,model:'USER_ODDS_RESULT_NEAREST_NEIGHBOR_V1'};
+}
+app.get("/api/score-six", async (req,res)=>{
+  await archiveDatabaseReady;
+  const date=String(req.query.date||'');
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({error:'Tarih YYYY-MM-DD biçiminde olmalı.'});
+  const rows=dedupeAnalysisArchiveRows(archives.analyses||[]).filter(x=>String(x.match_date||x.analysis?.matchDate||'').slice(0,10)===date);
+  const results=rows.map(x=>{const a=x.analysis||{};const pred=score6Predict(a.rawOdds1x2);return {home:x.home_team||a.home,away:x.away_team||a.away,league:a.league,fixtureId:x.fixture_id||a.fixtureId,...(pred||{error:'Arşivde 1X2 ham oranı bulunamadı'})};});
+  res.json({date,results,referenceCount:SCORE6_REFERENCE_ROWS.length,model:'USER_ODDS_RESULT_NEAREST_NEIGHBOR_V1'});
 });
 
 app.get("/api/archives", async (_req, res) => {
