@@ -775,7 +775,14 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   const rows = oddsForFixture(prematchOddsRow);
   const outcomeRows = rows.filter(x => x.market === "MS 1" && x.outcomeProbabilities);
   const outcomeRow = outcomeRows.find(x => /bet365/i.test(String(x.bookmaker || ""))) || outcomeRows[0];
-  const outcome = outcomeRow?.outcomeProbabilities || null;
+  // oddsForFixture outcomeProbabilities yüzdelik (0-100) döndürür.
+  // Modelin bütün hedefleri 0-1 aralığında olduğundan burada normalize et.
+  const outcomePct = outcomeRow?.outcomeProbabilities || null;
+  const outcome = outcomePct ? {
+    home:Number(outcomePct.home)/100,
+    draw:Number(outcomePct.draw)/100,
+    away:Number(outcomePct.away)/100
+  } : null;
 
   const totalLines = [["MS 1.5 ÜST",2],["MS 2.5 ÜST",3],["MS 3.5 ÜST",4],["MS 5.5 ÜST",6]];
   const totalLambdas = totalLines.map(([market,threshold]) =>
@@ -786,147 +793,112 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
 
   const marketHomeLambda = lambdaFromMarketProbability(pre["EV 1.5 ÜST"],2,0);
   const marketAwayLambda = lambdaFromMarketProbability(pre["DEP 1.5 ÜST"],2,0);
+  // V4: Ev/deplasman gol beklentilerini ayrı ayrı, aynı skor matrisi üzerinde
+  // maç önü piyasalarının tamamına uydur. Önceki sürüm toplam gol + ev payı
+  // şeklinde iki aşamalıydı; bu yaklaşım bazı farklı maçları aynı 1-1 skoruna
+  // yığabiliyordu. Bet365 her pazarda önceliklidir.
   const formHome = hasForm
     ? Math.max(0.08,0.58*Number(homeForm.avgGoalsFor||0)+0.42*Number(awayForm.avgGoalsAgainst||0)) : null;
   const formAway = hasForm
     ? Math.max(0.08,0.58*Number(awayForm.avgGoalsFor||0)+0.42*Number(homeForm.avgGoalsAgainst||0)) : null;
-  const formTotal = formHome != null && formAway != null ? formHome+formAway : null;
-  const formShare = formHome != null && formAway != null && formTotal > 0
-    ? formHome/formTotal : null;
-  const marketShare = outcome && outcome.home+outcome.away > 0
-    ? outcome.home/(outcome.home+outcome.away) : null;
-
-  // 1X2'yi yalnızca ev/deplasman galibiyet oranına bölmek yerine,
-  // toplam gol beklentisi sabitken Poisson skor matrisi üzerinde 1X2
-  // olasılıklarına en iyi uyan ev sahibi gol payını bul.
-  const fitShareTo1x2 = (total, target) => {
-    if (!Number.isFinite(total) || !target) return null;
-    const pmfLocal = (k,l) => Math.exp(-l) * Math.pow(l,k) / factorial(k);
-    let bestShare = null, bestError = Infinity;
-    for (let share = 0.20; share <= 0.80001; share += 0.005) {
-      const lh = Math.max(0.03, total * share), la = Math.max(0.03, total * (1-share));
-      let ph=0, pd=0, pa=0;
-      for (let h=0; h<=10; h++) for (let a=0; a<=10; a++) {
-        const p = pmfLocal(h,lh) * pmfLocal(a,la);
-        if (h>a) ph += p; else if (h===a) pd += p; else pa += p;
-      }
-      const error = Math.pow(ph-target.home,2) + Math.pow(pd-target.draw,2) + Math.pow(pa-target.away,2);
-      if (error < bestError) { bestError=error; bestShare=share; }
+  const pmf=(k,l)=>Math.exp(-l)*Math.pow(l,k)/factorial(k);
+  const matrixStats=(lh,la)=>{
+    let home=0,draw=0,away=0,over15=0,over25=0,over35=0,over55=0,btts=0,home15=0,away15=0;
+    for(let h=0;h<=10;h++) for(let a=0;a<=10;a++){
+      const p=pmf(h,lh)*pmf(a,la), total=h+a;
+      if(h>a) home+=p; else if(h===a) draw+=p; else away+=p;
+      if(total>=2) over15+=p; if(total>=3) over25+=p; if(total>=4) over35+=p; if(total>=6) over55+=p;
+      if(h>0&&a>0) btts+=p; if(h>=2) home15+=p; if(a>=2) away15+=p;
     }
-    return bestShare;
+    return {home,draw,away,over15,over25,over35,over55,btts,home15,away15};
   };
-
-  // KRİTİK DÜZELTME: Daha önce gol toplamı marketi yoksa 1X2 oranından
-  // hesaplanan ev/deplasman güç farkı lambda'lara uygulanmıyordu. Böylece
-  // farklı favori oranlarına rağmen form ortalamaları aynı skorları üretebiliyordu.
-  // Artık 1X2 paylaşımı, son 5 maçtan gelen gol toplamını doğrudan takımlara böler.
-  let goalTotal = null;
-  if (marketTotalLambda != null && formTotal != null)
-    goalTotal = 0.70*marketTotalLambda + 0.30*formTotal;
-  else if (marketTotalLambda != null) goalTotal = marketTotalLambda;
-  else if (formTotal != null) goalTotal = formTotal;
-
-  let homeShare = null;
-  const fittedMarketShare = outcome && goalTotal != null ? fitShareTo1x2(goalTotal, outcome) : null;
-  if (marketHomeLambda != null && marketAwayLambda != null && marketHomeLambda+marketAwayLambda > 0.05) {
-    const teamMarketShare = marketHomeLambda/(marketHomeLambda+marketAwayLambda);
-    homeShare = fittedMarketShare != null
-      ? 0.60*teamMarketShare + 0.40*fittedMarketShare
-      : marketShare != null ? 0.80*teamMarketShare+0.20*marketShare : teamMarketShare;
-  } else if (fittedMarketShare != null && formShare != null) {
-    homeShare = 0.75*fittedMarketShare+0.25*formShare;
-  } else if (fittedMarketShare != null) homeShare = fittedMarketShare;
-  else if (marketShare != null && formShare != null) {
-    homeShare = 0.70*marketShare+0.30*formShare;
-  } else if (marketShare != null) homeShare = marketShare;
-  else if (formShare != null) homeShare = formShare;
-
-  let lambdaHome = null, lambdaAway = null;
-  if (goalTotal != null && homeShare != null) {
-    lambdaHome = goalTotal*homeShare;
-    lambdaAway = goalTotal*(1-homeShare);
-  } else if (marketHomeLambda != null && marketAwayLambda != null) {
-    lambdaHome = marketHomeLambda; lambdaAway = marketAwayLambda;
-  } else if (formHome != null && formAway != null) {
-    lambdaHome = formHome; lambdaAway = formAway;
+  const targets=[];
+  const addTarget=(key,target,weight)=>{
+    const p=Number(target);
+    if(Number.isFinite(p)&&p>=0.03&&p<=0.97) targets.push({key,p,weight});
+  };
+  if(outcome){
+    addTarget("home",outcome.home,2.2); addTarget("draw",outcome.draw,2.2); addTarget("away",outcome.away,2.2);
   }
+  addTarget("over15",pre["MS 1.5 ÜST"],1.0);
+  addTarget("over25",pre["MS 2.5 ÜST"],1.8);
+  addTarget("over35",pre["MS 3.5 ÜST"],1.2);
+  addTarget("over55",pre["MS 5.5 ÜST"],0.45);
+  addTarget("btts",pre["KG VAR"],1.45);
+  addTarget("home15",pre["EV 1.5 ÜST"],1.0);
+  addTarget("away15",pre["DEP 1.5 ÜST"],1.0);
 
-  // Takım gol çizgileri varsa kendi tarafını ayrıca güçlendir; toplam gol
-  // beklentisini gereksiz yere şişirmemek için son aşamada tekrar ölçekle.
-  if (lambdaHome != null && marketHomeLambda != null) lambdaHome=0.75*marketHomeLambda+0.25*lambdaHome;
-  if (lambdaAway != null && marketAwayLambda != null) lambdaAway=0.75*marketAwayLambda+0.25*lambdaAway;
-  if (goalTotal != null && lambdaHome != null && lambdaAway != null && lambdaHome+lambdaAway > 0.05) {
-    const scale=goalTotal/(lambdaHome+lambdaAway); lambdaHome*=scale; lambdaAway*=scale;
+  // Takım formu veri varsa zayıf öncül olarak kullanılır; maç önü piyasa
+  // olasılıkları daha yüksek ağırlıktadır.
+  const priorHome=Number.isFinite(formHome)?Math.max(0.15,Math.min(3.8,formHome)):null;
+  const priorAway=Number.isFinite(formAway)?Math.max(0.15,Math.min(3.8,formAway)):null;
+  const lossAt=(lh,la)=>{
+    const stats=matrixStats(lh,la);
+    let loss=0,weight=0;
+    for(const t of targets){loss+=t.weight*Math.pow(stats[t.key]-t.p,2);weight+=t.weight;}
+    if(priorHome!=null){loss+=0.22*Math.pow(lh-priorHome,2);weight+=0.22;}
+    if(priorAway!=null){loss+=0.22*Math.pow(la-priorAway,2);weight+=0.22;}
+    return weight?loss/weight:Infinity;
+  };
+  let lambdaHome=null,lambdaAway=null,bestLoss=Infinity;
+  // Kaba tarama + en iyi bölgenin hassas taraması. Her maçta iki gol
+  // beklentisi ayrı optimize edilir; tek bir sabit gol paylaşımı yoktur.
+  if(targets.length||priorHome!=null||priorAway!=null){
+    for(let h=0.20;h<=3.8001;h+=0.10) for(let a=0.20;a<=3.8001;a+=0.10){
+      const loss=lossAt(h,a);
+      if(loss<bestLoss){bestLoss=loss;lambdaHome=h;lambdaAway=a;}
+    }
+    if(lambdaHome!=null){
+      const centerH=lambdaHome,centerA=lambdaAway;
+      for(let h=Math.max(0.12,centerH-0.12);h<=Math.min(4.0,centerH+0.12)+0.0001;h+=0.02)
+        for(let a=Math.max(0.12,centerA-0.12);a<=Math.min(4.0,centerA+0.12)+0.0001;a+=0.02){
+          const loss=lossAt(h,a);
+          if(loss<bestLoss){bestLoss=loss;lambdaHome=h;lambdaAway=a;}
+        }
+    }
   }
-  if (!Number.isFinite(lambdaHome) || !Number.isFinite(lambdaAway)) return {
-    halfTimeScore:"Tahmin üretilemedi", fullTimeScore:"Tahmin üretilemedi", alternativeFullTimeScore:"Tahmin üretilemedi",
-    scoreBasis:"Maç önü 1X2/gol oranı veya iki takımın son 5 maç gol verisi yetersiz"
+  if(!Number.isFinite(lambdaHome)||!Number.isFinite(lambdaAway)) return {
+    halfTimeScore:"Tahmin üretilemedi",fullTimeScore:"Tahmin üretilemedi",alternativeFullTimeScore:"Tahmin üretilemedi",
+    scoreBasis:"Maç önü oranı veya iki takımın son 5 maç gol verisi yetersiz"
   };
   lambdaHome=Math.max(0.08,Math.min(4.5,lambdaHome));
   lambdaAway=Math.max(0.08,Math.min(4.5,lambdaAway));
 
-  const pmf=(k,l)=>Math.exp(-l)*Math.pow(l,k)/factorial(k);
   const scores=[];
-  for(let h=0;h<=8;h++) for(let a=0;a<=8;a++)
+  for(let h=0;h<=9;h++) for(let a=0;a<=9;a++)
     scores.push({home:h,away:a,probability:pmf(h,lambdaHome)*pmf(a,lambdaAway)});
-
-  const constraints=[];
-  const addConstraint=(name,target,test)=>{
-    const p=Number(target);
-    if(Number.isFinite(p)&&p>=0.04&&p<=0.96) constraints.push({name,target:p,test});
-  };
-  addConstraint("MS 1.5 ÜST",pre["MS 1.5 ÜST"],x=>x.home+x.away>=2);
-  addConstraint("MS 2.5 ÜST",pre["MS 2.5 ÜST"],x=>x.home+x.away>=3);
-  addConstraint("MS 3.5 ÜST",pre["MS 3.5 ÜST"],x=>x.home+x.away>=4);
-  addConstraint("KG VAR",pre["KG VAR"],x=>x.home>0&&x.away>0);
-  addConstraint("EV 1.5 ÜST",pre["EV 1.5 ÜST"],x=>x.home>=2);
-  addConstraint("DEP 1.5 ÜST",pre["DEP 1.5 ÜST"],x=>x.away>=2);
-  if(outcome){
-    addConstraint("MS 1",outcome.home,x=>x.home>x.away);
-    addConstraint("MS X",outcome.draw,x=>x.home===x.away);
-    addConstraint("MS 2",outcome.away,x=>x.away>x.home);
-  }
-  const normalizeScores=()=>{
-    const sum=scores.reduce((v,x)=>v+x.probability,0);
-    if(sum>0) for(const x of scores) x.probability/=sum;
-  };
-  normalizeScores();
-  // Piyasa olasılıklarını aynı skor matrisine yumuşak biçimde uygula.
-  for(let pass=0;pass<60&&constraints.length;pass++){
-    for(const c of constraints){
-      let current=0;
-      for(const x of scores) if(c.test(x)) current+=x.probability;
-      current=Math.max(0.005,Math.min(0.995,current));
-      const target=Math.max(0.03,Math.min(0.97,c.target));
-      const ratio=Math.pow((target/current)/((1-target)/(1-current)),0.20);
-      for(const x of scores) x.probability*=c.test(x)?ratio:1;
-      normalizeScores();
-    }
-  }
-  scores.sort((a,b)=>b.probability-a.probability||(a.home+a.away)-(b.home+b.away)||b.home-a.home);
-  // Günün Analizleri skorunu ana pazarla tutarlı seç: ör. MS 2.5 ÜST
-  // öneriliyorsa 1-1 gibi bu pazarı kaybettiren skor gösterme. Bu skor,
-  // seçilen pazar koşulu altındaki en olası tam skordur.
-  const scoreMeetsMarket = (x, market) => {
+  const scoreMeetsMarket=(x,market)=>{
     const total=x.home+x.away;
-    if (market==="KG VAR") return x.home>0 && x.away>0;
-    if (market==="KG YOK") return x.home===0 || x.away===0;
-    if (market==="EV 1.5 ÜST") return x.home>=2;
-    if (market==="DEP 1.5 ÜST") return x.away>=2;
-    if (market==="MS 0.5 ÜST") return total>=1;
-    if (market==="MS 1.5 ÜST") return total>=2;
-    if (market==="MS 2.5 ÜST") return total>=3;
-    if (market==="MS 3.5 ÜST") return total>=4;
-    if (market==="İY 0.5 ÜST") return total>=1;
-    if (market==="İY 1.5 ÜST") return total>=2;
+    if(market==="KG VAR") return x.home>0&&x.away>0;
+    if(market==="KG YOK") return x.home===0||x.away===0;
+    if(market==="EV 1.5 ÜST") return x.home>=2;
+    if(market==="DEP 1.5 ÜST") return x.away>=2;
+    if(market==="MS 0.5 ÜST") return total>=1;
+    if(market==="MS 1.5 ÜST") return total>=2;
+    if(market==="MS 2.5 ÜST") return total>=3;
+    if(market==="MS 3.5 ÜST") return total>=4;
     return true;
   };
-  const conditionalScores = preferredMarket
-    ? scores.filter(x=>scoreMeetsMarket(x,preferredMarket))
-    : scores;
-  const selectedScores = conditionalScores.length ? conditionalScores : scores;
-  const best=selectedScores[0];
-  const alternative=selectedScores.find(x=>x.home!==best.home||x.away!==best.away) || scores.find(x=>x.home!==best.home||x.away!==best.away);
+  // Tercih koşuluna göre skor sıralanır; her adayın olasılığı bu koşul
+  // altında normalize edilir. Böylece 2.5 ÜST ile 1-1 gibi çelişki olmaz.
+  const conditionalScores=preferredMarket?scores.filter(x=>scoreMeetsMarket(x,preferredMarket)):scores;
+  const selectedScores=(conditionalScores.length?conditionalScores:scores).map(x=>({...x}));
+  const selectedMass=selectedScores.reduce((sum,x)=>sum+x.probability,0)||1;
+  for(const x of selectedScores)x.probability/=selectedMass;
+  selectedScores.sort((a,b)=>b.probability-a.probability||(a.home+a.away)-(b.home+b.away)||b.home-a.home);
+  let best=selectedScores[0];
+  // 1X2 favorisi skor adaylarında çok küçük farkla gerideyse, piyasa yönüyle
+  // uyumlu skoru seç. Yalnızca olasılık farkı %8'den azsa uygulanır; büyük
+  // olasılık farklarında modelin gerçek birinci adayı korunur.
+  if(outcome){
+    const favorite=outcome.home>outcome.away?"home":outcome.away>outcome.home?"away":null;
+    if(favorite){
+      const favoriteCandidate=selectedScores.find(x=>favorite==="home"?x.home>x.away:x.away>x.home);
+      if(favoriteCandidate && favoriteCandidate.probability>=best.probability*0.92) best=favoriteCandidate;
+    }
+  }
+  const alternative=selectedScores.find(x=>x.home!==best.home||x.away!==best.away)||scores.find(x=>x.home!==best.home||x.away!==best.away);
+  const constraints=targets;
 
   // İlk yarı modeli: önce maç önü İY gol çizgileri, yoksa son 5 maçın
   // gerçek devre arası gol frekansları kullanılır. Sabit %44 varsayımı artık
@@ -987,10 +959,13 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     expectedGoals:{home:Number(lambdaHome.toFixed(2)),away:Number(lambdaAway.toFixed(2))},
     expectedHalfTimeGoals:{home:Number(htHome.toFixed(2)),away:Number(htAway.toFixed(2)),total:Number(htTotal.toFixed(2))},
     halfTimeBasis,
-    topScoreCandidates:selectedScores.slice(0,3).map(x=>({score:`${x.home}-${x.away}`,probability:Number(x.probability.toFixed(4))})),
+    topScoreCandidates:[best,...selectedScores.filter(x=>x.home!==best.home||x.away!==best.away)].slice(0,3).map(x=>({score:`${x.home}-${x.away}`,probability:Number(x.probability.toFixed(4))})),
     scoreProbability:Number(best.probability.toFixed(4)),
     alternativeScoreProbability:Number(alternative.probability.toFixed(4)),
     scoreCondition:preferredMarket || "UNCONDITIONAL",
+    modelVersion:"V4_MARKET_FIT_2D",
+    modelFitError:Number(bestLoss.toFixed(6)),
+    marketTargetsUsed:targets.map(x=>x.key),
     oddsBookmaker:outcomeRow?.bookmaker || rows.find(x=>/bet365/i.test(String(x.bookmaker||"")))?.bookmaker || rows[0]?.bookmaker || null,
     market1x2:outcome?{home:Number(outcome.home.toFixed(4)),draw:Number(outcome.draw.toFixed(4)),away:Number(outcome.away.toFixed(4))}:null
   };
@@ -2945,7 +2920,7 @@ async function runDailyAnalysisJob(job) {
           ? supported.market : market.market;
         // Ana tercih belirlendikten sonra tam skor aynı pazar koşulu altında seçilir.
         scores = scorePrediction(prematchFixture, homeForm, awayForm, null, oddsRow, mainPick);
-        console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | candidates=${JSON.stringify(scores.topScoreCandidates)} | pick=${mainPick} | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} | basis=${scores.scoreBasis} | HTbasis=${scores.halfTimeBasis}`);
+        console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | candidates=${JSON.stringify(scores.topScoreCandidates)} | model=${scores.modelVersion} fit=${scores.modelFitError} markets=${JSON.stringify(scores.marketTargetsUsed)} | pick=${mainPick} | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} | basis=${scores.scoreBasis} | HTbasis=${scores.halfTimeBasis}`);
         const other = mainPick === "KG VAR" ? "MS 2.5 ÜST" : "KG VAR";
         const altRow = oddsForFixture(oddsRow).find(x=>x.market===other && Number(x.odd)>=DAILY_MARKET_ODDS_MIN && Number(x.odd)<=DAILY_MARKET_ODDS_MAX);
         const analysis = {
@@ -2968,6 +2943,9 @@ async function runDailyAnalysisJob(job) {
           scoreCondition:scores.scoreCondition || mainPick,
           oddsBookmaker:scores.oddsBookmaker || supported?.bookmaker || null,
           market1x2:scores.market1x2 || null,
+          scoreModelVersion:scores.modelVersion || "V4_MARKET_FIT_2D",
+          scoreModelFitError:scores.modelFitError ?? null,
+          scoreMarketsUsed:scores.marketTargetsUsed || [],
           selectionBasis:"KG VAR / MS 2.5 ÜST 1.50–1.73 ve dengeli rakip oranları",
           created_at:new Date().toISOString()
         };
