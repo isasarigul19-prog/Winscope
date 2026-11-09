@@ -1936,9 +1936,9 @@ function isExcludedAnalysisCompetition(match) {
     .trim();
   const women = /\b(women|woman|ladies|feminine|femenino|feminin|womens|女子|女性)\b/i.test(text);
   const ageGroup = /\b(?:u\s*\d{1,2}|under\s*\d{1,2}|youth|junior|academy|juvenil|jeugd|sub\s*\d{1,2}|amateur youth)\b/i.test(text);
-  const reserveOrDevelopment = /\b(reserve|reserves|b team|team b|ii league|development|professional development|primavera|segunda equipo)\b/i.test(text);
-  const friendly = /\b(friendlies|friendly|club friendly|international friendly|men friendlies)\b/i.test(text);
-  return women || ageGroup || reserveOrDevelopment || friendly;
+  // Kapsam yalnızca kadın organizasyonları ve yaş grubu/U takımları hariçtir.
+  // Erkek senior ligleri, rezerv etiketi taşımayan ligler ve hazırlık maçları dahildir.
+  return women || ageGroup;
 }
 
 function automaticLeaguePriority(match) {
@@ -2927,17 +2927,14 @@ const DAILY_MAJOR_LEAGUE_NAMES = new Set([
   "uefa conference league"
 ]);
 function isDailyMajorLeague(match) {
-  if (!match || isExcludedAnalysisCompetition(match)) return false;
-  const id = Number(match.leagueId);
-  const name = String(match.league || "").toLocaleLowerCase("en").trim();
-  // Only the configured major senior leagues and named major national competitions.
-  return DAILY_MAJOR_LEAGUE_IDS.has(id) || DAILY_MAJOR_LEAGUE_NAMES.has(name);
+  // Major lig allowlist'i analiz kapsamını sınırlamaz: kadın/U takımları hariç tüm ligler.
+  return Boolean(match && Number(match.id) > 0 && !isExcludedAnalysisCompetition(match));
 }
 function dailyAnalysisLeaguePriority(match) {
   const name=String(match.league||"").toLocaleLowerCase("en");
   const id=Number(match.leagueId);
   if (DAILY_MAJOR_LEAGUE_IDS.has(id) || DAILY_MAJOR_LEAGUE_NAMES.has(name)) return 1;
-  if (/\\b(nations league|world cup|africa cup|asian cup|gold cup|international friendly|friendlies|qualif)/i.test(name)) return 2;
+  if (/\\b(nations league|world cup|africa cup|asian cup|gold cup|qualif)/i.test(name)) return 2;
   return 3;
 }
 const DAILY_MARKET_ODDS_MIN = 1.50;
@@ -3173,10 +3170,10 @@ async function runDailyAnalysisJob(job) {
     }
     await settleDailyMarketPredictions();
     job.result = { success:true, date, fixtureFeedCount:job.fixtureFeedCount || 0,
-      scheduledCount:job.scheduledCount || 0, fixtures:fixtures.length, majorLeagueFixtures:fixtures.length,
+      scheduledCount:job.scheduledCount || 0, fixtures:fixtures.length, majorLeagueFixtures:fixtures.length, analysisScope:"Kadın ve U/yaş grubu takımları hariç tüm ligler",
       leagueBreakdown:job.leagueBreakdown || [], excludedLeagueBreakdown:job.excludedLeagueBreakdown || [],
       excludedOtherLeagues:job.excludedOtherLeagues || 0, selected:selected.length, rejected,
-      filters:{ leagues:["Premier League", "La Liga", "Bundesliga", "Serie A", "Ligue 1", "Süper Lig"], oddsMin:DAILY_MARKET_ODDS_MIN, oddsMax:DAILY_MARKET_ODDS_MAX, balancedOpponents:true },
+      filters:{ leagues:"Kadın ve U/yaş grubu takımları hariç tüm ligler", oddsMin:DAILY_MARKET_ODDS_MIN, oddsMax:DAILY_MARKET_ODDS_MAX, balancedOpponents:true },
       persistentStorage:Boolean(databasePool) };
     job.status = "completed";
     await persistDailyAnalysisRun(job);
