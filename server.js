@@ -3054,19 +3054,20 @@ async function runDailyAnalysisJob(job) {
     for (const m of fixtures) {
       const p=dailyAnalysisLeaguePriority(m);
       priorityCounts[p===1?"major":p===2?"international":"other"]++;
+      // Uygun lig dağılımı yalnızca gerçekten analiz havuzuna alınan ligleri göstermeli.
+      const leagueKey = `${m.country || "Ülke bilinmiyor"} · ${m.league || "Lig bilinmiyor"}`;
+      leagueCounts[leagueKey] = (leagueCounts[leagueKey] || 0) + 1;
     }
     job.priorityCounts=priorityCounts;
-    for (const m of scheduledFixtures) leagueCounts[m.league] = (leagueCounts[m.league] || 0) + 1;
     job.fixtureFeedCount = (payload.response || []).length;
     job.scheduledCount = scheduledFixtures.length;
     job.majorLeagueCount = fixtures.length;
     job.leagueBreakdown = Object.entries(leagueCounts).sort((a,b)=>b[1]-a[1]).slice(0,30);
     job.total = fixtures.length;
-    job.majorLeagueCount = fixtures.length;
     job.excludedOtherLeagues = scheduledFixtures.length - fixtures.length;
-    // Tanı amaçlı: hangi organizasyonların kadın/U filtresine takıldığını açıkça göster.
+    // Dışlanan lig listesi, yalnızca yaş/kadın/rezerv değil, major allowlist dışında kalan tüm ligleri gösterir.
     const excludedLeagueCounts = {};
-    for (const m of scheduledFixtures.filter(isExcludedAnalysisCompetition)) {
+    for (const m of scheduledFixtures.filter(m => !isDailyMajorLeague(m))) {
       const key = `${m.country || "Ülke bilinmiyor"} · ${m.league || "Lig bilinmiyor"}`;
       excludedLeagueCounts[key] = (excludedLeagueCounts[key] || 0) + 1;
     }
