@@ -1665,17 +1665,14 @@ async function sendCouponAutomatically(coupon, chosen) {
 
 
 function isExcludedAnalysisCompetition(match) {
-  // Günün maç önü/sürpriz kuponlarında U20 ve U21 organizasyonlarını alma.
-  // Kadın U20/U21 ligleri de isim sırası farklı olsa bile bu kontrole takılır.
-  // Kıdemli kadın liglerini yalnızca kadın oldukları için dışlama.
+  // Exclude youth, age-group, reserve and B-team competitions; keep senior national teams.
   const text = `${match.league || ""} ${match.country || ""}`
     .toLocaleLowerCase("en")
     .replace(/[’']/g, " ")
     .replace(/[._-]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  const womenAgeGroup = /\b(?:women|woman|ladies|female)\b.*\b(?:u\s*20|u\s*21|under\s*20|under\s*21)\b|\b(?:u\s*20|u\s*21|under\s*20|under\s*21)\b.*\b(?:women|woman|ladies|female)\b/i.test(text);
-  return womenAgeGroup;
+  return /\b(?:u\s*(?:17|18|19|20|21|23)|under\s*(?:17|18|19|20|21|23)|youth|junior|academy|reserve|reserves|b team)\b/i.test(text);
 }
 
 function automaticLeaguePriority(match) {
@@ -2637,7 +2634,7 @@ app.get("/api/coupon-tracking/summary", async (req, res) => {
   });
 });
 
-// Günün Analizleri: yalnızca majör ligler ve seçilen maç önü oran/dengelilik koşulları.
+// Günün Analizleri: üst düzey kulüp ligleri + A milli takım resmi turnuvaları/özel maçları; oran ve denge koşulları uygulanır.
 // API-Football lig ID'leri: Premier League, La Liga, Bundesliga, Serie A, Ligue 1, Süper Lig.
 // Günün analiz havuzu: büyük Avrupa ligleri + seçilmiş üst seviye ulusal ligler.
 // Genç/reserve organizasyonları isim kontrolüyle her durumda dışarıda tutulur.
@@ -2655,12 +2652,27 @@ const DAILY_MAJOR_LEAGUE_NAMES = new Set([
   "superliga", "super league 1", "ekstraklasa", "liga profesional argentina",
   "brasileirão série a", "serie a", "major league soccer", "mls", "saudi pro league",
   "j1 league", "k league 1", "liga mx", "uefa champions league", "uefa europa league",
-  "uefa conference league"
+  "uefa conference league",
+  "uefa nations league", "nations league",
+  "fifa world cup qualification", "world cup qualification", "world cup qualifiers",
+  "africa cup of nations qualification", "africa cup of nations qualifiers", "afcon qualifiers",
+  "concacaf nations league", "concacaf gold cup",
+  "afc asian cup qualification", "asian cup qualifiers",
+  "international friendlies", "international friendly", "friendlies",
+  "men friendlies", "world friendlies"
 ]);
 function isDailyMajorLeague(match) {
   if (isExcludedAnalysisCompetition(match)) return false;
-  if (DAILY_MAJOR_LEAGUE_IDS.has(Number(match.leagueId))) return true;
   const name = String(match.league || "").trim().toLocaleLowerCase("tr-TR");
+  const normalized = name.replace(/[^a-z0-9 ]/g, " ").replace(/\\s+/g, " ").trim();
+  const seniorInternational =
+    /\\b(uefa )?nations league\\b/.test(normalized) ||
+    /\\b(world cup|fifa world cup).*(qualif|qualifier)/.test(normalized) ||
+    /\\b(africa cup of nations|afcon).*(qualif|qualifier)/.test(normalized) ||
+    /\\b(concacaf nations league|concacaf gold cup|afc asian cup).*(qualif|qualifier)?/.test(normalized) ||
+    /\\b(international friendlies|international friendly|men friendlies|world friendlies)\\b/.test(normalized);
+  if (seniorInternational) return true;
+  if (DAILY_MAJOR_LEAGUE_IDS.has(Number(match.leagueId))) return true;
   return DAILY_MAJOR_LEAGUE_NAMES.has(name);
 }
 const DAILY_MARKET_ODDS_MIN = 1.50;
