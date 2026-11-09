@@ -978,8 +978,13 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   if(Number.isFinite(ht05)||Number.isFinite(ht15)||Number.isFinite(formHtLambda)) basis.push(halfTimeBasis);
   return {
     halfTimeScore:`${htScores[0].home}-${htScores[0].away} (tahmin)`,
-    fullTimeScore:`${best.home}-${best.away} (tahmin)`,
-    alternativeFullTimeScore:`${alternative.home}-${alternative.away} (alternatif tahmin)`,
+    // Günün Analizi ana MS tahmini seçilen pazarla çelişmemeli.
+    // Genel (koşulsuz) en olası skor ayrıca saklanır; tercih senaryosu ayrı raporlanır.
+    fullTimeScore:`${(preferredMarket ? marketScenarioBest : best).home}-${(preferredMarket ? marketScenarioBest : best).away} (tahmin)`,
+    alternativeFullTimeScore:`${(preferredMarket ? marketScenarioAlternative : alternative).home}-${(preferredMarket ? marketScenarioAlternative : alternative).away} (alternatif tahmin)`,
+    unconditionalFullTimeScore:`${best.home}-${best.away}`,
+    unconditionalAlternativeFullTimeScore:`${alternative.home}-${alternative.away}`,
+    predictedScoreProbability:Number((preferredMarket ? marketScenarioBest.probability : best.probability).toFixed(4)),
     marketScenarioScore:`${marketScenarioBest.home}-${marketScenarioBest.away} (tercih senaryosu)`,
     marketScenarioAlternativeScore:`${marketScenarioAlternative.home}-${marketScenarioAlternative.away} (tercih senaryosu alternatifi)`,
     scoreBasis:basis.join(" + ")||"Maç önü oranları ve son 5 maç formu",
@@ -998,8 +1003,9 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     alternativeScoreProbability:Number(alternative.probability.toFixed(4)),
     marketScenarioProbability:Number(marketScenarioBest.probability.toFixed(4)),
     scoreCondition:preferredMarket || "UNCONDITIONAL",
-    scoreProbabilityType:"UNCONDITIONAL",
-    modelVersion:"V5_UNCONDITIONAL_PLUS_MARKET_SCENARIO",
+    scoreProbabilityType:preferredMarket ? "MARKET_CONDITIONAL_FOR_PREDICTED_SCORE" : "UNCONDITIONAL",
+    unconditionalScoreProbability:Number(best.probability.toFixed(4)),
+    modelVersion:"V5_MARKET_CONSISTENT_PREDICTION",
     modelFitError:Number(bestLoss.toFixed(6)),
     marketTargetsUsed:targets.map(x=>x.key),
     oddsBookmaker:outcomeRow?.bookmaker || rows.find(x=>/bet365/i.test(String(x.bookmaker||"")))?.bookmaker || rows[0]?.bookmaker || null,
