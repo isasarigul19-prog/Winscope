@@ -197,26 +197,14 @@ if (databasePool) {
       END $$`);
       await databasePool.query(`CREATE UNIQUE INDEX IF NOT EXISTS winscope_live_predictions_fixture_market_uidx ON winscope_live_predictions(fixture_id, market)`);
       const [analysisRows, couponRows, sentRows, predictionRows, livePredictionRows, dailyRunRows] = await Promise.all([
-        databasePool.query(`SELECT payload FROM (
-          SELECT DISTINCT ON (
-            COALESCE(payload->>'match_date', payload->'analysis'->>'matchDate'),
-            COALESCE(payload->>'fixture_id', payload->'analysis'->>'fixtureId')
-          ) payload, id
-          FROM winscope_archive
-          WHERE category='analysis'
-          ORDER BY
-            COALESCE(payload->>'match_date', payload->'analysis'->>'matchDate'),
-            COALESCE(payload->>'fixture_id', payload->'analysis'->>'fixtureId'),
-            id DESC
-        ) unique_analyses
-        ORDER BY id DESC LIMIT 100`),
+        databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'analysis' ORDER BY id DESC LIMIT 1000"),
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'coupon' ORDER BY id DESC LIMIT 50"),
         databasePool.query("SELECT fixture_id, coupon_type, market, match_date FROM winscope_telegram_delivery_sent"),
         databasePool.query("SELECT * FROM winscope_predictions ORDER BY created_at DESC LIMIT 500"),
         databasePool.query("SELECT * FROM winscope_live_predictions ORDER BY created_at DESC LIMIT 500"),
         databasePool.query("SELECT match_date::text, status, result, error, started_at, finished_at FROM winscope_daily_analysis_runs ORDER BY match_date DESC LIMIT 30")
       ]);
-      archives.analyses = dedupeAnalysisArchiveRows(analysisRows.rows.map(row => row.payload));
+      archives.analyses = dedupeAnalysisArchiveRows(analysisRows.rows.map(row => row.payload)).slice(0,100);
       for (const row of dailyRunRows.rows) dailyAnalysisRunCache.set(String(row.match_date).slice(0,10), {
         date:String(row.match_date).slice(0,10), status:row.status, result:row.result || null,
         error:row.error || null, startedAt:row.started_at, finishedAt:row.finished_at
@@ -276,14 +264,25 @@ function dedupeAnalysisArchiveRows(rows = []) {
   const byFixture = new Map();
   for (const row of rows) {
     const analysis = row?.analysis || row || {};
-    const fixtureId = Number(row?.fixture_id ?? row?.fixtureId ?? analysis?.fixtureId ?? analysis?.fixture_id ?? 0);
-    const matchDate = String(row?.match_date ?? analysis?.matchDate ?? analysis?.match_date ?? "").slice(0,10);
-    const home = String(row?.home_team ?? analysis?.home ?? row?.home ?? "");
-    const away = String(row?.away_team ?? analysis?.away ?? row?.away ?? "");
-    const key = fixtureId ? `${matchDate}|${fixtureId}` : `${matchDate}|${home.toLowerCase()}|${away.toLowerCase()}`;
-    const stamp = Date.parse(row?.created_at || analysis?.created_at || "") || 0;
+    const firstPick = Array.isArray(row?.picks) ? row.picks[0] : null;
+    const fixtureId = Number(
+      row?.fixture_id ?? row?.fixtureId ??
+      analysis?.fixtureId ?? analysis?.fixture_id ??
+      firstPick?.fixtureId ?? firstPick?.fixture_id ?? 0
+    );
+    const matchDate = String(
+      row?.match_date ?? row?.matchDate ?? row?.date ??
+      analysis?.matchDate ?? analysis?.match_date ?? ""
+    ).slice(0,10);
+    const home = String(row?.home_team ?? row?.home ?? analysis?.home ?? firstPick?.home ?? "")
+      .toLocaleLowerCase("en").trim();
+    const away = String(row?.away_team ?? row?.away ?? analysis?.away ?? firstPick?.away ?? "")
+      .toLocaleLowerCase("en").trim();
+    const key = fixtureId ? `fixture:${fixtureId}` : `teams:${matchDate}|${home}|${away}`;
+    const stamp = Date.parse(row?.created_at || row?.createdAt || analysis?.created_at || "") || 0;
     const previous = byFixture.get(key);
-    if (!previous || stamp >= previous.stamp) byFixture.set(key, { row, stamp });
+    // API/DB rows are newest-first; retain the first row when timestamps are absent/equal.
+    if (!previous || stamp > previous.stamp) byFixture.set(key, { row, stamp });
   }
   return [...byFixture.values()]
     .sort((a,b)=>b.stamp-a.stamp)
@@ -2114,7 +2113,10 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
     lowOdds: 0, noValue: 0, settled: 0, wrongPeriod: 0, weakGoalSignal: 0, wrongGoalDirection: 0 };
 
   // Gol beklentisi önce doğrulanır. Zayıf canlı istatistikle yalnızca oran yüksek diye sinyal üretme.
-  if (!stats.available || !activeStats || anyNextGoalProbability < 0.62 || minute < 10 || minute > 85 || isHalftime) {
+  // Late-match probability naturally falls with remaining time. Do not require
+  // a fixed 62% chance of ANY goal before even evaluating priced markets.
+  // Real live odds + usable live stats + market-specific EV/edge remain mandatory.
+  if (!stats.available || !activeStats || minute < 10 || minute > 90 || isHalftime) {
     rejected.weakGoalSignal = 1;
   } else {
     for (const item of markets) {
@@ -2145,7 +2147,7 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
         scenarioSide = isHome ? "home" : "away";
         const sideGoalProbability = isHome ? homeScoresAgainProbability : awayScoresAgainProbability;
         const otherGoalProbability = isHome ? awayScoresAgainProbability : homeScoresAgainProbability;
-        if (sideGoalProbability < 0.48 || (goalDirection !== "balanced" && scenarioSide !== goalDirection && sideGoalProbability < otherGoalProbability * 0.90)) {
+        if (sideGoalProbability < 0.25 || (goalDirection !== "balanced" && scenarioSide !== goalDirection && sideGoalProbability < otherGoalProbability * 0.90)) {
           rejected.wrongGoalDirection++; continue;
         }
       } else if (item.market === "KG VAR") {
@@ -2161,7 +2163,8 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
         modelProbability = poissonProbabilityAtLeast(line, lambda, current);
         lambdaUsed = lambda;
         // Bir takımın gol atma olasılığı zayıfsa toplam gol pazarı da sırf fiyat avantajıyla seçilemez.
-        if (current < Math.ceil(line) && anyNextGoalProbability < 0.62) { rejected.weakGoalSignal++; continue; }
+        // Remaining-time probability is evaluated by modelProbability and EV below;
+        // a second fixed 62% gate here would suppress almost every 66–90' candidate.
       }
 
       const marketProbability = Number(item.probability) / 100;
@@ -2171,10 +2174,14 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
       evaluations.push({ market: item.market, odd, bookmaker: item.bookmaker, modelProbability, marketProbability, edge, ev,
         lambda: lambdaUsed, scenarioSide });
 
-      // Değer eşiği: yalnızca istatistikle %5, istatistik + son 5 maçla %4 avantaj aranır.
-      const minEdge = formsAvailable ? 0.04 : 0.05;
-      const minEv = formsAvailable ? 0.04 : 0.05;
-      const minProbability = item.market === "KG VAR" ? 0.42 : (isHomeMarket || isAwayMarket ? 0.48 : 0.60);
+      // Değer eşiği: istatistik + son 5 maç varsa daha düşük, yoksa daha yüksek edge/EV aranır.
+      // A lower raw probability can still be a valid late-game value at a fair
+      // live price. Edge and EV, not an arbitrary 60% probability floor, decide.
+      const minEdge = formsAvailable ? 0.025 : 0.035;
+      const minEv = formsAvailable ? 0.035 : 0.045;
+      const minProbability = item.market === "KG VAR"
+        ? 0.25
+        : (isHomeMarket || isAwayMarket ? 0.30 : 0.25);
       if (modelProbability < minProbability || edge < minEdge || ev < minEv) { rejected.noValue++; continue; }
 
       // Skor senaryosuna uymayan pazar seçilmesin. Örn. deplasman golü daha olasıysa evin ikinci golü ana tercih olamaz.
@@ -2614,7 +2621,8 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
     }
     return acc;
   }, {});
-  console.log(`[LIVE SCAN SUMMARY] liveFixtures=${fixtures.length} scanned=${results.length} oddsBulk=${bulkOdds.length} statsFetched=${statsFetchedFixtures} formEnriched=${formEnrichedFixtures} candidates=${valueCandidates.length} reasons=${JSON.stringify(reasonSummary)}`);
+  const liveOddsMatched = results.filter(x => x.status !== "LIVE_ODDS_UNAVAILABLE" && x.status !== "PARTIAL_DATA").length;
+  console.log(`[LIVE SCAN SUMMARY] liveFixtures=${fixtures.length} scanned=${results.length} oddsBulk=${bulkOdds.length} oddsMatched=${liveOddsMatched} statsFetched=${statsFetchedFixtures} formEnriched=${formEnrichedFixtures} candidates=${valueCandidates.length} reasons=${JSON.stringify(reasonSummary)}`);
   return { status: "READY", type: "live", scanned: results.length, valueCandidates: valueCandidates.length,
     message: telegram?.sent ? "Canlı aday taze fikstür, oran ve değer kontrolünden geçti; Telegram bildirimi gönderildi." : (top ? "Canlı aday bulundu ve taze kontrolden geçti; Telegram gönderimi tamamlanmadı." : "Canlı maçlar tarandı; taze oran ve değer kontrolünü geçen gönderilebilir tercih bulunmadı."),
     reasonSummary, matches: results, topPick: top, picks: top ? [{ fixtureId: top.fixtureId, league: top.league, home: top.home, away: top.away, minute: top.minute, currentScore: top.score, market: top.mainPick, source: top.valuePick?.bookmaker, oddsBasis: "Gerçek canlı oran" }] : [], telegram };
@@ -2824,8 +2832,11 @@ const DAILY_MAJOR_LEAGUE_NAMES = new Set([
   "men friendlies", "world friendlies"
 ]);
 function isDailyMajorLeague(match) {
-  // Büyük lig öncelik etiketi artık eleme filtresi değildir.
-  return !isExcludedAnalysisCompetition(match);
+  if (!match || isExcludedAnalysisCompetition(match)) return false;
+  const id = Number(match.leagueId);
+  const name = String(match.league || "").toLocaleLowerCase("en").trim();
+  // Only the configured major senior leagues and named major national competitions.
+  return DAILY_MAJOR_LEAGUE_IDS.has(id) || DAILY_MAJOR_LEAGUE_NAMES.has(name);
 }
 function dailyAnalysisLeaguePriority(match) {
   const name=String(match.league||"").toLocaleLowerCase("en");
