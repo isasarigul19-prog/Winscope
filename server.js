@@ -895,18 +895,6 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   const unconditionalBest = unconditionalScores[0];
   const unconditionalAlternative = unconditionalScores[1] || unconditionalBest;
 
-  const scoreMeetsMarket=(x,market)=>{
-    const total=x.home+x.away;
-    if(market==="KG VAR") return x.home>0&&x.away>0;
-    if(market==="KG YOK") return x.home===0||x.away===0;
-    if(market==="EV 1.5 ÜST") return x.home>=2;
-    if(market==="DEP 1.5 ÜST") return x.away>=2;
-    if(market==="MS 0.5 ÜST") return total>=1;
-    if(market==="MS 1.5 ÜST") return total>=2;
-    if(market==="MS 2.5 ÜST") return total>=3;
-    if(market==="MS 3.5 ÜST") return total>=4;
-    return true;
-  };
   const conditionalScores=preferredMarket
     ? scores.filter(x=>scoreMeetsMarket(x,preferredMarket))
     : scores;
