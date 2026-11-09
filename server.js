@@ -882,25 +882,59 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     if(market==="MS 3.5 ÜST") return total>=4;
     return true;
   };
-  // Tercih koşuluna göre skor sıralanır; her adayın olasılığı bu koşul
-  // altında normalize edilir. Böylece 2.5 ÜST ile 1-1 gibi çelişki olmaz.
-  const conditionalScores=preferredMarket?scores.filter(x=>scoreMeetsMarket(x,preferredMarket)):scores;
-  const selectedScores=(conditionalScores.length?conditionalScores:scores).map(x=>({...x}));
-  const selectedMass=selectedScores.reduce((sum,x)=>sum+x.probability,0)||1;
-  for(const x of selectedScores)x.probability/=selectedMass;
-  selectedScores.sort((a,b)=>b.probability-a.probability||(a.home+a.away)-(b.home+b.away)||b.home-a.home);
-  let best=selectedScores[0];
-  // 1X2 favorisi skor adaylarında çok küçük farkla gerideyse, piyasa yönüyle
-  // uyumlu skoru seç. Yalnızca olasılık farkı %8'den azsa uygulanır; büyük
-  // olasılık farklarında modelin gerçek birinci adayı korunur.
+  // İki ayrı skor sıralaması tutulur:
+  // 1) Koşulsuz skor: maçın genel olarak en olası gerçek skoru.
+  // 2) Pazar senaryosu: seçilen KG/ÜST tercihi gerçekleşirse en olası skor.
+  // Pazar koşuluna göre normalize edilmiş yüzde, genel skor olasılığı gibi sunulmaz.
+  const unconditionalScores = scores.map(x => ({...x}));
+  unconditionalScores.sort((a,b)=>
+    b.probability-a.probability ||
+    (a.home+a.away)-(b.home+b.away) ||
+    b.home-a.home
+  );
+  const unconditionalBest = unconditionalScores[0];
+  const unconditionalAlternative = unconditionalScores[1] || unconditionalBest;
+
+  const scoreMeetsMarket=(x,market)=>{
+    const total=x.home+x.away;
+    if(market==="KG VAR") return x.home>0&&x.away>0;
+    if(market==="KG YOK") return x.home===0||x.away===0;
+    if(market==="EV 1.5 ÜST") return x.home>=2;
+    if(market==="DEP 1.5 ÜST") return x.away>=2;
+    if(market==="MS 0.5 ÜST") return total>=1;
+    if(market==="MS 1.5 ÜST") return total>=2;
+    if(market==="MS 2.5 ÜST") return total>=3;
+    if(market==="MS 3.5 ÜST") return total>=4;
+    return true;
+  };
+  const conditionalScores=preferredMarket
+    ? scores.filter(x=>scoreMeetsMarket(x,preferredMarket))
+    : scores;
+  const scenarioScores=(conditionalScores.length?conditionalScores:scores).map(x=>({...x}));
+  const scenarioMass=scenarioScores.reduce((sum,x)=>sum+x.probability,0)||1;
+  for(const x of scenarioScores)x.probability/=scenarioMass;
+  scenarioScores.sort((a,b)=>
+    b.probability-a.probability ||
+    (a.home+a.away)-(b.home+b.away) ||
+    b.home-a.home
+  );
+  let marketScenarioBest=scenarioScores[0];
+  // 1X2 yönü yalnızca pazar senaryosunda çok yakın olasılıklarda bağlayıcıdır.
   if(outcome){
     const favorite=outcome.home>outcome.away?"home":outcome.away>outcome.home?"away":null;
     if(favorite){
-      const favoriteCandidate=selectedScores.find(x=>favorite==="home"?x.home>x.away:x.away>x.home);
-      if(favoriteCandidate && favoriteCandidate.probability>=best.probability*0.92) best=favoriteCandidate;
+      const favoriteCandidate=scenarioScores.find(x=>
+        favorite==="home"?x.home>x.away:x.away>x.home
+      );
+      if(favoriteCandidate && favoriteCandidate.probability>=marketScenarioBest.probability*0.92)
+        marketScenarioBest=favoriteCandidate;
     }
   }
-  const alternative=selectedScores.find(x=>x.home!==best.home||x.away!==best.away)||scores.find(x=>x.home!==best.home||x.away!==best.away);
+  const marketScenarioAlternative=
+    scenarioScores.find(x=>x.home!==marketScenarioBest.home||x.away!==marketScenarioBest.away)
+    || unconditionalAlternative;
+  const best=unconditionalBest;
+  const alternative=unconditionalAlternative;
   const constraints=targets;
 
   // İlk yarı modeli: önce maç önü İY gol çizgileri, yoksa son 5 maçın
@@ -958,15 +992,26 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     halfTimeScore:`${htScores[0].home}-${htScores[0].away} (tahmin)`,
     fullTimeScore:`${best.home}-${best.away} (tahmin)`,
     alternativeFullTimeScore:`${alternative.home}-${alternative.away} (alternatif tahmin)`,
+    marketScenarioScore:`${marketScenarioBest.home}-${marketScenarioBest.away} (tercih senaryosu)`,
+    marketScenarioAlternativeScore:`${marketScenarioAlternative.home}-${marketScenarioAlternative.away} (tercih senaryosu alternatifi)`,
     scoreBasis:basis.join(" + ")||"Maç önü oranları ve son 5 maç formu",
     expectedGoals:{home:Number(lambdaHome.toFixed(2)),away:Number(lambdaAway.toFixed(2))},
     expectedHalfTimeGoals:{home:Number(htHome.toFixed(2)),away:Number(htAway.toFixed(2)),total:Number(htTotal.toFixed(2))},
     halfTimeBasis,
-    topScoreCandidates:[best,...selectedScores.filter(x=>x.home!==best.home||x.away!==best.away)].slice(0,3).map(x=>({score:`${x.home}-${x.away}`,probability:Number(x.probability.toFixed(4))})),
+    topScoreCandidates:unconditionalScores.slice(0,3).map(x=>({
+      score:`${x.home}-${x.away}`,
+      probability:Number(x.probability.toFixed(4))
+    })),
+    marketScenarioCandidates:scenarioScores.slice(0,3).map(x=>({
+      score:`${x.home}-${x.away}`,
+      conditionalProbability:Number(x.probability.toFixed(4))
+    })),
     scoreProbability:Number(best.probability.toFixed(4)),
     alternativeScoreProbability:Number(alternative.probability.toFixed(4)),
+    marketScenarioProbability:Number(marketScenarioBest.probability.toFixed(4)),
     scoreCondition:preferredMarket || "UNCONDITIONAL",
-    modelVersion:"V5_1X2_PRIORITY_2D",
+    scoreProbabilityType:"UNCONDITIONAL",
+    modelVersion:"V5_UNCONDITIONAL_PLUS_MARKET_SCENARIO",
     modelFitError:Number(bestLoss.toFixed(6)),
     marketTargetsUsed:targets.map(x=>x.key),
     oddsBookmaker:outcomeRow?.bookmaker || rows.find(x=>/bet365/i.test(String(x.bookmaker||"")))?.bookmaker || rows[0]?.bookmaker || null,
@@ -2923,7 +2968,7 @@ async function runDailyAnalysisJob(job) {
           ? supported.market : market.market;
         // Ana tercih belirlendikten sonra tam skor aynı pazar koşulu altında seçilir.
         scores = scorePrediction(prematchFixture, homeForm, awayForm, null, oddsRow, mainPick);
-        console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | candidates=${JSON.stringify(scores.topScoreCandidates)} | model=${scores.modelVersion} fit=${scores.modelFitError} markets=${JSON.stringify(scores.marketTargetsUsed)} | pick=${mainPick} | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} | basis=${scores.scoreBasis} | HTbasis=${scores.halfTimeBasis}`);
+        console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | unconditional=${JSON.stringify(scores.topScoreCandidates)} | marketScenario=${JSON.stringify(scores.marketScenarioCandidates)} | model=${scores.modelVersion} fit=${scores.modelFitError} markets=${JSON.stringify(scores.marketTargetsUsed)} | pick=${mainPick} | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} | basis=${scores.scoreBasis} | HTbasis=${scores.halfTimeBasis}`);
         const other = mainPick === "KG VAR" ? "MS 2.5 ÜST" : "KG VAR";
         const altRow = oddsForFixture(oddsRow).find(x=>x.market===other && Number(x.odd)>=DAILY_MARKET_ODDS_MIN && Number(x.odd)<=DAILY_MARKET_ODDS_MAX);
         const analysis = {
@@ -2941,8 +2986,13 @@ async function runDailyAnalysisJob(job) {
           expectedHalfTimeGoals:scores.expectedHalfTimeGoals || null,
           halfTimeBasis:scores.halfTimeBasis || null,
           topScoreCandidates:scores.topScoreCandidates || [],
+          marketScenarioCandidates:scores.marketScenarioCandidates || [],
+          marketScenarioScore:scores.marketScenarioScore || null,
+          marketScenarioAlternativeScore:scores.marketScenarioAlternativeScore || null,
           scoreProbability:scores.scoreProbability ?? null,
           alternativeScoreProbability:scores.alternativeScoreProbability ?? null,
+          marketScenarioProbability:scores.marketScenarioProbability ?? null,
+          scoreProbabilityType:scores.scoreProbabilityType || "UNCONDITIONAL",
           scoreCondition:scores.scoreCondition || mainPick,
           scoreModelVersion:scores.modelVersion || "V5_1X2_PRIORITY_2D",
           scoreModelFitError:scores.modelFitError ?? null,
