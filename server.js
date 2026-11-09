@@ -810,6 +810,7 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   }
   if (!Number.isFinite(lambdaHome) || !Number.isFinite(lambdaAway)) return {
     halfTimeScore:"Tahmin üretilemedi", fullTimeScore:"Tahmin üretilemedi", alternativeFullTimeScore:"Tahmin üretilemedi",
+    sixPlusProbability:null, sixPlusCandidate:false,
     scoreBasis:"Maç önü gol oranı ve iki takım için yeterli son 5 maç verisi bulunamadı"
   };
   lambdaHome=Math.max(0.08,Math.min(4.5,lambdaHome)); lambdaAway=Math.max(0.08,Math.min(4.5,lambdaAway));
@@ -857,6 +858,10 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   scores.sort((a,b)=>b.probability-a.probability||(a.home+a.away)-(b.home+b.away)||b.home-a.home);
   const best=scores[0];
   const alternative=scores.find(x=>x.home!==best.home||x.away!==best.away);
+  // 6+ olasılığı, maç önü piyasa kalibrasyonundan geçmiş skor dağılımının toplamıdır.
+  // %20 yalnızca aday etiketi için kullanılır; kesin bahis/garanti anlamına gelmez.
+  const sixPlusProbability=scores.reduce((sum,x)=>sum+(x.home+x.away>=6?x.probability:0),0);
+  const sixPlusCandidate=sixPlusProbability>=0.20;
 
   const ht05=lambdaFromMarketProbability(pre["İY 0.5 ÜST"],1,0);
   const ht15=lambdaFromMarketProbability(pre["İY 1.5 ÜST"],2,0);
@@ -880,7 +885,9 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     scoreBasis:basis.join(" + ")||"Maç önü oranları ve erişilebilen takım formu",
     expectedGoals:{home:Number(lambdaHome.toFixed(2)),away:Number(lambdaAway.toFixed(2))},
     scoreProbability:Number(best.probability.toFixed(4)),
-    alternativeScoreProbability:Number(alternative.probability.toFixed(4))
+    alternativeScoreProbability:Number(alternative.probability.toFixed(4)),
+    sixPlusProbability:Number(sixPlusProbability.toFixed(4)),
+    sixPlusCandidate
   };
 }
 
@@ -2140,6 +2147,8 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       halfTimeScore: scores.halfTimeScore,
       fullTimeScore: scores.fullTimeScore,
       alternativeFullTimeScore: scores.alternativeFullTimeScore || "Alternatif skor hesaplanamadı",
+      sixPlusProbability: scores.sixPlusProbability == null ? null : Math.round(scores.sixPlusProbability * 100),
+      sixPlusCandidate: scores.sixPlusCandidate === true,
       scoreBasis: scores.scoreBasis || "Maç önü oranları ve erişilebilen son 5 maç formu",
       mainPick: chosen?.market || "Maç önü oranlarından doğrulanmış tercih bulunamadı",
       alternative: alternative?.market || "Doğrulanmış alternatif bulunamadı",
@@ -2836,6 +2845,8 @@ async function runDailyAnalysisJob(job) {
           fixtureId:match.id, matchDate:date, home:match.home, away:match.away, league:match.league,
           halfTimeScore:scores.halfTimeScore, fullTimeScore:scores.fullTimeScore,
           alternativeFullTimeScore:scores.alternativeFullTimeScore || null,
+          sixPlusProbability:scores.sixPlusProbability == null ? null : Math.round(scores.sixPlusProbability * 100),
+          sixPlusCandidate:scores.sixPlusCandidate === true,
           mainPick, alternative:altRow ? other : "Aralıkta doğrulanmış alternatif yok",
           selectionScore: supported && Number.isFinite(Number(supported.selectionScore)) ? Number(supported.selectionScore) : null,
           marketProbability: supported && Number.isFinite(Number(supported.marketProbability)) ? Number(supported.marketProbability) : null,
