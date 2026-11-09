@@ -1189,13 +1189,19 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     else if (total === 1) allowed = ["MS 2.5 ÜST", "KG VAR"];
     else allowed = ["MS 2.5 ÜST", "KG VAR"];
   } else if (minute >= 45 && minute < 60) {
-    // 45–59: 0-0 iken MS 0.5/1.5 aceleyle önerilmez; bir gol varsa sonraki çizgi canlı baskıyla değerlendirilir.
-    if (total === 0) allowed = [];
+    // 45–59: 0-0 ise genel MS 0.5 yerine, canlı verisi destekleyen takımın EV/DEP 0.5 pazarı seçilir.
+    if (total === 0) allowed = ["EV 0.5 ÜST", "DEP 0.5 ÜST"];
     else if (total === 1) allowed = ["KG VAR"];
     else if (total === 2) allowed = ["KG VAR", "MS 2.5 ÜST"];
     else allowed = ["MS 3.5 ÜST", "KG VAR"];
-  } else if (minute >= 60 && minute <= 70) {
-    // 60–70: 0-0 ise tek gol yeterli olduğundan MS 0.5; bir gol varsa MS 1.5.
+  } else if (minute >= 60 && minute <= 65) {
+    // 60–65: 0-0 iken takım bazlı 0.5 üst; 66. dakikadan sonra toplam gol çizgileri.
+    if (total === 0) allowed = ["EV 0.5 ÜST", "DEP 0.5 ÜST"];
+    else if (total === 1) allowed = ["MS 1.5 ÜST", "KG VAR"];
+    else if (total === 2) allowed = ["MS 2.5 ÜST", "KG VAR"];
+    else allowed = ["MS 3.5 ÜST"];
+  } else if (minute >= 66 && minute <= 70) {
+    // 66–70: 0-0 ise kalan süre ve toplam baskıya göre MS 0.5 değerlendirilebilir.
     if (total === 0) allowed = ["MS 0.5 ÜST"];
     else if (total === 1) allowed = ["MS 1.5 ÜST", "KG VAR"];
     else if (total === 2) allowed = ["MS 2.5 ÜST", "KG VAR"];
@@ -1277,6 +1283,20 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     let rejectReason = null;
     if (live) {
       if (!statsM.available) return null;
+
+      // 45–65. dakikada 0-0 ise takım bazlı gol pazarı ancak o takımın kendi canlı baskısı destekliyorsa seçilir.
+      if (total === 0 && minute >= 45 && minute <= 65 &&
+          (choice.market === "EV 0.5 ÜST" || choice.market === "DEP 0.5 ÜST")) {
+        const side = choice.market.startsWith("EV") ? (statsM.home || {}) : (statsM.away || {});
+        const sideShotsOnTarget = Number(side.shotsOnTarget || 0);
+        const sideShots = Number(side.totalShots || side.shots || 0);
+        const sideCorners = Number(side.corners || 0);
+        const sidePressure = sideShotsOnTarget * 2.5 + sideShots * 0.45 + sideCorners * 0.8;
+        if (Number(choice.odd || 0) < 1.50) return null;
+        if (sidePressure < 5.5 || (sideShotsOnTarget < 1 && sideShots < 5 && sideCorners < 3)) return null;
+        if (Number(choice.probability || 0) < 55 || Number(formPct || 0) < 54) return null;
+        liveBonus += Math.min(14, sidePressure * 0.55);
+      }
 
       // Canlı piyasa olasılığı seçim puanında kullanılır; maç önü oranı scorePrediction içinde referans olarak kalır.
 
