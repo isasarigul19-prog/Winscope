@@ -161,6 +161,16 @@ if (databasePool) {
         actual_score TEXT, outcome TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         settled_at TIMESTAMPTZ
       )`);
+      // Gol bildirimi takibi süreç yeniden başlasa da kaybolmasın.
+      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_goal_alert_tracking (
+        fixture_id BIGINT PRIMARY KEY,
+        home_team TEXT NOT NULL,
+        away_team TEXT NOT NULL,
+        league TEXT,
+        source_label TEXT,
+        last_score TEXT NOT NULL DEFAULT '0-0',
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`);
       // Backfill schema for databases created by older deployments. CREATE TABLE IF NOT EXISTS
       // does not add columns to an existing table, which previously broke weekly tracking.
       await databasePool.query(`ALTER TABLE winscope_live_predictions
@@ -196,13 +206,14 @@ if (databasePool) {
         END IF;
       END $$`);
       await databasePool.query(`CREATE UNIQUE INDEX IF NOT EXISTS winscope_live_predictions_fixture_market_uidx ON winscope_live_predictions(fixture_id, market)`);
-      const [analysisRows, couponRows, sentRows, predictionRows, livePredictionRows, dailyRunRows] = await Promise.all([
+      const [analysisRows, couponRows, sentRows, predictionRows, livePredictionRows, dailyRunRows, goalTrackingRows] = await Promise.all([
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'analysis' ORDER BY id DESC LIMIT 1000"),
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'coupon' ORDER BY id DESC LIMIT 50"),
         databasePool.query("SELECT fixture_id, coupon_type, market, match_date FROM winscope_telegram_delivery_sent"),
         databasePool.query("SELECT * FROM winscope_predictions ORDER BY created_at DESC LIMIT 500"),
         databasePool.query("SELECT * FROM winscope_live_predictions ORDER BY created_at DESC LIMIT 500"),
-        databasePool.query("SELECT match_date::text, status, result, error, started_at, finished_at FROM winscope_daily_analysis_runs ORDER BY match_date DESC LIMIT 30")
+        databasePool.query("SELECT match_date::text, status, result, error, started_at, finished_at FROM winscope_daily_analysis_runs ORDER BY match_date DESC LIMIT 30"),
+        databasePool.query("SELECT fixture_id,home_team,away_team,league,source_label,last_score FROM winscope_goal_alert_tracking")
       ]);
       archives.analyses = dedupeAnalysisArchiveRows(analysisRows.rows.map(row => row.payload)).slice(0,100);
       for (const row of dailyRunRows.rows) dailyAnalysisRunCache.set(String(row.match_date).slice(0,10), {
@@ -243,6 +254,16 @@ if (databasePool) {
         minute:row.minute, actualScore:row.actual_score, outcome:row.outcome,
         settled:Boolean(row.settled_at), createdAt:row.created_at
       })));
+      // Gol takibi kalıcı tablodan geri yüklenir; Render yeniden başlasa da skor değişimleri kaçmaz.
+      for (const row of goalTrackingRows.rows) {
+        const id = Number(row.fixture_id);
+        if (!id) continue;
+        const lastScore = String(row.last_score || "0-0");
+        goalTrackedFixtures.set(id, { home:row.home_team, away:row.away_team, league:row.league,
+          sourceLabel:row.source_label || "Canlı maç takibi", baselineScore:lastScore });
+        goalScoreCache.set(id, lastScore);
+      }
+      console.log(`[GOOOOL TRACKING RESTORE] active=${goalTrackedFixtures.size}`);
       // Daha önce Telegram'a gönderilmiş canlı maç/pazarları yeniden başlatmada da engelle.
       for (const row of livePredictionRows.rows) {
         if (row.fixture_id && row.market) autoSentFixtureKeys.add(`next-goal:${Number(row.fixture_id)}:${String(row.market)}`);
@@ -344,6 +365,19 @@ let autoPrematchTaskInFlight = false;
 const goalTrackedFixtures = new Map();
 const goalScoreCache = new Map();
 let goalScanInFlight = false;
+async function persistGoalTracking(fixtureId, tracked) {
+  if (!databasePool || !fixtureId || !tracked) return;
+  try {
+    await archiveDatabaseReady;
+    await databasePool.query(`INSERT INTO winscope_goal_alert_tracking
+      (fixture_id,home_team,away_team,league,source_label,last_score,updated_at)
+      VALUES($1,$2,$3,$4,$5,$6,NOW())
+      ON CONFLICT(fixture_id) DO UPDATE SET home_team=EXCLUDED.home_team,away_team=EXCLUDED.away_team,
+        league=EXCLUDED.league,source_label=EXCLUDED.source_label,last_score=EXCLUDED.last_score,updated_at=NOW()`,
+      [Number(fixtureId),String(tracked.home||"Takım 1"),String(tracked.away||"Takım 2"),
+       String(tracked.league||""),String(tracked.sourceLabel||"Canlı maç takibi"),String(tracked.baselineScore||"0-0")]);
+  } catch (error) { console.warn(`[GOOOOL TRACKING SAVE ERROR] fixture=${fixtureId}: ${error.message}`); }
+}
 // API-Football: tüm istekler tek, öncelikli ve hız kontrollü kuyruktan geçer.
 // ULTRA sınırı 450/dk olsa da uygulama güvenlik payıyla yaklaşık 50/dk hedefler.
 // Canlı fikstür/oran/istatistik istekleri, maç önü sayfalı oran taramasının önüne alınır.
@@ -1849,7 +1883,9 @@ async function sendCouponAutomatically(coupon, chosen) {
         const fixtureId = Number(p.fixtureId);
         if (!fixtureId) continue;
         const score = String(p.currentScore || "0-0");
-        goalTrackedFixtures.set(fixtureId, { home: p.home, away: p.away, league: p.league, sourceLabel, baselineScore: score });
+        const goalTrack = { home:p.home, away:p.away, league:p.league, sourceLabel, baselineScore:score };
+        goalTrackedFixtures.set(fixtureId, goalTrack);
+        await persistGoalTracking(fixtureId, goalTrack);
         // Kupon üretilirken bilinen skor başlangıç kabul edilir.
         if (!goalScoreCache.has(fixtureId)) goalScoreCache.set(fixtureId, score);
         if (coupon.type === "live") {
@@ -1900,7 +1936,9 @@ function isExcludedAnalysisCompetition(match) {
     .trim();
   const women = /\b(women|woman|ladies|feminine|femenino|feminin|womens|女子|女性)\b/i.test(text);
   const ageGroup = /\b(?:u\s*\d{1,2}|under\s*\d{1,2}|youth|junior|academy|juvenil|jeugd|sub\s*\d{1,2}|amateur youth)\b/i.test(text);
-  return women || ageGroup;
+  const reserveOrDevelopment = /\b(reserve|reserves|b team|team b|ii league|development|professional development|primavera|segunda equipo)\b/i.test(text);
+  const friendly = /\b(friendlies|friendly|club friendly|international friendly|men friendlies)\b/i.test(text);
+  return women || ageGroup || reserveOrDevelopment || friendly;
 }
 
 function automaticLeaguePriority(match) {
@@ -2647,29 +2685,26 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
           }
         }
 
-        if (telegram?.sent) {
-          autoSentFixtureKeys.add(key);
-          // Canlı tek tercih mesajı gönderilen maç, sonraki skor değişimleri için
-          // gol taramasına da alınır. Başlangıç skoru mesaj anındaki gerçek skordur.
-          const trackedScore = String(top.score || "0-0");
-          goalTrackedFixtures.set(Number(top.fixtureId), {
-            home: top.home, away: top.away, league: top.league,
-            sourceLabel: "Canlı en güvenilir tek tercih",
-            baselineScore: trackedScore
-          });
-          goalScoreCache.set(Number(top.fixtureId), trackedScore);
-          console.log(`[GOOOOL TRACKING ADDED] fixture=${top.fixtureId} score=${trackedScore}`);
-          if (databasePool) {
-            try {
-              await archiveDatabaseReady;
-              await databasePool.query(`INSERT INTO winscope_live_predictions
-                (fixture_id,home_team,away_team,market,signal_key,league,match_date,start_score,minute)
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
-                ON CONFLICT (fixture_id,market) DO NOTHING`,
-                [top.fixtureId,top.home,top.away,top.mainPick,key,top.league,turkeyDateString(),top.score,top.minute]);
-            } catch (dbError) {
-              console.error(`[LIVE TRACKING SAVE ERROR] ${dbError.message}`);
-            }
+        if (telegram?.sent) autoSentFixtureKeys.add(key);
+        // Tercih üretilen maç gol takibine alınır; Telegram geçici hata verse bile
+        // skor değişimi izlenir. Başlangıç skoru son doğrulamadaki gerçek skordur.
+        const trackedScore = String(top.score || "0-0");
+        const goalTrack = { home:top.home, away:top.away, league:top.league,
+          sourceLabel:"Canlı en güvenilir tek tercih", baselineScore:trackedScore };
+        goalTrackedFixtures.set(Number(top.fixtureId), goalTrack);
+        goalScoreCache.set(Number(top.fixtureId), trackedScore);
+        await persistGoalTracking(Number(top.fixtureId), goalTrack);
+        console.log(`[GOOOOL TRACKING ADDED] fixture=${top.fixtureId} score=${trackedScore} telegramSent=${Boolean(telegram?.sent)}`);
+        if (databasePool) {
+          try {
+            await archiveDatabaseReady;
+            await databasePool.query(`INSERT INTO winscope_live_predictions
+              (fixture_id,home_team,away_team,market,signal_key,league,match_date,start_score,minute)
+              VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+              ON CONFLICT (fixture_id,market) DO NOTHING`,
+              [top.fixtureId,top.home,top.away,top.mainPick,key,top.league,turkeyDateString(),top.score,top.minute]);
+          } catch (dbError) {
+            console.error(`[LIVE TRACKING SAVE ERROR] ${dbError.message}`);
           }
         }
         // Bir aday taze kontrolden geçtiyse ve Telegram denemesi yapıldıysa
@@ -2886,18 +2921,10 @@ const DAILY_MAJOR_LEAGUE_IDS = new Set([
 const DAILY_MAJOR_LEAGUE_NAMES = new Set([
   "premier league", "championship", "la liga", "bundesliga", "serie a", "ligue 1",
   "super lig", "süper lig", "eredivisie", "primeira liga", "jupiler pro league",
-  "pro league", "scottish premiership", "super league", "bundesliga austria",
-  "superliga", "super league 1", "ekstraklasa", "liga profesional argentina",
-  "brasileirão série a", "serie a", "major league soccer", "mls", "saudi pro league",
+  "scottish premiership", "bundesliga austria", "ekstraklasa", "liga profesional argentina",
+  "brasileirão série a", "major league soccer", "mls", "saudi pro league",
   "j1 league", "k league 1", "liga mx", "uefa champions league", "uefa europa league",
-  "uefa conference league",
-  "uefa nations league", "nations league",
-  "fifa world cup qualification", "world cup qualification", "world cup qualifiers",
-  "africa cup of nations qualification", "africa cup of nations qualifiers", "afcon qualifiers",
-  "concacaf nations league", "concacaf gold cup",
-  "afc asian cup qualification", "asian cup qualifiers",
-  "international friendlies", "international friendly", "friendlies",
-  "men friendlies", "world friendlies"
+  "uefa conference league"
 ]);
 function isDailyMajorLeague(match) {
   if (!match || isExcludedAnalysisCompetition(match)) return false;
@@ -3521,6 +3548,7 @@ setInterval(async () => {
           if (sent.sent) {
             goalScoreCache.set(fixtureId, score);
             tracked.baselineScore = score;
+            await persistGoalTracking(fixtureId, tracked);
             console.log(`[GOOOOL Alert OK] ${fixtureId} ${previous} -> ${score}`);
           } else {
             console.error(`[GOOOOL Alert NOT SENT] ${fixtureId}: ${sent.reason || "Telegram gönderimi başarısız"}`);
@@ -3533,6 +3561,7 @@ setInterval(async () => {
       if (["FT", "AET", "PEN", "CANC", "ABD", "AWD", "WO"].includes(String(match.periodStatus || match.status || "").toUpperCase())) {
         goalTrackedFixtures.delete(fixtureId);
         goalScoreCache.delete(fixtureId);
+        if (databasePool) await databasePool.query("DELETE FROM winscope_goal_alert_tracking WHERE fixture_id=$1",[fixtureId]).catch(e=>console.warn(`[GOOOOL TRACKING DELETE] ${fixtureId}: ${e.message}`));
         console.log(`[GOOOOL TRACKING CLOSED] fixture=${fixtureId} finalScore=${score}`);
       }
     }
