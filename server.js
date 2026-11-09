@@ -1665,14 +1665,17 @@ async function sendCouponAutomatically(coupon, chosen) {
 
 
 function isExcludedAnalysisCompetition(match) {
-  // Exclude youth, age-group, reserve and B-team competitions; keep senior national teams.
-  const text = `${match.league || ""} ${match.country || ""}`
+  // Kullanıcının kapsamı: yalnızca kadın organizasyonları ve yaş grubu/U takımları hariç.
+  // B takımları, rezerv olmayan diğer erkek senior takımlar ve milli takımlar dahildir.
+  const text = `${match.league || ""} ${match.country || ""} ${match.home || ""} ${match.away || ""}`
     .toLocaleLowerCase("en")
     .replace(/[’']/g, " ")
     .replace(/[._-]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  return /\b(?:u\s*(?:17|18|19|20|21|23)|under\s*(?:17|18|19|20|21|23)|youth|junior|academy|reserve|reserves|b team)\b/i.test(text);
+  const women = /\b(women|woman|ladies|feminine|femenino|feminin|womens|女子|女性)\b/i.test(text);
+  const ageGroup = /\b(?:u\s*\d{1,2}|under\s*\d{1,2}|youth|junior|academy|juvenil|jeugd|sub\s*\d{1,2}|amateur youth)\b/i.test(text);
+  return women || ageGroup;
 }
 
 function automaticLeaguePriority(match) {
@@ -2662,18 +2665,15 @@ const DAILY_MAJOR_LEAGUE_NAMES = new Set([
   "men friendlies", "world friendlies"
 ]);
 function isDailyMajorLeague(match) {
-  if (isExcludedAnalysisCompetition(match)) return false;
-  const name = String(match.league || "").trim().toLocaleLowerCase("tr-TR");
-  const normalized = name.replace(/[^a-z0-9 ]/g, " ").replace(/\\s+/g, " ").trim();
-  const seniorInternational =
-    /\\b(uefa )?nations league\\b/.test(normalized) ||
-    /\\b(world cup|fifa world cup).*(qualif|qualifier)/.test(normalized) ||
-    /\\b(africa cup of nations|afcon).*(qualif|qualifier)/.test(normalized) ||
-    /\\b(concacaf nations league|concacaf gold cup|afc asian cup).*(qualif|qualifier)?/.test(normalized) ||
-    /\\b(international friendlies|international friendly|men friendlies|world friendlies)\\b/.test(normalized);
-  if (seniorInternational) return true;
-  if (DAILY_MAJOR_LEAGUE_IDS.has(Number(match.leagueId))) return true;
-  return DAILY_MAJOR_LEAGUE_NAMES.has(name);
+  // Büyük lig öncelik etiketi artık eleme filtresi değildir.
+  return !isExcludedAnalysisCompetition(match);
+}
+function dailyAnalysisLeaguePriority(match) {
+  const name=String(match.league||"").toLocaleLowerCase("en");
+  const id=Number(match.leagueId);
+  if (DAILY_MAJOR_LEAGUE_IDS.has(id) || DAILY_MAJOR_LEAGUE_NAMES.has(name)) return 1;
+  if (/\\b(nations league|world cup|africa cup|asian cup|gold cup|international friendly|friendlies|qualif)/i.test(name)) return 2;
+  return 3;
 }
 const DAILY_MARKET_ODDS_MIN = 1.50;
 const DAILY_MARKET_ODDS_MAX = 1.73;
@@ -2753,8 +2753,15 @@ async function runDailyAnalysisJob(job) {
     await persistDailyAnalysisRun(job);
     const payload = await cachedProviderRequest(`fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 60000);
     const scheduledFixtures = (payload.response || []).map(normalizeProviderMatch).filter(m => String(m.status || "").toUpperCase() === "NS");
-    const fixtures = scheduledFixtures.filter(isDailyMajorLeague);
+    const fixtures = scheduledFixtures.filter(isDailyMajorLeague)
+      .sort((a,b) => dailyAnalysisLeaguePriority(a)-dailyAnalysisLeaguePriority(b));
     const leagueCounts = {};
+    const priorityCounts = { major:0, international:0, other:0 };
+    for (const m of fixtures) {
+      const p=dailyAnalysisLeaguePriority(m);
+      priorityCounts[p===1?"major":p===2?"international":"other"]++;
+    }
+    job.priorityCounts=priorityCounts;
     for (const m of scheduledFixtures) leagueCounts[m.league] = (leagueCounts[m.league] || 0) + 1;
     job.fixtureFeedCount = (payload.response || []).length;
     job.scheduledCount = scheduledFixtures.length;
