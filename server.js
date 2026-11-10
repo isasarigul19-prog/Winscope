@@ -640,6 +640,8 @@ function oddsForFixture(oddsRow, { includeFirstHalfBtts = false } = {}) {
     if (pct == null || !Number.isFinite(pct)) continue;
     const ranks = { "EV 1.5 ÜST": 1, "DEP 1.5 ÜST": 1, "İY 0.5 ÜST": 2, "MS 0.5 ÜST": 2, "İY 1.5 ÜST": 3, "MS 1.5 ÜST": 3, "MS 2.5 ÜST": 4, "KG VAR": 5, "MS 3.5 ÜST": 6, "MS 5.5 ÜST": 8 };
     candidates.push({ market: item.market, odd, probability: pct, rank: ranks[item.market] ?? 9, bookmaker: item.bookmaker,
+      // Ham maç önü fiyatlarını sonuç analizi için sakla; arayüz bunları göstermiyor.
+      overOdd: item.over, underOdd: item.under, yesOdd: item.yes, noOdd: item.no,
       homeOdd: item.market === "MS 1" ? item.home : null, drawOdd: item.market === "MS 1" ? item.draw : null,
       awayOdd: item.market === "MS 1" ? item.away : null, outcomeProbabilities });
   }
@@ -2565,6 +2567,14 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       livePick: "Canlı analiz kapalı — maç önü analizi",
       livePickBasis: "Canlı oran ve canlı istatistik kullanılmıyor.",
       marketPercentages: percentages,
+      // Sayısal maç önü piyasa fiyatları arşiv/onay kaydı için API cevabında tutulur;
+      // istemci bunları ekrana basmaz.
+      rawPrematchMarkets: oddsForFixture(prematchRow).map(x => ({
+        market:x.market, bookmaker:x.bookmaker, probability:Number(x.probability),
+        overOdd:x.overOdd ?? null, underOdd:x.underOdd ?? null,
+        yesOdd:x.yesOdd ?? null, noOdd:x.noOdd ?? null,
+        homeOdd:x.homeOdd ?? null, drawOdd:x.drawOdd ?? null, awayOdd:x.awayOdd ?? null
+      })),
       markets: {
         ht1x2: marketAvailable("İY 1X2"),
         ft1x2: marketAvailable("MS 1X2"),
@@ -3304,6 +3314,15 @@ async function runDailyAnalysisJob(job) {
           oddsBookmaker:scores.oddsBookmaker || supported?.bookmaker || null,
           market1x2:scores.market1x2 || null,
           rawOdds1x2:scores.rawOdds1x2 || null,
+          // Arşivde yalnızca kullanılan pazar isimleri değil, gerçek Bet365/fallback
+          // maç önü fiyatları ve karşı fiyatlar da saklanır. Canlı oran eklenmez.
+          rawPrematchMarkets:oddsForFixture(oddsRow).map(x => ({
+            market:x.market, bookmaker:x.bookmaker, probability:Number(x.probability),
+            overOdd:x.overOdd ?? null, underOdd:x.underOdd ?? null,
+            yesOdd:x.yesOdd ?? null, noOdd:x.noOdd ?? null,
+            homeOdd:x.homeOdd ?? null, drawOdd:x.drawOdd ?? null, awayOdd:x.awayOdd ?? null
+          })),
+          rawPrematchOddsCapturedAt:new Date().toISOString(),
           scoreMarketsUsed:scores.marketTargetsUsed || [],
           selectionBasis:"KG VAR / MS 2.5 ÜST 1.50–1.73 ve dengeli rakip oranları",
           created_at:new Date().toISOString()
