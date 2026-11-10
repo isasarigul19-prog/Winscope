@@ -3430,34 +3430,86 @@ async function ensureScore6TrackingForDate(date) {
   return {inserted,scanned};
 }
 async function settleScore6Tracking(date) {
-  if(!databasePool) return {settled:0,checked:0};
-  const pending=await databasePool.query(`SELECT fixture_id FROM winscope_score6_predictions
-    WHERE settled=FALSE AND match_date=$1 ORDER BY fixture_id LIMIT 300`,[date]);
-  let settled=0,checked=0;
-  for(const item of pending.rows){
-    const fixtureId=Number(item.fixture_id);
-    try{
-      const payload=await cachedProviderRequest(`score6-settle:${fixtureId}`,`/fixtures?id=${fixtureId}`,5*60*1000);
-      const row=payload.response?.[0]; checked++;
-      const status=String(row?.fixture?.status?.short||'').toUpperCase();
-      if(!row||!['FT','AET','PEN'].includes(status)||row.goals?.home==null||row.goals?.away==null) continue;
-      const fh=Number(row.goals.home), fa=Number(row.goals.away);
-      const hth=row.score?.halftime?.home==null?null:Number(row.score.halftime.home);
-      const hta=row.score?.halftime?.away==null?null:Number(row.score.halftime.away);
-      const actualFT=`${fh}-${fa}`, actualHT=hth==null||hta==null?null:`${hth}-${hta}`;
-      const actualHTFT=actualHT?`${score6ResultCode(actualHT)}/${score6ResultCode(actualFT)}`:null;
-      const updated=await databasePool.query(`UPDATE winscope_score6_predictions SET
-        actual_ht=$2,actual_ft=$3,actual_htft=$4,
-        exact_ht=CASE WHEN $2 IS NULL THEN NULL ELSE predicted_ht=$2 END,
-        exact_ft=(predicted_ft=$3),
-        exact_alternative_ft=CASE WHEN alternative_ft IS NULL THEN NULL ELSE alternative_ft=$3 END,
-        six_plus_won=CASE WHEN six_plus_candidate THEN ($5>=6) ELSE NULL END,
-        settled=TRUE,settled_at=NOW() WHERE fixture_id=$1 AND settled=FALSE`,
-        [fixtureId,actualHT,actualFT,actualHTFT,fh+fa]);
-      settled+=updated.rowCount||0;
-    }catch(e){console.warn(`[Score6 tracking] fixture=${fixtureId}: ${e.message}`);}
+  if (!databasePool) return { settled: 0, checked: 0, batchFixtures: 0, errors: [] };
+
+  const pending = await databasePool.query(
+    `SELECT fixture_id FROM winscope_score6_predictions
+     WHERE settled=FALSE AND match_date=$1 ORDER BY fixture_id LIMIT 300`,
+    [date]
+  );
+  if (!pending.rows.length) return { settled: 0, checked: 0, batchFixtures: 0, errors: [] };
+
+  let settled = 0, checked = 0, batchFixtures = 0;
+  const errors = [];
+  const pendingIds = new Set(pending.rows.map(x => Number(x.fixture_id)));
+  const rowsById = new Map();
+
+  // Önce seçilen günün bütün fikstürlerini tek istekte al; 50+ ayrı API çağrısını önle.
+  try {
+    const batch = await cachedProviderRequest(
+      `score6-settle-date:${date}:${Math.floor(Date.now()/60000)}`,
+      `/fixtures?date=${encodeURIComponent(date)}&timezone=Europe/Istanbul`,
+      0
+    );
+    for (const row of (batch.response || [])) {
+      const id = Number(row.fixture?.id);
+      if (pendingIds.has(id)) rowsById.set(id, row);
+    }
+    batchFixtures = rowsById.size;
+  } catch (e) {
+    errors.push(`Günlük fikstür sorgusu: ${e.message}`);
+    console.warn(`[Score6 tracking] date=${date} batch lookup: ${e.message}`);
   }
-  return {settled,checked};
+
+  for (const fixtureId of pendingIds) {
+    try {
+      let row = rowsById.get(fixtureId);
+
+      // Günlük listede olmayan fikstür için ID bazlı yedek sorgu.
+      if (!row) {
+        const payload = await cachedProviderRequest(
+          `score6-settle-fixture:${fixtureId}:${Math.floor(Date.now()/60000)}`,
+          `/fixtures?id=${encodeURIComponent(fixtureId)}`,
+          0
+        );
+        row = (payload.response || []).find(x => Number(x.fixture?.id) === fixtureId) || null;
+      }
+
+      checked++;
+      const status = String(row?.fixture?.status?.short || '').toUpperCase();
+      if (!row || !['FT', 'AET', 'PEN', 'AWD', 'WO'].includes(status) ||
+          row.goals?.home == null || row.goals?.away == null) continue;
+
+      const fh = Number(row.goals.home), fa = Number(row.goals.away);
+      if (!Number.isFinite(fh) || !Number.isFinite(fa)) continue;
+
+      const hth = row.score?.halftime?.home == null ? null : Number(row.score.halftime.home);
+      const hta = row.score?.halftime?.away == null ? null : Number(row.score.halftime.away);
+      const hasHT = Number.isFinite(hth) && Number.isFinite(hta);
+      const actualFT = `${fh}-${fa}`;
+      const actualHT = hasHT ? `${hth}-${hta}` : null;
+      const actualHTFT = actualHT ? `${score6ResultCode(actualHT)}/${score6ResultCode(actualFT)}` : null;
+
+      const updated = await databasePool.query(
+        `UPDATE winscope_score6_predictions SET
+          actual_ht=$2, actual_ft=$3, actual_htft=$4,
+          exact_ht=CASE WHEN $2 IS NULL THEN NULL ELSE predicted_ht=$2 END,
+          exact_ft=(predicted_ft=$3),
+          exact_alternative_ft=CASE WHEN alternative_ft IS NULL THEN NULL ELSE alternative_ft=$3 END,
+          six_plus_won=CASE WHEN six_plus_candidate THEN ($5>=6) ELSE NULL END,
+          settled=TRUE, settled_at=NOW()
+         WHERE fixture_id=$1 AND settled=FALSE`,
+        [fixtureId, actualHT, actualFT, actualHTFT, fh + fa]
+      );
+      settled += updated.rowCount || 0;
+    } catch (e) {
+      const message = `fixture=${fixtureId}: ${e.message}`;
+      errors.push(message);
+      console.warn(`[Score6 tracking] ${message}`);
+    }
+  }
+
+  return { settled, checked, batchFixtures, errors };
 }
 app.get("/api/score-six/tracking", async (req,res)=>{
   await archiveDatabaseReady;
