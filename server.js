@@ -239,7 +239,7 @@ if (databasePool) {
         databasePool.query("SELECT match_date::text, status, result, error, started_at, finished_at FROM winscope_daily_analysis_runs ORDER BY match_date DESC LIMIT 30"),
         databasePool.query("SELECT fixture_id,home_team,away_team,league,source_label,last_score FROM winscope_goal_alert_tracking")
       ]);
-      archives.analyses = dedupeAnalysisArchiveRows(analysisRows.rows.map(row => row.payload)).slice(0,100);
+      archives.analyses = dedupeAnalysisArchiveRows(analysisRows.rows.map(row => row.payload)).slice(0,1000);
       for (const row of dailyRunRows.rows) dailyAnalysisRunCache.set(String(row.match_date).slice(0,10), {
         date:String(row.match_date).slice(0,10), status:row.status, result:row.result || null,
         error:row.error || null, startedAt:row.started_at, finishedAt:row.finished_at
@@ -340,7 +340,7 @@ async function saveArchiveItem(category, payload) {
     await databasePool.query("INSERT INTO winscope_archive(category, payload) VALUES ($1, $2::jsonb)", [category, JSON.stringify(payload)]);
     await databasePool.query(`DELETE FROM winscope_archive WHERE id IN (
       SELECT id FROM winscope_archive WHERE category = $1 ORDER BY id DESC OFFSET $2
-    )`, [category, category === "analysis" ? 100 : 50]);
+    )`, [category, category === "analysis" ? 1000 : 50]);
     return { persisted: true };
   } catch (error) {
     console.error(`[Archive] Kayıt kalıcılaştırılamadı (${category}): ${error.message}`);
@@ -2927,7 +2927,7 @@ app.post("/api/analyses/approve", async (req, res) => {
     analysis: body.analysis || {}, created_at: new Date().toISOString()
   };
   archives.analyses.unshift(approved);
-  archives.analyses = archives.analyses.slice(0, 100);
+  archives.analyses = archives.analyses.slice(0, 1000);
   const storage = await saveArchiveItem("analysis", approved);
   const parseScore = value => {
     const match = String(value || "").match(/(\d+)\s*[-:]\s*(\d+)/);
@@ -3352,7 +3352,7 @@ async function runDailyAnalysisJob(job) {
             const id = Number(x.fixture_id ?? x.fixtureId ?? x.analysis?.fixtureId ?? 0);
             return !(d === date && id === Number(match.id));
           })
-        ]).slice(0,100);
+        ]).slice(0,1000);
         await saveArchiveItem("analysis", archiveRow);
         job.selected = selected.length;
       } catch (err) { console.warn(`[Daily analysis] fixture=${match.id}: ${err.message}`); rejected.noSupportedPick++; }
@@ -3561,7 +3561,7 @@ app.get("/api/score-six/diagnostics", async (req,res)=>{
 });
 app.get("/api/archives", async (_req, res) => {
   await archiveDatabaseReady;
-  const analyses = dedupeAnalysisArchiveRows(archives.analyses || []).slice(0,100);
+  const analyses = dedupeAnalysisArchiveRows(archives.analyses || []).slice(0,1000);
   res.json({ analyses, coupons: archives.coupons, persistentStorage: Boolean(databasePool) });
 });
 
