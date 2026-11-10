@@ -2680,6 +2680,7 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
         // Aynı taramada alınan canlı istatistik anlık görüntüsü; son kontrolde API
         // geçici olarak boş dönerse yalnızca bu tarama için yedek olarak kullanılır.
         statsSnapshot: statsRows,
+        oddsSnapshot: oddsRow,
         marketCoverage: analysis.marketEvaluations.map(x => x.market),
         bestRejectedMarket: analysis.marketEvaluations[0] ? { market: analysis.marketEvaluations[0].market, edge: Number((analysis.marketEvaluations[0].edge * 100).toFixed(1)), ev: Number((analysis.marketEvaluations[0].ev * 100).toFixed(1)) } : null,
         teamForm: analysis.teamForm,
@@ -2756,10 +2757,25 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
           }
         }
 
-        if (!freshOdds || !oddsForFixture(freshOdds).length) {
-          freshSkipped++;
-          console.log(`[AUTO LIVE SKIP] fixture=${fixtureId}: son kontrolde kullanılabilir canlı oran yok; sıradaki adaya geçiliyor.`);
-          continue;
+        // API-Football tekli canlı oran isteği bazen boş dönerken aynı taramada
+        // alınmış toplu canlı oran satırı dolu olabiliyor. Yalnızca maçın
+        // dakikası ve skoru DEĞİŞMEMİŞSE o anlık satırı tekrar kullan.
+        // Skor/dakika değişmişse eski oranla bildirim göndermek güvenli değil.
+        let oddsSource = "fresh";
+        if (!freshOdds || !oddsForFixture(freshOdds, { includeFirstHalfBtts: true }).length) {
+          const sameMoment = Number(freshFixture.minute) === Number(candidate.minute) &&
+            `${freshFixture.homeScore}-${freshFixture.awayScore}` === String(candidate.score);
+          if (sameMoment && candidate.oddsSnapshot &&
+              oddsForFixture(candidate.oddsSnapshot, { includeFirstHalfBtts: true }).length) {
+            freshOdds = candidate.oddsSnapshot;
+            oddsSource = "same-scan-snapshot";
+          } else {
+            freshSkipped++;
+            console.log(`[AUTO LIVE SKIP] fixture=${fixtureId}: son kontrolde canlı oran yok; ` +
+              `sameMoment=${sameMoment} oldMinute=${candidate.minute} newMinute=${freshFixture.minute} ` +
+              `oldScore=${candidate.score} newScore=${freshFixture.homeScore}-${freshFixture.awayScore}; sıradaki adaya geçiliyor.`);
+            continue;
+          }
         }
 
         const freshStatsRows = Array.isArray(freshStatsPayload.response) && freshStatsPayload.response.length
@@ -2776,7 +2792,7 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
           console.log(`[AUTO LIVE SKIP] fixture=${fixtureId}: taze kontrolde değer şartı kalmadı; ` +
             `oldMarket=${candidate.mainPick || "none"} oldMinute=${candidate.minute} oldScore=${candidate.score} ` +
             `newMinute=${freshFixture.minute} newScore=${freshFixture.homeScore}-${freshFixture.awayScore} ` +
-            `statsSource=${statsSource} markets=${(freshAnalysis.marketEvaluations || []).length} ` +
+            `statsSource=${statsSource} oddsSource=${oddsSource} markets=${(freshAnalysis.marketEvaluations || []).length} ` +
             `rejected=${JSON.stringify(freshAnalysis.reasonCounts || {})} ` +
             `best=${bestEval ? `${bestEval.market}|book=${bestEval.bookmaker}|odd=${bestEval.odd}|edge=${(bestEval.edge*100).toFixed(2)}%|ev=${(bestEval.ev*100).toFixed(2)}%` : "none"}; sıradaki adaya geçiliyor.`);
           continue;
