@@ -3601,15 +3601,38 @@ async function runEarlyFirstHalfPick() {
       cachedProviderRequest('early-ht-live-fixtures', '/fixtures?live=all', 15000)
         .catch(e => { console.warn(`[EARLY HT LIVE FIXTURES] ${e.message}`); return { response: [] }; })
     ]);
-    const upcoming = (dayPayload.response || []).map(normalizeProviderMatch).filter(f => {
-      if (!f.id || f.status !== 'NS' || isExcludedAnalysisCompetition(f)) return false;
+    // T-5 yalnızca gerçekten başlamamış, skoru 0-0 ve başlama saatine
+    // en fazla 5 dakika kalmış fikstürler içindir. Sağlayıcıdan gelen
+    // çelişkili/stale satırlar (NS görünse bile skor doluysa) kesin elenir.
+    const dayRows = (dayPayload.response || []).map(normalizeProviderMatch);
+    const upcoming = dayRows.filter(f => {
+      if (!f.id || f.periodStatus !== 'NS' || f.status !== 'NS' || isExcludedAnalysisCompetition(f)) return false;
+      const hs = Number(f.homeScore), as = Number(f.awayScore);
+      if (!Number.isFinite(hs) || !Number.isFinite(as) || hs !== 0 || as !== 0) {
+        console.warn(`[EARLY HT REJECT] fixture=${f.id} window=T-5 reason=not_0_0 score=${f.homeScore}-${f.awayScore} status=${f.periodStatus}`);
+        return false;
+      }
       const kickoff = Date.parse(f.fixtureDate || '');
       return Number.isFinite(kickoff) && kickoff >= now && kickoff - now <= 5 * 60 * 1000;
     }).map(f => ({ ...f, earlyWindow: 'T-5' }));
-    const firstMinute = (livePayload.response || []).map(normalizeProviderMatch).filter(f =>
-      f.id && f.status === 'LIVE' && Number(f.minute || 0) <= 1 && isFreshLiveFixture(f) && !isExcludedAnalysisCompetition(f)
-    ).map(f => ({ ...f, earlyWindow: '1M' }));
+
+    // 1. dakika bildirimi yalnızca API'nin gerçek 1H durumunda ve 0-1
+    // dakika aralığında olabilir. LIVE normalizasyonu tek başına yeterli
+    // değildir; 2H/HT/ET/FT/PEN veya stale maçlar asla kabul edilmez.
+    const liveRows = (livePayload.response || []).map(normalizeProviderMatch);
+    const firstMinute = liveRows.filter(f => {
+      if (!f.id || f.status !== 'LIVE' || f.periodStatus !== '1H' || isExcludedAnalysisCompetition(f)) return false;
+      const minute = Number(f.minute);
+      if (!Number.isFinite(minute) || minute < 0 || minute > 1 || !isFreshLiveFixture(f)) return false;
+      const hs = Number(f.homeScore), as = Number(f.awayScore);
+      if (!Number.isFinite(hs) || !Number.isFinite(as) || hs < 0 || as < 0 || hs + as >= 2) {
+        console.warn(`[EARLY HT REJECT] fixture=${f.id} window=1M reason=first_half_market_already_settled_or_invalid score=${f.homeScore}-${f.awayScore}`);
+        return false;
+      }
+      return true;
+    }).map(f => ({ ...f, earlyWindow: '1M' }));
     const fixtures = [...new Map([...upcoming, ...firstMinute].map(f => [f.id, f])).values()];
+    console.log(`[EARLY HT FIXTURE GUARD] dayRows=${dayRows.length} t5=${upcoming.length} liveRows=${liveRows.length} firstMinute=${firstMinute.length} rejectedStaleOrWrongPeriod=${Math.max(0, liveRows.length-firstMinute.length)}`);
     let sent = 0;
     for (const fixture of fixtures) {
       try {
@@ -3647,10 +3670,15 @@ async function runEarlyFirstHalfPick() {
           if (score < floor) return null;
           return { market, score, form10, form5, marketScore, odd: selected.odd, bookmaker: selected.bookmaker, sample10, sample5 };
         };
-        const candidates = [
-          evaluate('İY 0.5 ÜST', 'htOver05Pct', 'htOver05Pct', 60),
-          evaluate('İY 1.5 ÜST', 'htOver15Pct', 'htOver15Pct', 46)
-        ].filter(Boolean).sort((a,b) => b.score - a.score);
+        // Devam eden ilk yarıda skorla gerçekleşmiş pazar tekrar önerilmez:
+        // en az 1 gol varsa İY 0.5, en az 2 gol varsa İY 1.5 settled'dır.
+        const currentFirstHalfGoals = Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0);
+        const firstHalfMarkets = [];
+        if (currentFirstHalfGoals < 1) firstHalfMarkets.push(evaluate('İY 0.5 ÜST', 'htOver05Pct', 'htOver05Pct', 60));
+        else console.log(`[EARLY HT MARKET SETTLED] fixture=${fixture.id} market=İY 0.5 ÜST score=${fixture.homeScore}-${fixture.awayScore}`);
+        if (currentFirstHalfGoals < 2) firstHalfMarkets.push(evaluate('İY 1.5 ÜST', 'htOver15Pct', 'htOver15Pct', 46));
+        else console.log(`[EARLY HT MARKET SETTLED] fixture=${fixture.id} market=İY 1.5 ÜST score=${fixture.homeScore}-${fixture.awayScore}`);
+        const candidates = firstHalfMarkets.filter(Boolean).sort((a,b) => b.score - a.score);
         if (!candidates.length) {
           console.log(`[EARLY HT NO PICK] fixture=${fixture.id} window=${fixture.earlyWindow} reason=threshold_or_market_data`);
           continue;
@@ -3691,7 +3719,7 @@ async function runEarlyFirstHalfPick() {
               );
             } catch (e) { console.warn(`[EARLY HT DEDUPE DB] fixture=${fixture.id}: ${e.message}`); }
           }
-          console.log(`[EARLY HT SENT] fixture=${fixture.id} window=${fixture.earlyWindow} market=${chosen.market} score=${chosen.score.toFixed(1)} form10=${chosen.form10.toFixed(1)} form5=${chosen.form5.toFixed(1)} odds=${chosen.odd} bookmaker=${chosen.bookmaker}`);
+          console.log(`[EARLY HT SENT] fixture=${fixture.id} window=${fixture.earlyWindow} status=${fixture.periodStatus} minute=${fixture.minute} score=${fixture.homeScore}-${fixture.awayScore} market=${chosen.market} score=${chosen.score.toFixed(1)} form10=${chosen.form10.toFixed(1)} form5=${chosen.form5.toFixed(1)} odds=${chosen.odd} bookmaker=${chosen.bookmaker}`);
         }
       } catch (e) { console.warn(`[EARLY HT ERROR] fixture=${fixture.id}: ${e.message}`); }
     }
