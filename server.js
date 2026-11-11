@@ -1286,13 +1286,14 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   if(Number.isFinite(ht05)||Number.isFinite(ht15)||Number.isFinite(formHtLambda)) basis.push(halfTimeBasis);
   return {
     halfTimeScore:`${htScores[0].home}-${htScores[0].away} (tahmin)`,
-    // Günün Analizi ana MS tahmini seçilen pazarla çelişmemeli.
-    // Genel (koşulsuz) en olası skor ayrıca saklanır; tercih senaryosu ayrı raporlanır.
-    fullTimeScore:`${(preferredMarket ? marketScenarioBest : best).home}-${(preferredMarket ? marketScenarioBest : best).away} (tahmin)`,
-    alternativeFullTimeScore:`${(preferredMarket ? marketScenarioAlternative : alternative).home}-${(preferredMarket ? marketScenarioAlternative : alternative).away} (alternatif tahmin)`,
+    // Kesin skor tahmini, seçilen bahis pazarına göre koşullandırılmaz.
+    // Aksi halde KG VAR seçildiğinde 1-1 gibi skorlar yapay biçimde öne çıkar.
+    // Pazar gerçekleşirse en olası skorlar aşağıdaki marketScenario alanlarında ayrı tutulur.
+    fullTimeScore:`${best.home}-${best.away} (tahmin)`,
+    alternativeFullTimeScore:`${alternative.home}-${alternative.away} (alternatif tahmin)`,
     unconditionalFullTimeScore:`${best.home}-${best.away}`,
     unconditionalAlternativeFullTimeScore:`${alternative.home}-${alternative.away}`,
-    predictedScoreProbability:Number((preferredMarket ? marketScenarioBest.probability : best.probability).toFixed(4)),
+    predictedScoreProbability:Number(best.probability.toFixed(4)),
     sixPlusProbability:Number(sixPlusProbability.toFixed(4)),
     sixPlusCandidate,
     marketScenarioScore:`${marketScenarioBest.home}-${marketScenarioBest.away} (tercih senaryosu)`,
@@ -1315,7 +1316,7 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     scoreCondition:preferredMarket || "UNCONDITIONAL",
     scoreProbabilityType:preferredMarket ? "MARKET_CONDITIONAL_FOR_PREDICTED_SCORE" : "UNCONDITIONAL",
     unconditionalScoreProbability:Number(best.probability.toFixed(4)),
-    modelVersion:"V6_DC_HT_TEAM_SPLIT_EXPERIMENTAL",
+    modelVersion:"V7_UNCONDITIONAL_SCORE_MARKET_SCENARIO_SPLIT",
     scoreModelMethod:"DIXON_COLES_LOW_SCORE_CORRECTION",
     dixonColesRho:Number(dcRho(lambdaHome,lambdaAway).toFixed(4)),
     htTeamFormUsed:Boolean(htTeamFormAvailable),
@@ -3763,127 +3764,45 @@ app.get("/api/archive/odds", async (req, res) => {
 });
 
 app.get("/api/archive/export", async (_req, res) => {
-  if (!databasePool) {
-    return res.status(503).json({ error: "PostgreSQL bağlantısı yok; arşiv dışa aktarılamıyor." });
-  }
-
-  // Büyük arşivi tek sorguda belleğe almak yerine sabit boyutlu sayfalarla aktar.
-  const BATCH_SIZE = 250;
-  let responseStarted = false;
-  const writeChunk = async chunk => {
-    if (res.destroyed || res.writableEnded) throw new Error("İndirme bağlantısı kapandı.");
-    if (!res.write(chunk)) {
-      await new Promise((resolve, reject) => {
-        const cleanup = () => {
-          res.off("drain", onDrain);
-          res.off("close", onClose);
-        };
-        const onDrain = () => { cleanup(); resolve(); };
-        const onClose = () => { cleanup(); reject(new Error("İndirme bağlantısı kapandı.")); };
-        res.once("drain", onDrain);
-        res.once("close", onClose);
-      });
-    }
-  };
-
+  if (!databasePool) return res.status(503).json({ error: "PostgreSQL bağlantısı yok; arşiv dışa aktarılamıyor." });
   try {
     await archiveDatabaseReady;
-    const countQueries = await Promise.all([
-      databasePool.query("SELECT COUNT(*)::bigint AS total FROM winscope_fixture_archive"),
-      databasePool.query("SELECT COUNT(*)::bigint AS total FROM winscope_fixture_odds_archive"),
-      databasePool.query("SELECT COUNT(*)::bigint AS total FROM winscope_archive WHERE category='analysis'"),
-      databasePool.query("SELECT COUNT(*)::bigint AS total FROM winscope_archive WHERE category='coupon'")
+    const [fixtures, odds, analyses, coupons] = await Promise.all([
+      databasePool.query(
+        "SELECT fixture_id, match_date, kickoff_at, status, home_team, away_team, league, payload, source_endpoint, first_seen_at, last_seen_at FROM winscope_fixture_archive ORDER BY fixture_id"
+      ),
+      databasePool.query(
+        "SELECT id, fixture_id, payload, source_endpoint, captured_at FROM winscope_fixture_odds_archive ORDER BY id"
+      ),
+      databasePool.query(
+        "SELECT id, payload, created_at FROM winscope_archive WHERE category='analysis' ORDER BY id"
+      ),
+      databasePool.query(
+        "SELECT id, payload, created_at FROM winscope_archive WHERE category='coupon' ORDER BY id"
+      )
     ]);
-    const counts = {
-      fixtures: Number(countQueries[0].rows[0]?.total || 0),
-      odds: Number(countQueries[1].rows[0]?.total || 0),
-      analyses: Number(countQueries[2].rows[0]?.total || 0),
-      coupons: Number(countQueries[3].rows[0]?.total || 0)
-    };
     const exportedAt = new Date().toISOString();
+    const archive = {
+      exportedAt,
+      format: "winscope-full-archive-v1",
+      counts: {
+        fixtures: fixtures.rowCount,
+        odds: odds.rowCount,
+        analyses: analyses.rowCount,
+        coupons: coupons.rowCount
+      },
+      fixtures: fixtures.rows,
+      odds: odds.rows,
+      analyses: analyses.rows,
+      coupons: coupons.rows
+    };
     const stamp = exportedAt.replace(/[:.]/g, "-");
-
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="winscope-full-archive-${stamp}.json"`);
     res.setHeader("Cache-Control", "no-store");
-    res.status(200);
-    responseStarted = true;
-
-    await writeChunk(JSON.stringify({
-      exportedAt,
-      format: "winscope-full-archive-v1",
-      counts
-    }).slice(0, -1) + ',"fixtures":[');
-
-    const tables = [
-      {
-        name: "fixtures",
-        key: "fixture_id",
-        sql: "SELECT fixture_id, match_date, kickoff_at, status, home_team, away_team, league, payload, source_endpoint, first_seen_at, last_seen_at FROM winscope_fixture_archive",
-        count: counts.fixtures
-      },
-      {
-        name: "odds",
-        key: "id",
-        sql: "SELECT id, fixture_id, payload, source_endpoint, captured_at FROM winscope_fixture_odds_archive",
-        count: counts.odds
-      },
-      {
-        name: "analyses",
-        key: "id",
-        sql: "SELECT id, payload, created_at FROM winscope_archive WHERE category='analysis'",
-        count: counts.analyses
-      },
-      {
-        name: "coupons",
-        key: "id",
-        sql: "SELECT id, payload, created_at FROM winscope_archive WHERE category='coupon'",
-        count: counts.coupons
-      }
-    ];
-
-    for (let tableIndex = 0; tableIndex < tables.length; tableIndex++) {
-      const table = tables[tableIndex];
-      if (tableIndex > 0) {
-        await writeChunk(`],"${table.name}":[`);
-      }
-      let lastId = "0";
-      let first = true;
-      while (true) {
-        const page = await databasePool.query(
-          `${table.sql} AND ${table.key} > $1 ORDER BY ${table.key} ASC LIMIT $2`.replace(
-            " FROM winscope_fixture_archive AND",
-            " FROM winscope_fixture_archive WHERE"
-          ).replace(
-            " FROM winscope_fixture_odds_archive AND",
-            " FROM winscope_fixture_odds_archive WHERE"
-          ).replace(
-            " WHERE category='analysis' AND",
-            " WHERE category='analysis' AND"
-          ).replace(
-            " WHERE category='coupon' AND",
-            " WHERE category='coupon' AND"
-          ),
-          [lastId, BATCH_SIZE]
-        );
-        if (!page.rows.length) break;
-        for (const row of page.rows) {
-          await writeChunk((first ? "" : ",") + JSON.stringify(row));
-          first = false;
-        }
-        lastId = String(page.rows[page.rows.length - 1][table.key]);
-        if (page.rows.length < BATCH_SIZE) break;
-      }
-    }
-    await writeChunk("]}");
-    res.end();
+    res.status(200).send(JSON.stringify(archive));
   } catch (error) {
-    console.error(`[Archive export] ${error.message}`);
-    if (!responseStarted && !res.headersSent) {
-      res.status(500).json({ error: error.message || "Arşiv dışa aktarılamadı." });
-    } else if (!res.destroyed) {
-      res.destroy(error);
-    }
+    res.status(500).json({ error: error.message || "Arşiv dışa aktarılamadı." });
   }
 });
 
