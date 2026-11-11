@@ -3614,76 +3614,89 @@ function score6Distance(a,b){
 function score6Predict(odds){
   if(!odds || ![odds.home,odds.draw,odds.away].every(v=>Number.isFinite(Number(v))&&Number(v)>1.01)) return null;
   const target={home:Number(odds.home),draw:Number(odds.draw),away:Number(odds.away)};
-  // Use a distance-sensitive weight: closer odds patterns contribute more; do not flatten
-  // all neighbors with a large fixed distance floor.
-  const rows=SCORE6_REFERENCE_ROWS.map(r=>({r,d:score6Distance(target,r)})).sort((a,b)=>a.d-b.d).slice(0,18);
+  const distanceRows=SCORE6_REFERENCE_ROWS
+    .map(r=>({r,d:score6Distance(target,r)}))
+    .sort((a,b)=>a.d-b.d);
+  const nearest=distanceRows.slice(0,18);
   const weight=x=>1/(0.01+x.d);
-  const weighted=(field)=>{const map=new Map();for(const x of rows){const v=x.r[field];if(!v)continue;const w=weight(x);map.set(v,(map.get(v)||0)+w);}return [...map].sort((a,b)=>b[1]-a[1]);};
-  const ft=weighted(3), ht=weighted(5), explicitHtft=weighted(4);
-  const total=rows.reduce((s,x)=>s+weight(x),0)||1;
-  const six=rows.reduce((s,x)=>s+((x.r[7]===true || (x.r[3] && Number(x.r[3].split('-')[0])+Number(x.r[3].split('-')[1])>=6))?weight(x):0),0)/total;
-  const fmt=x=>x?`${x} (benzer oran örnekleri)`:'Yeterli skor örneği yok';
-  const parsePair=value=>{
-    const m=String(value||'').match(/^(\\d+)\\s*-\\s*(\\d+)$/);
+  const parseScore=value=>{
+    const m=String(value||'').match(/^(\d+)\s*-\s*(\d+)$/);
     return m?{home:Number(m[1]),away:Number(m[2])}:null;
   };
-  // İY ve MS skorları bağımsız modlardan seçilmez. Önce aynı referans
-  // kaydındaki tutarlı İY/MS çiftleri ağırlıklandırılır.
-  const jointPairs=new Map();
-  for(const item of rows){
-    const htPair=parsePair(item.r[5]), ftPair=parsePair(item.r[3]);
-    if(!htPair||!ftPair) continue;
-    if(ftPair.home<htPair.home||ftPair.away<htPair.away) continue;
-    const key=`${htPair.home}-${htPair.away}|${ftPair.home}-${ftPair.away}`;
-    const current=jointPairs.get(key)||{ht:`${htPair.home}-${htPair.away}`,ft:`${ftPair.home}-${ftPair.away}`,weight:0};
-    current.weight+=weight(item);
-    jointPairs.set(key,current);
+  const resultCode=score=>{
+    const p=parseScore(score);
+    return p?(p.home>p.away?'1':p.home<p.away?'2':'X'):null;
+  };
+  const fmt=x=>x?`${x} (benzer oran örnekleri)`:'Yeterli skor örneği yok';
+
+  // Skor tahmini için yalnızca gerçekten hem İY hem MS skoru bulunan
+  // ve matematiksel olarak tutarlı referans kayıtları kullanılır.
+  // Bu havuz, genel 18 komşu içindeki eksik HT kayıtları nedeniyle boşalmaz.
+  const pairedRows=distanceRows.filter(x=>{
+    const ht=parseScore(x.r[5]), ft=parseScore(x.r[3]);
+    return ht&&ft&&ft.home>=ht.home&&ft.away>=ht.away;
+  }).slice(0,18);
+
+  const pairWeights=new Map();
+  for(const item of pairedRows){
+    const ht=parseScore(item.r[5]), ft=parseScore(item.r[3]);
+    const key=`${ht.home}-${ht.away}|${ft.home}-${ft.away}`;
+    const old=pairWeights.get(key)||{ht:`${ht.home}-${ht.away}`,ft:`${ft.home}-${ft.away}`,weight:0};
+    old.weight+=weight(item);
+    pairWeights.set(key,old);
   }
-  const rankedPairs=[...jointPairs.values()].sort((a,b)=>b.weight-a.weight);
-  let htScore=rankedPairs[0]?.ht||null;
-  let ftScore=rankedPairs[0]?.ft||null;
-  // Referanslarda eşleşmiş çift bulunamazsa da skor mantıksal olarak
-  // korunur: seçilen İY skorunun altına düşmeyen en güçlü MS skoru alınır.
-  if(!htScore){
-    htScore=ht[0]?.[0]||null;
-    const hp=parsePair(htScore);
-    const compatible=ft.filter(([score])=>{
-      const fp=parsePair(score);
-      return hp&&fp&&fp.home>=hp.home&&fp.away>=hp.away;
-    });
-    ftScore=compatible[0]?.[0]||null;
-  }
-  const alternativeCandidates=new Map();
+  const rankedPairs=[...pairWeights.values()].sort((a,b)=>b.weight-a.weight);
+  const bestPair=rankedPairs[0]||null;
+  const htScore=bestPair?.ht||null;
+  const ftScore=bestPair?.ft||null;
+  const alternativeWeights=new Map();
   if(htScore){
-    for(const item of rows){
-      const hp=parsePair(htScore), rowHt=parsePair(item.r[5]), rowFt=parsePair(item.r[3]);
-      if(!hp||!rowFt||rowFt.home<hp.home||rowFt.away<hp.away) continue;
-      if(rowHt&&(rowHt.home!==hp.home||rowHt.away!==hp.away)) continue;
-      const key=`${rowFt.home}-${rowFt.away}`;
-      alternativeCandidates.set(key,(alternativeCandidates.get(key)||0)+weight(item));
+    for(const item of pairedRows){
+      const ht=parseScore(item.r[5]), ft=parseScore(item.r[3]);
+      if(`${ht.home}-${ht.away}`!==htScore) continue;
+      const key=`${ft.home}-${ft.away}`;
+      if(key===ftScore) continue;
+      alternativeWeights.set(key,(alternativeWeights.get(key)||0)+weight(item));
     }
   }
-  const alternatives=[...alternativeCandidates].sort((a,b)=>b[1]-a[1]).map(x=>x[0]).filter(x=>x!==ftScore);
-  if(!alternatives.length&&htScore){
-    const hp=parsePair(htScore);
-    for(const [score,w] of ft){
-      const fp=parsePair(score);
-      if(fp&&hp&&fp.home>=hp.home&&fp.away>=hp.away&&score!==ftScore) alternatives.push(score);
-    }
-  }
-  const resultCode=score=>{if(!score)return null;const [h,a]=score.split('-').map(Number);return h>a?'1':h<a?'2':'X';};
-  const derivedHtft=htScore&&ftScore?`${resultCode(htScore)}/${resultCode(ftScore)}`:null;
-  const htft=derivedHtft || explicitHtft[0]?.[0] || null;
-  const nearestDistances=rows.map(x=>x.d);
-  const distinctOddsPatterns=new Set(rows.map(x=>x.r.slice(0,3).map(v=>Number(v).toFixed(2)).join('|'))).size;
+  const alternativeFT=[...alternativeWeights].sort((a,b)=>b[1]-a[1])[0]?.[0]||null;
+  const htft=htScore&&ftScore?`${resultCode(htScore)}/${resultCode(ftScore)}`:null;
+
+  // 6+ yalnızca gerçek MS skoru bulunan örneklerden hesaplanır.
+  // "6+ etiketi var ama skor yok" kayıtları gerçekleşmiş 6+ sonucu sayılmaz.
+  const scoredNeighbors=nearest.filter(x=>parseScore(x.r[3]));
+  const knownWeight=scoredNeighbors.reduce((s,x)=>s+weight(x),0);
+  const sixWeight=scoredNeighbors.reduce((s,x)=>{
+    const ft=parseScore(x.r[3]);
+    return s+(ft&&ft.home+ft.away>=6?weight(x):0);
+  },0);
+  const sixPlusProbability=knownWeight>0?sixWeight/knownWeight:null;
+  const sixPlusEvidenceCount=scoredNeighbors.filter(x=>{
+    const ft=parseScore(x.r[3]); return ft&&ft.home+ft.away>=6;
+  }).length;
+  // Küçük örneklemde 6+ yüzdesi gösterilmez ve aday üretilmez.
+  const sixPlusEvidenceSufficient=scoredNeighbors.length>=8;
+  const sixPlusCandidate=Boolean(sixPlusEvidenceSufficient&&sixPlusProbability>=0.25);
+  const nearestDistances=nearest.map(x=>x.d);
+  const distinctOddsPatterns=new Set(nearest.map(x=>x.r.slice(0,3).map(v=>Number(v).toFixed(2)).join('|'))).size;
+
   return {
-    halfTimeScore:fmt(htScore),fullTimeScore:fmt(ftScore),
-    alternativeFullTimeScore:alternatives[0]||'Yeterli tutarlı alternatif örnek yok',
-    sixPlusProbability:Number(six.toFixed(4)),sixPlusCandidate:six>=0.25,
-    htft,htftSource:derivedHtft?'selected_scores_consistent':'reference_label_fallback',
-    neighborCount:rows.length,referenceCount:SCORE6_REFERENCE_ROWS.length,
-    distinctOddsPatterns,nearestDistance:Number((nearestDistances[0]??0).toFixed(4)),
-    model:'USER_ODDS_RESULT_NEAREST_NEIGHBOR_V3_HT_FT_CONSISTENT'
+    halfTimeScore:fmt(htScore),
+    fullTimeScore:fmt(ftScore),
+    alternativeFullTimeScore:fmt(alternativeFT),
+    sixPlusProbability:sixPlusEvidenceSufficient&&sixPlusProbability!=null?Number(sixPlusProbability.toFixed(4)):null,
+    sixPlusCandidate,
+    sixPlusEvidenceCount,
+    sixPlusKnownResultCount:scoredNeighbors.length,
+    sixPlusEvidenceStatus:sixPlusEvidenceSufficient?'scored_neighbor_sample':'insufficient_scored_neighbors',
+    htft,
+    htftSource:htft?'selected_joint_score_pair':'no_complete_score_pair',
+    neighborCount:nearest.length,
+    scorePairNeighborCount:pairedRows.length,
+    referenceCount:SCORE6_REFERENCE_ROWS.length,
+    distinctOddsPatterns,
+    nearestDistance:Number((nearestDistances[0]??0).toFixed(4)),
+    model:'USER_ODDS_RESULT_JOINT_HT_FT_V3'
   };
 }
 function score6PlainScore(value) {
@@ -3787,7 +3800,7 @@ app.get("/api/score-six", async (req,res)=>{
   const oddsKeys=valid.map(x=>x.fixtureId).filter(Boolean);
   const uniqueOdds=new Set(rows.map(x=>{const o=x.analysis?.rawOdds1x2;return o&&[o.home,o.draw,o.away].map(v=>Number(v).toFixed(2)).join('|');}).filter(Boolean));
   const uniqueScores=new Set(valid.map(x=>`${String(x.halfTimeScore||'').split(' ')[0]}|${String(x.fullTimeScore||'').split(' ')[0]}`));
-  res.json({date,results,referenceCount:SCORE6_REFERENCE_ROWS.length,model:'USER_ODDS_RESULT_NEAREST_NEIGHBOR_V2',diagnostics:{totalMatches:rows.length,matchesWithOdds:valid.length,matchesWithoutOdds:rows.length-valid.length,uniqueOddsTriplets:uniqueOdds.size,uniquePredictedHTFTPairs:uniqueScores.size,scorePairDistribution:countBy('fullTimeScore'),htftDistribution:countBy('htft'),sixPlusCandidates:valid.filter(x=>x.sixPlusCandidate).length,htftScoreConsistency:'HT/MS kalıbı seçilen İY ve MS skorlarından türetilir; bağımsız etiket birleştirilmez.'}});
+  res.json({date,results,referenceCount:SCORE6_REFERENCE_ROWS.length,model:'USER_ODDS_RESULT_JOINT_HT_FT_V3',diagnostics:{totalMatches:rows.length,matchesWithOdds:valid.length,matchesWithoutOdds:rows.length-valid.length,uniqueOddsTriplets:uniqueOdds.size,uniquePredictedHTFTPairs:uniqueScores.size,scorePairDistribution:countBy('fullTimeScore'),htftDistribution:countBy('htft'),sixPlusCandidates:valid.filter(x=>x.sixPlusCandidate).length,missingFullTimeScores:valid.filter(x=>String(x.fullTimeScore||'').startsWith('Yeterli')).length,scorePairSampleCounts:valid.map(x=>x.scorePairNeighborCount||0),sixPlusKnownResultCounts:valid.map(x=>x.sixPlusKnownResultCount||0),htftScoreConsistency:'İY/MS aynı tutarlı referans skor çiftinden seçilir; MS skoru İY skorunun altına inemez.'}});
 });
 app.get("/api/score-six/diagnostics", async (req,res)=>{
   await archiveDatabaseReady;
@@ -3799,7 +3812,7 @@ app.get("/api/score-six/diagnostics", async (req,res)=>{
   const distribution=key=>{const m={};for(const x of valid){const v=String(x.pred[key]||'').split(' (')[0];if(v)m[v]=(m[v]||0)+1;}return Object.entries(m).sort((a,b)=>b[1]-a[1]).map(([value,count])=>({value,count}));};
   const oddsTriplets=valid.map(x=>x.analysis.rawOdds1x2).filter(Boolean).map(o=>[o.home,o.draw,o.away].map(v=>Number(v).toFixed(2)).join('|'));
   const uniqueOdds=new Set(oddsTriplets), uniqueScores=new Set(valid.map(x=>`${String(x.pred.halfTimeScore).split(' ')[0]}|${String(x.pred.fullTimeScore).split(' ')[0]}`));
-  res.json({date,model:'USER_ODDS_RESULT_NEAREST_NEIGHBOR_V2',referenceCount:SCORE6_REFERENCE_ROWS.length,summary:{totalMatches:rows.length,matchesWithOdds:valid.length,matchesWithoutOdds:rows.length-valid.length,uniqueOddsTriplets:uniqueOdds.size,uniquePredictedScorePairs:uniqueScores.size,scorePairDiversity:valid.length?Number((uniqueScores.size/valid.length).toFixed(3)):0,sixPlusCandidates:valid.filter(x=>x.pred.sixPlusCandidate).length},fullTimeScoreDistribution:distribution('fullTimeScore'),halfTimeScoreDistribution:distribution('halfTimeScore'),htftDistribution:distribution('htft'),checks:{independentHtftLabelCombination:false,htftDerivedFromSelectedScores:true,rawOddsUsedOnlyForScoreAndSixPlus:true}});
+  res.json({date,model:'USER_ODDS_RESULT_JOINT_HT_FT_V3',referenceCount:SCORE6_REFERENCE_ROWS.length,summary:{totalMatches:rows.length,matchesWithOdds:valid.length,matchesWithoutOdds:rows.length-valid.length,uniqueOddsTriplets:uniqueOdds.size,uniquePredictedScorePairs:uniqueScores.size,scorePairDiversity:valid.length?Number((uniqueScores.size/valid.length).toFixed(3)):0,sixPlusCandidates:valid.filter(x=>x.pred.sixPlusCandidate).length},fullTimeScoreDistribution:distribution('fullTimeScore'),halfTimeScoreDistribution:distribution('halfTimeScore'),htftDistribution:distribution('htft'),checks:{independentHtftLabelCombination:false,htftDerivedFromSelectedScores:true,rawOddsUsedOnlyForScoreAndSixPlus:true}});
 });
 app.get("/api/archive/status", async (_req, res) => {
   if (!databasePool) return res.status(503).json({ error: "PostgreSQL bağlantısı yok; arşiv durumu okunamıyor." });
