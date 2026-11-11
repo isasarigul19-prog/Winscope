@@ -2523,8 +2523,36 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
         lambdaUsed = (lambdaHome + lambdaAway) * htScale;
       } else if (item.market === "KG VAR") {
         if (homeGoals > 0 && awayGoals > 0) { rejected.settled++; continue; }
-        modelProbability = (homeGoals > 0 ? 1 : homeScoresAgainProbability) * (awayGoals > 0 ? 1 : awayScoresAgainProbability);
-        lambdaUsed = lambdaHome + lambdaAway;
+
+        // KG Var için henüz gol atmamış takımın kendi gol sinyalini doğrula.
+        // Önde olan takımın baskısı, gerideki takımın gol ihtimali yerine geçemez.
+        const unscoredSide = homeGoals === 0 ? "home" : (awayGoals === 0 ? "away" : null);
+        const sideStats = unscoredSide ? stats[unscoredSide] : null;
+        const sideForm = unscoredSide ? teamForms?.[unscoredSide] : null;
+        const sidePressure =
+          Number(sideStats?.shotsOnTarget || 0) >= 1 ||
+          Number(sideStats?.totalShots || 0) >= 4 ||
+          Number(sideStats?.corners || 0) >= 2;
+        const sideFormSupport = Boolean(
+          sideForm?.available &&
+          Number(sideForm.sampleSize || 0) >= 5 &&
+          Number(sideForm.recentSampleSize || 0) >= 3 &&
+          Number(sideForm.teamScoredPct || 0) >= 65 &&
+          Number(sideForm.recent?.teamScoredPct || 0) >= 55
+        );
+        if (unscoredSide && !sidePressure && !sideFormSupport) {
+          rejected.weakGoalSignal++;
+          continue;
+        }
+
+        // 1-0 / 2-0 gibi skorlarda yalnızca gol atmamış tarafın olasılığı;
+        // 0-0'da iki takımın gol olasılıklarının çarpımı kullanılır.
+        modelProbability = unscoredSide === "home" ? homeScoresAgainProbability
+          : unscoredSide === "away" ? awayScoresAgainProbability
+          : homeScoresAgainProbability * awayScoresAgainProbability;
+        lambdaUsed = unscoredSide === "home" ? lambdaHome
+          : unscoredSide === "away" ? lambdaAway
+          : lambdaHome + lambdaAway;
       } else {
         const line = Number((ms || ht)[1].replace(',', '.'));
         const current = ms ? total : (fixture.htHomeScore != null && fixture.htAwayScore != null
@@ -2551,7 +2579,7 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
       const minEdge = formsAvailable ? 0.025 : 0.035;
       const minEv = formsAvailable ? 0.035 : 0.045;
       const minProbability = (item.market === "KG VAR" || item.market === "İY KG VAR")
-        ? (item.market === "İY KG VAR" ? 0.20 : 0.25)
+        ? (item.market === "İY KG VAR" ? 0.20 : (homeGoals + awayGoals > 0 ? 0.32 : 0.25))
         : (isHomeMarket || isAwayMarket ? 0.30 : 0.25);
       if (modelProbability < minProbability || edge < minEdge || ev < minEv) { rejected.noValue++; continue; }
 
@@ -4102,8 +4130,13 @@ async function runAutomaticLivePick() {
   autoLiveTaskInFlight = true;
   try {
     const result = await buildNextGoalAnalysis({ sendTelegramMessage: true });
-    if (result.telegram?.sent) console.log(`[AUTO LIVE] Sıradaki gol Telegram bildirimi gönderildi; taranan=${result.scanned}`);
-    else console.log(`[AUTO LIVE] Bildirim yok; taranan=${result.scanned}, değer adayı=${result.valueCandidates}`);
+    if (result.telegram?.sent) {
+      console.log(`[AUTO LIVE] Canlı tercih Telegram'a gönderildi; taranan=${result.scanned}, aday=${result.valueCandidates}`);
+    } else if (result.topPick && result.telegram && result.telegram.sent === false) {
+      console.error(`[AUTO LIVE] TERCİH VAR AMA TELEGRAM GÖNDERİLEMEDİ: fixture=${result.topPick.fixtureId}, market=${result.topPick.mainPick}, neden=${result.telegram.reason || result.telegram.error || "bilinmiyor"}`);
+    } else {
+      console.log(`[AUTO LIVE] Tercih bildirimi yok; taranan=${result.scanned}, aday=${result.valueCandidates}, nedenler=${JSON.stringify(result.reasonSummary || {})}`);
+    }
   } catch (error) {
     console.error(`[AUTO LIVE ERROR] ${error.message}`);
   } finally {
