@@ -733,7 +733,7 @@ function oddsForFixture(oddsRow, { includeFirstHalfBtts = false } = {}) {
     // nedeniyle pazarı atlama. Tek taraflı implied probability muhafazakâr kullanılır.
     if (pct == null && Number.isFinite(Number(odd)) && Number(odd) > 1.01) pct = 100 / Number(odd);
     if (pct == null || !Number.isFinite(pct)) continue;
-    const ranks = { "EV 1.5 ÜST": 1, "DEP 1.5 ÜST": 1, "İY 0.5 ÜST": 2, "MS 0.5 ÜST": 2, "İY 1.5 ÜST": 3, "MS 1.5 ÜST": 3, "MS 2.5 ÜST": 4, "KG VAR": 5, "MS 3.5 ÜST": 6, "MS 5.5 ÜST": 8 };
+    const ranks = { "EV 1.5 ÜST": 1, "DEP 1.5 ÜST": 1, "İY 0.5 ÜST": 2, "MS 0.5 ÜST": 2, "İY 1.5 ÜST": 3, "MS 1.5 ÜST": 3, "MS 2.5 ÜST": 4, "KG VAR": 5, "MS 3.5 ÜST": 6, "MS 4.5 ÜST": 7, "MS 5.5 ÜST": 8 };
     candidates.push({ market: item.market, odd, probability: pct, rank: ranks[item.market] ?? 9, bookmaker: item.bookmaker,
       // Ham maç önü fiyatlarını sonuç analizi için sakla; arayüz bunları göstermiyor.
       overOdd: item.over, underOdd: item.under, yesOdd: item.yes, noOdd: item.no,
@@ -1366,6 +1366,7 @@ function marketConsistentWithScore(market, scoreObj) {
   if (market === "MS 1.5 ÜST" && ft && ft[0] + ft[1] < 2) return false;
   if (market === "MS 2.5 ÜST" && ft && ft[0] + ft[1] < 3) return false;
   if (market === "MS 3.5 ÜST" && ft && ft[0] + ft[1] < 4) return false;
+  if (market === "MS 4.5 ÜST" && ft && ft[0] + ft[1] < 5) return false;
   if (market === "İY 0.5 ÜST" && ht && ht[0] + ht[1] < 1) return false;
   if (market === "İY 1.5 ÜST" && ht && ht[0] + ht[1] < 2) return false;
   return true;
@@ -1424,24 +1425,24 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   const live = mode === "live";
   const total = Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0);
   const minute = Number(fixture.minute || 0);
-  // Canlı tercih: 20. dakikadan sonra; dakika/skor pazar eşleşmesi korunur. 85+ riskli.
-  if (live && (minute < 20 || minute > 85)) return null;
+  const periodStatus = String(fixture.periodStatus || fixture.status || "").toUpperCase();
+  const firstHalfLive = live && periodStatus === "1H" && minute >= 20 && minute <= 45;
+  // Canlı tercih: ilk yarıda 20–45 yalnızca 1H durumunda; ikinci yarıda 20–85.
+  // Devre arası (HT) ve maç sonu için İY marketleri kesinlikle açılmaz.
+  if (live && !firstHalfLive && (minute < 20 || minute > 85)) return null;
 
-  // Dakika + anlık skora göre izin verilen piyasalar (dayanak: kalan süre ve mevcut gol sayısı).
+  // Dakika + dönem + anlık skora göre izin verilen piyasalar.
   let allowed;
   if (!live) {
     allowed = ["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
-  } else if (minute >= 20 && minute < 33) {
-    // 20–32. dakika: 0-0 ise İY 0.5; bir gol varsa İY 1.5, oran/form/istatistik desteğiyle değerlendirilir.
+  } else if (firstHalfLive && minute >= 20 && minute <= 32) {
+    // 20–32: ilk yarı gol pazarları; mevcut skor çizgisi aşılmışsa market aşağıda elenir.
     if (total === 0) allowed = ["İY 0.5 ÜST"];
-    else if (total === 1) allowed = ["İY 1.5 ÜST"];
     else allowed = ["İY 1.5 ÜST"];
-  } else if (minute >= 33 && minute < 45) {
-    // 33–44: ilk yarı pazarlarını otomatik önermiyoruz; kalan süre çok kısa ve
-    // maç önü oranı, kalan ilk yarı dakikalarının olasılığı değildir.
-    if (total === 0) allowed = ["MS 1.5 ÜST"];
-    else if (total === 1) allowed = ["MS 2.5 ÜST", "KG VAR"];
-    else allowed = ["MS 2.5 ÜST", "KG VAR"];
+  } else if (firstHalfLive && minute >= 33 && minute <= 45) {
+    // 33–45+: ilk yarı golü için daha güçlü baskı ve olasılık gerekir.
+    if (total === 0) allowed = ["İY 0.5 ÜST"];
+    else allowed = ["İY 1.5 ÜST"];
   } else if (minute >= 45 && minute < 60) {
     // 45–59: 0-0 ise genel MS 0.5 yerine, canlı verisi destekleyen takımın EV/DEP 0.5 pazarı seçilir.
     if (total === 0) allowed = ["EV 0.5 ÜST", "DEP 0.5 ÜST"];
@@ -1520,7 +1521,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   // Daha seçici eşikler: “bankoya yakın” hedefi için piyasa ve son-5 form desteği birlikte aranır.
   // Bunlar garanti değildir; yeterli destek yoksa tercih üretilmez.
   const minMarketPct = live ? {
-    "EV 0.5 ÜST": 55, "DEP 0.5 ÜST": 55, "EV 1.5 ÜST": 58, "DEP 1.5 ÜST": 58, "MS 2.5 ÜST": 58, "MS 3.5 ÜST": 48,
+    "EV 0.5 ÜST": 55, "DEP 0.5 ÜST": 55, "EV 1.5 ÜST": 58, "DEP 1.5 ÜST": 58, "MS 2.5 ÜST": 58, "MS 3.5 ÜST": 48, "MS 4.5 ÜST": 38,
     "KG VAR": 58, "İY 0.5 ÜST": 52, "İY 1.5 ÜST": 48, "MS 0.5 ÜST": 58, "MS 1.5 ÜST": 58
   } : {
     "EV 0.5 ÜST": 58, "DEP 0.5 ÜST": 58, "EV 1.5 ÜST": 60, "DEP 1.5 ÜST": 60, "MS 2.5 ÜST": 58, "MS 3.5 ÜST": 50,
@@ -1631,10 +1632,21 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
           (Number(statsM.shotsOnTarget || 0) >= 1 || Number(statsM.totalShots || 0) >= 6 || Number(statsM.corners || 0) >= 4);
         if (!activeMatch) return null;
       }
-      if (minute >= 20 && minute < 40 && total === 0 && choice.market === "İY 0.5 ÜST") {
-        const activeFirstHalf = Number(statsM.pressure || 0) >= 8 &&
-          (Number(statsM.shotsOnTarget || 0) >= 1 || Number(statsM.totalShots || 0) >= 5 || Number(statsM.corners || 0) >= 3);
+      if (firstHalfLive && choice.market === "İY 0.5 ÜST") {
+        const pressureNeed = minute >= 41 ? 12 : minute >= 33 ? 10 : 8;
+        const shotsNeed = minute >= 41 ? 2 : 1;
+        const activeFirstHalf = Number(statsM.pressure || 0) >= pressureNeed &&
+          (Number(statsM.shotsOnTarget || 0) >= shotsNeed ||
+           Number(statsM.totalShots || 0) >= (minute >= 41 ? 7 : 5) ||
+           Number(statsM.corners || 0) >= (minute >= 41 ? 4 : 3));
         if (!activeFirstHalf) return null;
+      }
+      if (firstHalfLive && choice.market === "İY 1.5 ÜST") {
+        const activeFirstHalfTwoGoals = Number(statsM.pressure || 0) >= (minute >= 41 ? 14 : 10) &&
+          (Number(statsM.shotsOnTarget || 0) >= 2 ||
+           Number(statsM.totalShots || 0) >= (minute >= 41 ? 8 : 6) ||
+           Number(statsM.corners || 0) >= 4);
+        if (!activeFirstHalfTwoGoals) return null;
       }
 
       // Genel baskı bonusu (isabetli şut ağırlıklı).
@@ -2403,7 +2415,7 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
   );
   const prematchBttsEligible = prematchBttsRows.length > 0;
   const markets = liveParsedMarkets.filter(x =>
-    ["İY 0.5 ÜST", "İY 1.5 ÜST", "İY KG VAR", "MS 0.5 ÜST", "MS 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "MS 5.5 ÜST", "EV 0.5 ÜST", "DEP 0.5 ÜST", "EV 1.5 ÜST", "DEP 1.5 ÜST", "KG VAR"].includes(x.market) &&
+    ["İY 0.5 ÜST", "İY 1.5 ÜST", "İY KG VAR", "MS 0.5 ÜST", "MS 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "MS 4.5 ÜST", "MS 5.5 ÜST", "EV 0.5 ÜST", "DEP 0.5 ÜST", "EV 1.5 ÜST", "DEP 1.5 ÜST", "KG VAR"].includes(x.market) &&
     (x.market !== "KG VAR" || prematchBttsEligible)
   );
   const minute = Number(fixture.minute || 0);
@@ -2529,10 +2541,15 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
         const unscoredSide = homeGoals === 0 ? "home" : (awayGoals === 0 ? "away" : null);
         const sideStats = unscoredSide ? stats[unscoredSide] : null;
         const sideForm = unscoredSide ? teamForms?.[unscoredSide] : null;
+        const sideShotsOnTarget = Number(sideStats?.shotsOnTarget || 0);
+        const sideTotalShots = Number(sideStats?.totalShots || 0);
+        const sideCorners = Number(sideStats?.corners || 0);
+        // Gerideki/henüz gol atmamış takım için daha seçici sinyal:
+        // tek başına genel maç baskısı KG Var üretmeye yetmez.
         const sidePressure =
-          Number(sideStats?.shotsOnTarget || 0) >= 1 ||
-          Number(sideStats?.totalShots || 0) >= 4 ||
-          Number(sideStats?.corners || 0) >= 2;
+          sideShotsOnTarget >= 2 ||
+          (sideShotsOnTarget >= 1 && sideTotalShots >= 5) ||
+          (sideTotalShots >= 6 && sideCorners >= 2);
         const sideFormSupport = Boolean(
           sideForm?.available &&
           Number(sideForm.sampleSize || 0) >= 5 &&
@@ -2579,7 +2596,7 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
       const minEdge = formsAvailable ? 0.025 : 0.035;
       const minEv = formsAvailable ? 0.035 : 0.045;
       const minProbability = (item.market === "KG VAR" || item.market === "İY KG VAR")
-        ? (item.market === "İY KG VAR" ? 0.20 : (homeGoals + awayGoals > 0 ? 0.32 : 0.25))
+        ? (item.market === "İY KG VAR" ? 0.20 : (homeGoals + awayGoals > 0 ? 0.42 : 0.25))
         : (isHomeMarket || isAwayMarket ? 0.30 : 0.25);
       if (modelProbability < minProbability || edge < minEdge || ev < minEv) { rejected.noValue++; continue; }
 
@@ -2589,7 +2606,21 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
         if (scenarioSide && scenarioSide !== goalDirection) { rejected.wrongGoalDirection++; continue; }
         if (!scenarioSide && item.market !== "KG VAR") directionBonus = -0.035;
       }
-      const score = edge * 100 + ev * 100 + modelProbability * 20 + directionBonus * 100;
+      // Market uygunluğu: skor 1-0 / 2-0 gibi tek taraflıysa genel gol pazarı,
+      // KG Var'dan daha kapsayıcıdır. KG Var yalnızca gol atmamış tarafın güçlü
+      // baskısı mevcutsa bu önceliği aşabilir.
+      let marketFitBonus = 0;
+      if (homeGoals + awayGoals > 0 && item.market === "KG VAR") {
+        const unscoredSide = homeGoals === 0 ? "home" : (awayGoals === 0 ? "away" : null);
+        const unscoredStats = unscoredSide ? stats[unscoredSide] : null;
+        const unscoredPressure = Number(unscoredStats?.shotsOnTarget || 0) >= 2 ||
+          (Number(unscoredStats?.shotsOnTarget || 0) >= 1 && Number(unscoredStats?.totalShots || 0) >= 5) ||
+          (Number(unscoredStats?.totalShots || 0) >= 6 && Number(unscoredStats?.corners || 0) >= 2);
+        marketFitBonus = unscoredPressure ? 0 : -18;
+      } else if (homeGoals + awayGoals > 0 && ms) {
+        marketFitBonus = 8;
+      }
+      const score = edge * 100 + ev * 100 + modelProbability * 20 + directionBonus * 100 + marketFitBonus;
       const confidence = (
         stats.available && activeStats && formsAvailable &&
         edge >= 0.10 && ev >= 0.10 && modelProbability >= 0.70
