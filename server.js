@@ -3716,14 +3716,25 @@ app.get("/api/archive/fixtures", async (req, res) => {
   try {
     await archiveDatabaseReady;
     const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(500, Math.max(1, Number.parseInt(req.query.limit, 10) || 100));
+    const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 50));
     const offset = (page - 1) * limit;
+    const date = /^\\d{4}-\\d{2}-\\d{2}$/.test(String(req.query.date || "")) ? String(req.query.date) : null;
+    const q = String(req.query.q || "").trim().slice(0, 100);
+    const params = [];
+    const where = [];
+    if (date) { params.push(date); where.push(`match_date = $${params.length}::date`); }
+    if (q) {
+      params.push(`%${q}%`);
+      where.push(`(home_team ILIKE $${params.length} OR away_team ILIKE $${params.length} OR league ILIKE $${params.length})`);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    params.push(limit, offset);
     const [rows, count] = await Promise.all([
       databasePool.query(
-        "SELECT fixture_id, match_date, kickoff_at, status, home_team, away_team, league, payload, first_seen_at, last_seen_at FROM winscope_fixture_archive ORDER BY match_date DESC NULLS LAST, fixture_id DESC LIMIT $1 OFFSET $2",
-        [limit, offset]
+        `SELECT fixture_id, match_date, kickoff_at, status, home_team, away_team, league, first_seen_at, last_seen_at FROM winscope_fixture_archive ${whereSql} ORDER BY kickoff_at DESC NULLS LAST, fixture_id DESC LIMIT $${params.length-1} OFFSET $${params.length}`,
+        params
       ),
-      databasePool.query("SELECT COUNT(*)::bigint AS total FROM winscope_fixture_archive")
+      databasePool.query(`SELECT COUNT(*)::bigint AS total FROM winscope_fixture_archive ${whereSql}`, params.slice(0, params.length-2))
     ]);
     res.json({ page, limit, total: Number(count.rows[0]?.total || 0), fixtures: rows.rows });
   } catch (error) {
