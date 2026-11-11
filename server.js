@@ -709,8 +709,8 @@ function oddsForFixture(oddsRow, { includeFirstHalfBtts = false } = {}) {
         const side = overMatch ? "over" : underMatch ? "under" : null;
         if (!side) continue;
         let key = null;
-        if (isHomeTeam && [0.5, 1.5, 2.5, 3.5].includes(Number(line))) key = `EV ${line} ÜST`;
-        else if (isAwayTeam && [0.5, 1.5, 2.5, 3.5].includes(Number(line))) key = `DEP ${line} ÜST`;
+        if (isHomeTeam && [0.5, 1.5].includes(Number(line))) key = `EV ${line} ÜST`;
+        else if (isAwayTeam && [0.5, 1.5].includes(Number(line))) key = `DEP ${line} ÜST`;
         else if (isHalf && [0.5, 1.5, 2.5].includes(Number(line))) key = `İY ${line} ÜST`;
         else if (isTotal && [0.5, 1.5, 2.5, 3.5, 5.5].includes(Number(line))) key = `MS ${line} ÜST`;
         if (key) add(book, key, side, odd);
@@ -733,7 +733,7 @@ function oddsForFixture(oddsRow, { includeFirstHalfBtts = false } = {}) {
     // nedeniyle pazarı atlama. Tek taraflı implied probability muhafazakâr kullanılır.
     if (pct == null && Number.isFinite(Number(odd)) && Number(odd) > 1.01) pct = 100 / Number(odd);
     if (pct == null || !Number.isFinite(pct)) continue;
-    const ranks = { "EV 1.5 ÜST": 1, "DEP 1.5 ÜST": 1, "EV 2.5 ÜST": 2, "DEP 2.5 ÜST": 2, "EV 3.5 ÜST": 3, "DEP 3.5 ÜST": 3, "İY 0.5 ÜST": 2, "MS 0.5 ÜST": 2, "İY 1.5 ÜST": 3, "MS 1.5 ÜST": 3, "MS 2.5 ÜST": 4, "KG VAR": 5, "MS 3.5 ÜST": 6, "MS 4.5 ÜST": 7, "MS 5.5 ÜST": 8 };
+    const ranks = { "EV 1.5 ÜST": 1, "DEP 1.5 ÜST": 1, "İY 0.5 ÜST": 2, "MS 0.5 ÜST": 2, "İY 1.5 ÜST": 3, "MS 1.5 ÜST": 3, "MS 2.5 ÜST": 4, "KG VAR": 5, "MS 3.5 ÜST": 6, "MS 4.5 ÜST": 7, "MS 5.5 ÜST": 8 };
     candidates.push({ market: item.market, odd, probability: pct, rank: ranks[item.market] ?? 9, bookmaker: item.bookmaker,
       // Ham maç önü fiyatlarını sonuç analizi için sakla; arayüz bunları göstermiyor.
       overOdd: item.over, underOdd: item.under, yesOdd: item.yes, noOdd: item.no,
@@ -807,16 +807,8 @@ function marketSupport(market, homeForm, awayForm) {
   const avg = (a,b) => a == null || b == null ? null : (Number(a)+Number(b))/2;
   if (market === "EV 0.5 ÜST") return 0.65*Number(homeForm.teamGoalsOver05Pct ?? 0) + 0.35*Number(awayForm.goalsConcededPct ?? 0);
   if (market === "DEP 0.5 ÜST") return 0.65*Number(awayForm.teamGoalsOver05Pct ?? 0) + 0.35*Number(homeForm.goalsConcededPct ?? 0);
-  if (market.startsWith("EV ")) {
-    const line = Number(market.match(/[0-9.]+/)?.[0]);
-    const key = line <= 0.5 ? "teamGoalsOver05Pct" : line <= 1.5 ? "teamGoalsOver15Pct" : line <= 2.5 ? "teamGoalsOver25Pct" : "teamGoalsOver35Pct";
-    return 0.65*Number(homeForm[key] ?? 0) + 0.35*Number(awayForm.goalsConcededPct ?? 0);
-  }
-  if (market.startsWith("DEP ")) {
-    const line = Number(market.match(/[0-9.]+/)?.[0]);
-    const key = line <= 0.5 ? "teamGoalsOver05Pct" : line <= 1.5 ? "teamGoalsOver15Pct" : line <= 2.5 ? "teamGoalsOver25Pct" : "teamGoalsOver35Pct";
-    return 0.65*Number(awayForm[key] ?? 0) + 0.35*Number(homeForm.goalsConcededPct ?? 0);
-  }
+  if (market === "EV 1.5 ÜST") return 0.65*Number(homeForm.teamGoalsOver15Pct ?? 0) + 0.35*Number(awayForm.goalsConcededPct ?? 0);
+  if (market === "DEP 1.5 ÜST") return 0.65*Number(awayForm.teamGoalsOver15Pct ?? 0) + 0.35*Number(homeForm.goalsConcededPct ?? 0);
   if (market === "MS 2.5 ÜST") return avg(homeForm.over25Pct, awayForm.over25Pct);
   if (market === "MS 3.5 ÜST") return avg(homeForm.over35Pct, awayForm.over35Pct);
   if (market === "MS 1.5 ÜST") return avg(homeForm.over15Pct, awayForm.over15Pct);
@@ -899,8 +891,6 @@ async function fetchTeamRecentForm(teamId, fixtureId, leagueId = null, season = 
       available: true, sampleSize: rows.length,
       teamGoalsOver05Pct: pct(x => x.gf >= 1),
       teamGoalsOver15Pct: pct(x => x.gf >= 2),
-      teamGoalsOver25Pct: pct(x => x.gf >= 3),
-      teamGoalsOver35Pct: pct(x => x.gf >= 4),
       goalsConcededPct: pct(x => x.ga > 0),
       over05Pct: pct(x => x.total >= 1), over15Pct: pct(x => x.total >= 2),
       over25Pct: pct(x => x.total >= 3), over35Pct: pct(x => x.total >= 4),
@@ -1416,12 +1406,8 @@ function liveMarketAlreadySettled(market, fixture) {
     const hg = Number(fixture.htHomeScore ?? home), ag = Number(fixture.htAwayScore ?? away);
     if (hg > 0 && ag > 0) return true;
   }
-  const teamMarket = market.match(/^(EV|DEP) ([0-9]+[.,][0-9]+) ÜST$/);
-  if (teamMarket) {
-    const required = Math.floor(Number(teamMarket[2].replace(",", "."))) + 1;
-    const scored = teamMarket[1] === "EV" ? home : away;
-    if (scored >= required) return true;
-  }
+  if ((market === "EV 0.5 ÜST" || market === "EV 1.5 ÜST") && home >= (market.includes("1.5") ? 2 : 1)) return true;
+  if ((market === "DEP 0.5 ÜST" || market === "DEP 1.5 ÜST") && away >= (market.includes("1.5") ? 2 : 1)) return true;
   const ms = market.match(/^MS ([0-9]+[.,][0-9]+) ÜST$/);
   if (ms && total >= Math.ceil(Number(ms[1].replace(",", ".")))) return true;
   const ht = market.match(/^İY ([0-9]+[.,][0-9]+) ÜST$/);
@@ -2429,7 +2415,7 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
   );
   const prematchBttsEligible = prematchBttsRows.length > 0;
   const markets = liveParsedMarkets.filter(x =>
-    ["İY 0.5 ÜST", "İY 1.5 ÜST", "İY KG VAR", "MS 0.5 ÜST", "MS 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "MS 4.5 ÜST", "MS 5.5 ÜST", "EV 0.5 ÜST", "DEP 0.5 ÜST", "EV 1.5 ÜST", "DEP 1.5 ÜST", "EV 2.5 ÜST", "DEP 2.5 ÜST", "EV 3.5 ÜST", "DEP 3.5 ÜST", "KG VAR"].includes(x.market) &&
+    ["İY 0.5 ÜST", "İY 1.5 ÜST", "İY KG VAR", "MS 0.5 ÜST", "MS 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "MS 4.5 ÜST", "MS 5.5 ÜST", "EV 0.5 ÜST", "DEP 0.5 ÜST", "EV 1.5 ÜST", "DEP 1.5 ÜST", "KG VAR"].includes(x.market) &&
     (x.market !== "KG VAR" || prematchBttsEligible)
   );
   const minute = Number(fixture.minute || 0);
@@ -2513,7 +2499,6 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
       const ht = item.market.match(/^İY ([0-9]+(?:[.,][0-9]+)?) ÜST$/);
       const isHomeMarket = item.market.startsWith("EV ");
       const isAwayMarket = item.market.startsWith("DEP ");
-      const teamLineMatch = item.market.match(/^(?:EV|DEP) ([0-9]+[.,][0-9]+) ÜST$/);
       if ((isFirstHalf && (!(ht || item.market === "İY KG VAR") || isHomeMarket || isAwayMarket)) ||
           (isSecondHalf && (ht || item.market === "İY KG VAR")) || isHalftime) {
         rejected.wrongPeriod++; continue;
@@ -2527,7 +2512,7 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
         const isHome = isHomeMarket;
         const scored = isHome ? homeGoals : awayGoals;
         const lambda = isHome ? lambdaHome : lambdaAway;
-        const line = teamLineMatch ? Math.floor(Number(teamLineMatch[1].replace(",", "."))) + 1 : 1;
+        const line = item.market.includes("1.5") ? 2 : 1;
         const needed = Math.max(0, line - scored);
         if (needed === 0) { rejected.settled++; continue; }
         modelProbability = poissonProbabilityAtLeast(line, lambda, scored);
@@ -2535,9 +2520,6 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
         scenarioSide = isHome ? "home" : "away";
         const sideGoalProbability = isHome ? homeScoresAgainProbability : awayScoresAgainProbability;
         const otherGoalProbability = isHome ? awayScoresAgainProbability : homeScoresAgainProbability;
-        const teamFormPct = isHome
-          ? Number(teamForms?.home?.[line <= 1 ? "teamGoalsOver05Pct" : line === 2 ? "teamGoalsOver15Pct" : line === 3 ? "teamGoalsOver25Pct" : "teamGoalsOver35Pct"] || 0)
-          : Number(teamForms?.away?.[line <= 1 ? "teamGoalsOver05Pct" : line === 2 ? "teamGoalsOver15Pct" : line === 3 ? "teamGoalsOver25Pct" : "teamGoalsOver35Pct"] || 0);
         if (sideGoalProbability < 0.25 || (goalDirection !== "balanced" && scenarioSide !== goalDirection && sideGoalProbability < otherGoalProbability * 0.90)) {
           rejected.wrongGoalDirection++; continue;
         }
@@ -4054,13 +4036,13 @@ async function runEarlyFirstHalfPick() {
       console.log(`[EARLY HT PREPARED] fixture=${f.id} window=T-5 notification=false goalTracking=true`);
     }
 
-    // Tek bildirim yalnızca 3-5. dakikada, gerçek 1H canlı istatistikleriyle.
+    // 3. dakika hedeflenir; 2-8 aralığı tarama/API dakika gecikmesinde pencerenin kaçmasını önler.
     const liveRows = (livePayload.response || []).map(normalizeProviderMatch);
     const fixtures = liveRows.filter(f => {
       const minute = Number(f.minute);
       const score = Number(f.homeScore) + Number(f.awayScore);
       return f.id && f.status === 'LIVE' && f.periodStatus === '1H' &&
-        Number.isFinite(minute) && minute >= 3 && minute <= 5 && isFreshLiveFixture(f) &&
+        Number.isFinite(minute) && minute >= 2 && minute <= 8 && isFreshLiveFixture(f) &&
         Number.isFinite(score) && score === 0 && !isExcludedAnalysisCompetition(f);
     });
     let sent = 0;
@@ -4113,11 +4095,32 @@ async function runEarlyFirstHalfPick() {
           away && { ...away, market: 'DEP 0.5 ÜST', side: 'DEPLASMAN', team: fixture.away }].filter(Boolean)
           .filter(x => x.score >= 48 && (x.pressure >= 8 || x.profile >= 65))
           .sort((a,b) => b.score-a.score);
-        if (!candidates.length) {
-          console.log(`[EARLY HT NO PICK] fixture=${fixture.id} minute=${fixture.minute} home=${home?.score?.toFixed(1) ?? 'na'} away=${away?.score?.toFixed(1) ?? 'na'}`);
+        // Öncelik takım golü. Taraf net ayrışmıyorsa güçlü genel ilk yarı gol
+        // sinyali ve gerçek maç önü İY 0.5 oranı varsa toplam gol yedeği kullanılır.
+        let chosen = candidates[0] || null;
+        if (!chosen) {
+          const totalMarket = marketFor('İY 0.5 ÜST');
+          const h10 = Number(homeForm.htOver05Pct), a10 = Number(awayForm.htOver05Pct);
+          const h5 = Number(homeForm.recent?.htOver05Pct), a5 = Number(awayForm.recent?.htOver05Pct);
+          const sampleOk = Number(homeForm.htSampleSize || 0) >= 5 && Number(awayForm.htSampleSize || 0) >= 5 &&
+            Number(homeForm.recent?.htSampleSize || 0) >= 3 && Number(awayForm.recent?.htSampleSize || 0) >= 3;
+          if (totalMarket && sampleOk && [h10,a10,h5,a5,Number(totalMarket.probability)].every(Number.isFinite)) {
+            const combined10 = 100 * (1 - (1 - h10/100) * (1 - a10/100));
+            const combined5 = 100 * (1 - (1 - h5/100) * (1 - a5/100));
+            const profile = combined10 * 0.55 + combined5 * 0.45;
+            const pressure = stats.home.shotsOnTarget*12 + stats.home.totalShots*3 + stats.home.corners*5 +
+              stats.away.shotsOnTarget*12 + stats.away.totalShots*3 + stats.away.corners*5;
+            const score = profile*0.55 + Number(totalMarket.probability)*0.25 + Math.min(100,pressure)*0.20;
+            if (score >= 52 && (pressure >= 8 || profile >= 65)) {
+              chosen = { market:'İY 0.5 ÜST', side:'TAKIM AYRIMI YOK', team:'İlk yarıda en az 1 gol',
+                score, pressure, profile, h10:Math.round(combined10), h5:Math.round(combined5) };
+            }
+          }
+        }
+        if (!chosen) {
+          console.log(`[EARLY HT NO PICK] fixture=${fixture.id} minute=${fixture.minute} home=${home?.score?.toFixed(1) ?? 'na'} away=${away?.score?.toFixed(1) ?? 'na'} fallback=İY0.5:no_signal_or_odds`);
           continue;
         }
-        const chosen = candidates[0];
         const deliveryMarket = chosen.market;
         const deliveryKey = telegramDeliveryKey(fixture.id, 'early_ht', deliveryMarket);
         if (telegramSentKeys.has(deliveryKey)) { earlyHalfSent.add(key); continue; }
@@ -4130,13 +4133,14 @@ async function runEarlyFirstHalfPick() {
             if (prior.rowCount) { earlyHalfSent.add(key); continue; }
           } catch (e) { console.warn(`[EARLY HT DEDUPE CHECK] fixture=${fixture.id}: ${e.message}`); }
         }
+        const isTotalFallback = chosen.market === 'İY 0.5 ÜST';
         const message = [
-          '⚡ WINSCOPE İLK YARI TAKIM GOL TERCİHİ',
+          isTotalFallback ? '⚡ WINSCOPE İLK YARI GOL TAHMİNİ' : '⚡ WINSCOPE İLK YARI TAKIM GOL TERCİHİ',
           `🏟️ ${fixture.home} VS ${fixture.away}`,
           `⏱️ Dakika: ${fixture.minute}' | Skor: ${fixture.homeScore || 0}-${fixture.awayScore || 0}`,
           `🎯 ANA TERCİH: ${chosen.market}`,
-          `🔥 Baskılı taraf: ${chosen.side} (${chosen.team})`,
-          `📊 Takım ilk yarı gol verisi: son 10 %${chosen.h10} · son 5 %${chosen.h5}`,
+          isTotalFallback ? 'ℹ️ Takım tarafı net ayrışmadı; ilk yarıda en az 1 gol sinyali yeterli.' : `🔥 Gol beklenen taraf: ${chosen.side} (${chosen.team})`,
+          `📊 İlk yarı gol verisi: son 10 %${chosen.h10} · son 5 %${chosen.h5}`,
           `📈 Canlı baskı: ${chosen.pressure.toFixed(1)} · Sinyal: %${chosen.score.toFixed(1)}`,
           'WinScope · Tek bildirim'
         ].join('\n');
@@ -4146,7 +4150,7 @@ async function runEarlyFirstHalfPick() {
           telegramSentKeys.add(deliveryKey);
           const earlyGoalTrack = {
             home: fixture.home, away: fixture.away, league: fixture.league || '',
-            sourceLabel: `İlk yarı takım gol tercihi: ${chosen.market}`,
+            sourceLabel: `İlk yarı tahmini: ${chosen.market}`,
             baselineScore: `${fixture.homeScore || 0}-${fixture.awayScore || 0}`
           };
           goalTrackedFixtures.set(Number(fixture.id), earlyGoalTrack);
@@ -4166,7 +4170,7 @@ async function runEarlyFirstHalfPick() {
         }
       } catch (e) { console.warn(`[EARLY HT ERROR] fixture=${fixture.id}: ${e.message}`); }
     }
-    console.log(`[EARLY HT SCAN] prep=${prep.length} live3to5=${fixtures.length} sent=${sent}`);
+    console.log(`[EARLY HT SCAN] prep=${prep.length} live2to8=${fixtures.length} sent=${sent}`);
   } catch (e) {
     console.error(`[EARLY HT SCAN ERROR] ${e.message}`);
   } finally {
@@ -4386,7 +4390,7 @@ setTimeout(() => { void runAutomaticLivePick(); }, 20000);
 setInterval(() => { void runAutomaticLivePick(); }, 90 * 1000);
 // İlk yarı erken sinyali: maç önü son 5 dakika ve canlı 1. dakika kontrolü.
 setTimeout(() => { void runEarlyFirstHalfPick(); }, 25000);
-setInterval(() => { void runEarlyFirstHalfPick(); }, 60 * 1000);
+setInterval(() => { void runEarlyFirstHalfPick(); }, 30 * 1000);
 // Günün maç önü kuponu 2 saatlik otomatik döngüsü devre dışı bırakıldı.
 setTimeout(() => { void scanSurpriseScenarios(); }, 45000);
 setInterval(() => { void scanSurpriseScenarios(); }, 10 * 60 * 1000);
