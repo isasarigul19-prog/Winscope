@@ -3388,6 +3388,7 @@ async function runDailyAnalysisJob(job) {
           mainPick, alternative:altRow ? other : "Aralıkta doğrulanmış alternatif yok",
           selectionScore: supported && Number.isFinite(Number(supported.selectionScore)) ? Number(supported.selectionScore) : null,
           marketProbability: supported && Number.isFinite(Number(supported.marketProbability)) ? Number(supported.marketProbability) : null,
+          marketPercentages:analysisPercentages(oddsRow, homeForm, awayForm),
           formSupport: supported?.teamFormAvailable === true ? 1 : 0,
           selectionBookmaker: supported?.bookmaker || null,
           surprise:scores.surprise || null,
