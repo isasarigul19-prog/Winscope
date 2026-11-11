@@ -814,8 +814,18 @@ function marketSupport(market, homeForm, awayForm) {
   if (market === "MS 1.5 ÜST") return avg(homeForm.over15Pct, awayForm.over15Pct);
   if (market === "MS 0.5 ÜST") return avg(homeForm.over05Pct, awayForm.over05Pct);
   if (market === "KG VAR") return avg(homeForm.bttsPct, awayForm.bttsPct);
-  if (market === "İY 0.5 ÜST") return avg(homeForm.htOver05Pct, awayForm.htOver05Pct);
-  if (market === "İY 1.5 ÜST") return avg(homeForm.htOver15Pct, awayForm.htOver15Pct);
+  if (market === "İY 0.5 ÜST") {
+    const h5=Number(homeForm.htOver05Pct5 ?? homeForm.htOver05Pct), a5=Number(awayForm.htOver05Pct5 ?? awayForm.htOver05Pct);
+    const h10=Number(homeForm.htOver05Pct10 ?? h5), a10=Number(awayForm.htOver05Pct10 ?? a5);
+    if (![h5,a5,h10,a10].every(Number.isFinite)) return null;
+    return 0.60*((h5+a5)/2)+0.40*((h10+a10)/2);
+  }
+  if (market === "İY 1.5 ÜST") {
+    const h5=Number(homeForm.htOver15Pct5 ?? homeForm.htOver15Pct), a5=Number(awayForm.htOver15Pct5 ?? awayForm.htOver15Pct);
+    const h10=Number(homeForm.htOver15Pct10 ?? h5), a10=Number(awayForm.htOver15Pct10 ?? a5);
+    if (![h5,a5,h10,a10].every(Number.isFinite)) return null;
+    return 0.60*((h5+a5)/2)+0.40*((h10+a10)/2);
+  }
   return null;
 }
 
@@ -848,10 +858,11 @@ async function fetchTeamRecentForm(teamId, fixtureId, leagueId = null, season = 
     const rows = (payload.response || []).filter(row => Number(row.fixture?.id) !== Number(fixtureId) &&
       ["FT", "AET", "PEN"].includes(String(row.fixture?.status?.short || "").toUpperCase()) &&
       row.goals?.home != null && row.goals?.away != null)
-      .sort((a,b) => new Date(b.fixture?.date || 0) - new Date(a.fixture?.date || 0)).slice(0,5);
+      .sort((a,b) => new Date(b.fixture?.date || 0) - new Date(a.fixture?.date || 0)).slice(0,10);
     if (rows.length < 5) return { available: false, sampleSize: rows.length };
+    const recent5Rows = rows.slice(0,5);
     const pct = fn => Math.round(100 * vals.filter(fn).length / vals.length);
-    const vals = rows.map(r => {
+    const vals = recent5Rows.map(r => {
       const isHome = Number(r.teams?.home?.id) === Number(teamId);
       const gf = Number(isHome ? r.goals.home : r.goals.away);
       const ga = Number(isHome ? r.goals.away : r.goals.home);
@@ -864,6 +875,12 @@ async function fetchTeamRecentForm(teamId, fixtureId, leagueId = null, season = 
         htTotal: hth == null || hta == null ? null : Number(hth)+Number(hta) };
     });
     const htVals = vals.filter(x => x.htTotal != null);
+    const vals10 = rows.map(r => {
+      const isHome = Number(r.teams?.home?.id) === Number(teamId);
+      const hth = r.score?.halftime?.home, hta = r.score?.halftime?.away;
+      return { htTotal: hth == null || hta == null ? null : Number(hth)+Number(hta) };
+    });
+    const htVals10 = vals10.filter(x => x.htTotal != null);
     const recentAvgGoalsFor = Number((vals.reduce((sum,x)=>sum+x.gf,0)/vals.length).toFixed(2));
     const recentAvgGoalsAgainst = Number((vals.reduce((sum,x)=>sum+x.ga,0)/vals.length).toFixed(2));
     const seasonStats = await fetchTeamSeasonGoals(teamId, leagueId, season, venue);
@@ -880,6 +897,12 @@ async function fetchTeamRecentForm(teamId, fixtureId, leagueId = null, season = 
       bttsPct: pct(x => x.btts),
       htOver05Pct: htVals.length ? Math.round(100 * htVals.filter(x=>x.htTotal>=1).length / htVals.length) : null,
       htOver15Pct: htVals.length ? Math.round(100 * htVals.filter(x=>x.htTotal>=2).length / htVals.length) : null,
+      htOver05Pct5: htVals.length ? Math.round(100 * htVals.filter(x=>x.htTotal>=1).length / htVals.length) : null,
+      htOver15Pct5: htVals.length ? Math.round(100 * htVals.filter(x=>x.htTotal>=2).length / htVals.length) : null,
+      htOver05Pct10: htVals10.length ? Math.round(100 * htVals10.filter(x=>x.htTotal>=1).length / htVals10.length) : null,
+      htOver15Pct10: htVals10.length ? Math.round(100 * htVals10.filter(x=>x.htTotal>=2).length / htVals10.length) : null,
+      htSampleSize5: htVals.length,
+      htSampleSize10: htVals10.length,
       htAvgGoalsFor: htVals.length ? Number((htVals.reduce((sum,x)=>sum+x.htFor,0)/htVals.length).toFixed(2)) : null,
       htAvgGoalsAgainst: htVals.length ? Number((htVals.reduce((sum,x)=>sum+x.htAgainst,0)/htVals.length).toFixed(2)) : null,
       htSampleSize: htVals.length,
@@ -1311,7 +1334,15 @@ function analysisPercentages(oddsRow, homeForm, awayForm) {
   for (const [key, market] of Object.entries(map)) {
     const o = rows.filter(x => x.market === market).sort((a,b)=>(/bet365/i.test(b.bookmaker)-/bet365/i.test(a.bookmaker)) || b.probability-a.probability)[0];
     const form = marketSupport(market, homeForm, awayForm);
-    if (o || form != null) {
+    const isHalfTimeMarket = market === "İY 0.5 ÜST" || market === "İY 1.5 ÜST";
+    if (isHalfTimeMarket && form != null) {
+      out[key] = {
+        percent: Math.round(form),
+        sampleSize5: Math.min(homeForm?.htSampleSize5 || 0, awayForm?.htSampleSize5 || 0),
+        sampleSize10: Math.min(homeForm?.htSampleSize10 || 0, awayForm?.htSampleSize10 || 0),
+        source: "Son 5 maç İY formu (%60) + son 10 maç İY formu (%40); oran kullanılmadı"
+      };
+    } else if (!isHalfTimeMarket && (o || form != null)) {
       const percent = o && form != null ? Math.round(o.probability * 0.55 + form * 0.45) : o ? Math.round(o.probability) : Math.round(form);
       out[key] = { percent, sampleSize: Math.min(homeForm?.sampleSize || 0, awayForm?.sampleSize || 0), source: o && form != null ? "Maç önü oranı + son 5 maç formu" : o ? "Maç önü oranı; form verisi eksik" : "Son 5 maç formu; maç önü oranı bulunamadı" };
     }
@@ -3724,8 +3755,8 @@ app.get("/api/market-shortlist", async (req, res) => {
   const date = String(req.query.date || "");
   const marketKey = String(req.query.market || "");
   const configs = {
-    ht05: { label:"İY 0.5 ÜST", pct:"ht05", price:"overOdd", opposite:"underOdd" },
-    ht15: { label:"İY 1.5 ÜST", pct:"ht15", price:"overOdd", opposite:"underOdd" },
+    ht05: { label:"İY 0.5 ÜST", pct:"ht05", formOnly:true },
+    ht15: { label:"İY 1.5 ÜST", pct:"ht15", formOnly:true },
     btts: { label:"KG VAR", pct:"btts", price:"yesOdd", opposite:"noOdd" },
     ms25: { label:"MS 2.5 ÜST", pct:"ms25", price:"overOdd", opposite:"underOdd" }
   };
@@ -3749,20 +3780,29 @@ app.get("/api/market-shortlist", async (req, res) => {
       const percentages = a?.marketPercentages || {};
       const percent = Number(percentages?.[cfg.pct]?.percent);
       if (!Number.isFinite(percent)) continue;
-      const marketRows = Array.isArray(a?.rawPrematchMarkets) ? a.rawPrematchMarkets : [];
-      const candidates = marketRows.filter(x => String(x.market || "").toUpperCase() === cfg.label);
-      candidates.sort((x,y) => Number(/bet365/i.test(y.bookmaker)) - Number(/bet365/i.test(x.bookmaker)));
-      const quote = candidates[0];
-      const odd = Number(quote?.[cfg.price]);
-      const oppositeOdd = Number(quote?.[cfg.opposite]);
-      if (!Number.isFinite(odd) || odd < 1.50 || odd > 1.75) continue;
-      let marketFairPercent = 100 / odd;
-      if (Number.isFinite(oppositeOdd) && oppositeOdd > 1) {
-        const inv = 1 / odd, invOpp = 1 / oppositeOdd;
-        marketFairPercent = inv / (inv + invOpp) * 100;
+      let edge = null;
+      let bookmaker = "Son 5 + son 10 maç İY formu";
+      if (!cfg.formOnly) {
+        const marketRows = Array.isArray(a?.rawPrematchMarkets) ? a.rawPrematchMarkets : [];
+        const candidates = marketRows.filter(x => String(x.market || "").toUpperCase() === cfg.label);
+        candidates.sort((x,y) => Number(/bet365/i.test(y.bookmaker)) - Number(/bet365/i.test(x.bookmaker)));
+        const quote = candidates[0];
+        const odd = Number(quote?.[cfg.price]);
+        const oppositeOdd = Number(quote?.[cfg.opposite]);
+        if (!Number.isFinite(odd) || odd < 1.50 || odd > 1.75) continue;
+        let marketFairPercent = 100 / odd;
+        if (Number.isFinite(oppositeOdd) && oppositeOdd > 1) {
+          const inv = 1 / odd, invOpp = 1 / oppositeOdd;
+          marketFairPercent = inv / (inv + invOpp) * 100;
+        }
+        edge = percent - marketFairPercent;
+        if (edge < 2) continue;
+        bookmaker = quote?.bookmaker || a?.oddsBookmaker || "Kaynak belirtilmedi";
+      } else {
+        const n5 = Number(percentages?.[cfg.pct]?.sampleSize5 || 0);
+        const n10 = Number(percentages?.[cfg.pct]?.sampleSize10 || 0);
+        if (n5 < 5 || n10 < 5) continue;
       }
-      const edge = percent - marketFairPercent;
-      if (edge < 2) continue;
       unique.set(fixtureId, {
         fixtureId,
         home: record?.home_team || a?.home || a?.home_team || "",
@@ -3770,12 +3810,14 @@ app.get("/api/market-shortlist", async (req, res) => {
         league: a?.league || record?.league || "",
         market: cfg.label,
         percent,
-        edge: Number(edge.toFixed(1)),
-        bookmaker: quote?.bookmaker || a?.oddsBookmaker || "Kaynak belirtilmedi"
+        edge: edge == null ? null : Number(edge.toFixed(1)),
+        bookmaker,
+        sampleSize5: Number(percentages?.[cfg.pct]?.sampleSize5 || 0),
+        sampleSize10: Number(percentages?.[cfg.pct]?.sampleSize10 || 0)
       });
     }
     const picks = [...unique.values()].sort((a,b) => b.percent-a.percent || b.edge-a.edge);
-    res.json({ date, market:cfg.label, count:picks.length, picks, minEdge:2, oddsBand:"1.50–1.75" });
+    res.json({ date, market:cfg.label, count:picks.length, picks, formOnly:Boolean(cfg.formOnly), minEdge:cfg.formOnly?null:2, oddsBand:cfg.formOnly?null:"1.50–1.75" });
   } catch (error) {
     res.status(500).json({ error:error.message });
   }
