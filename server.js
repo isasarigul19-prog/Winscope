@@ -2688,6 +2688,16 @@ app.get("/api/match/:id/analyze", async (req, res) => {
       halfTimeScore: scores.halfTimeScore,
       fullTimeScore: scores.fullTimeScore,
       alternativeFullTimeScore: scores.alternativeFullTimeScore || "Alternatif skor hesaplanamadı",
+      // Tanılama: ana Günün Analizleri motorunun sürümünü ve koşulsuz skorunu açıkça bildir.
+      scoreModelVersion: scores.modelVersion || "UNKNOWN",
+      scoreModelMethod: scores.scoreModelMethod || "UNKNOWN",
+      scoreProbability: scores.scoreProbability ?? null,
+      expectedGoals: scores.expectedGoals || null,
+      topScoreCandidates: scores.topScoreCandidates || [],
+      marketScenarioScore: scores.marketScenarioScore || null,
+      marketScenarioCandidates: scores.marketScenarioCandidates || [],
+      scoreCondition: scores.scoreCondition || "UNCONDITIONAL",
+      scoreProbabilityType: scores.scoreProbabilityType || "UNCONDITIONAL",
       scoreBasis: scores.scoreBasis || "Maç önü oranları ve erişilebilen son 5 maç formu",
       mainPick: chosen?.market || "Maç önü oranlarından doğrulanmış tercih bulunamadı",
       alternative: alternative?.market || "Doğrulanmış alternatif bulunamadı",
@@ -3406,7 +3416,7 @@ async function runDailyAnalysisJob(job) {
         const mainPick = supported && ["KG VAR","MS 2.5 ÜST"].includes(supported.market) &&
           Number(supported.odd) >= DAILY_MARKET_ODDS_MIN && Number(supported.odd) <= DAILY_MARKET_ODDS_MAX
           ? supported.market : market.market;
-        // Ana tercih belirlendikten sonra tam skor aynı pazar koşulu altında seçilir.
+        // Ana tercih yalnızca ayrı market senaryosunu etkiler; kesin skor koşulsuz kalır.
         scores = scorePrediction(prematchFixture, homeForm, awayForm, null, oddsRow, mainPick);
         console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | unconditional=${JSON.stringify(scores.topScoreCandidates)} | marketScenario=${JSON.stringify(scores.marketScenarioCandidates)} | model=${scores.modelVersion} fit=${scores.modelFitError} markets=${JSON.stringify(scores.marketTargetsUsed)} | pick=${mainPick} | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} | basis=${scores.scoreBasis} | HTbasis=${scores.halfTimeBasis}`);
         const other = mainPick === "KG VAR" ? "MS 2.5 ÜST" : "KG VAR";
