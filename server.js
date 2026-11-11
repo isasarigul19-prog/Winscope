@@ -1998,6 +1998,64 @@ app.get("/api/surprise-scenarios", async (req, res) => {
 });
 
 
+
+// 638 tamamlanmış sürpriz tez kaydını ham oranlar ve gerçek sonuçlarla dışa aktarır.
+app.get("/api/surprise-thesis/export", async (_req, res) => {
+  if (!databasePool) {
+    return res.status(503).json({ error: "Dışa aktarma için DATABASE_URL gerekli." });
+  }
+  try {
+    await archiveDatabaseReady;
+    const result = await databasePool.query(`
+      SELECT
+        fixture_id, match_date, kickoff_at, league, home_team, away_team,
+        opening_odds, closing_odds, halftime_score, final_score, htft_result,
+        over25_outcome, btts_outcome, settled, settled_at
+      FROM winscope_surprise_scenarios
+      WHERE settled = TRUE
+      ORDER BY match_date ASC, kickoff_at ASC NULLS LAST, fixture_id ASC
+    `);
+    const rows = result.rows.map(row => ({
+      ...row,
+      opening_favorite: favoriteFromOdds(row.opening_odds),
+      closing_favorite: favoriteFromOdds(row.closing_odds)
+    }));
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="winscope-surprise-thesis-settled.json"'
+    );
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(200).json({
+      exportedAt: new Date().toISOString(),
+      total: rows.length,
+      settledOnly: true,
+      fields: [
+        "fixture_id", "match_date", "kickoff_at", "league", "home_team", "away_team",
+        "opening_odds", "closing_odds", "opening_favorite", "closing_favorite",
+        "halftime_score", "final_score", "htft_result", "over25_outcome",
+        "btts_outcome", "settled", "settled_at"
+      ],
+      rows
+    });
+  } catch (error) {
+    console.error(`[Surprise thesis export] ${error.message}`);
+    return res.status(500).json({ error: "Tarihsel sürpriz tez kayıtları dışa aktarılamadı." });
+  }
+});
+
+function favoriteFromOdds(snapshot) {
+  const odds = snapshot?.oneXtwo;
+  if (!odds) return null;
+  const candidates = [
+    ["1", Number(odds.home)],
+    ["X", Number(odds.draw)],
+    ["2", Number(odds.away)]
+  ].filter(([, value]) => Number.isFinite(value) && value > 1);
+  candidates.sort((a, b) => a[1] - b[1]);
+  return candidates[0]?.[0] || null;
+}
+
 app.get("/api/surprise-thesis", async (req, res) => {
   if (!databasePool) return res.status(503).json({error:"Sürpriz tez araştırması için DATABASE_URL gerekli.",rows:[]});
   try {
