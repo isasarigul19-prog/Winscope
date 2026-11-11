@@ -3762,6 +3762,49 @@ app.get("/api/archive/odds", async (req, res) => {
   }
 });
 
+app.get("/api/archive/export", async (_req, res) => {
+  if (!databasePool) return res.status(503).json({ error: "PostgreSQL bağlantısı yok; arşiv dışa aktarılamıyor." });
+  try {
+    await archiveDatabaseReady;
+    const [fixtures, odds, analyses, coupons] = await Promise.all([
+      databasePool.query(
+        "SELECT fixture_id, match_date, kickoff_at, status, home_team, away_team, league, payload, source_endpoint, first_seen_at, last_seen_at FROM winscope_fixture_archive ORDER BY fixture_id"
+      ),
+      databasePool.query(
+        "SELECT id, fixture_id, payload, source_endpoint, captured_at FROM winscope_fixture_odds_archive ORDER BY id"
+      ),
+      databasePool.query(
+        "SELECT id, payload, created_at FROM winscope_archive WHERE category='analysis' ORDER BY id"
+      ),
+      databasePool.query(
+        "SELECT id, payload, created_at FROM winscope_archive WHERE category='coupon' ORDER BY id"
+      )
+    ]);
+    const exportedAt = new Date().toISOString();
+    const archive = {
+      exportedAt,
+      format: "winscope-full-archive-v1",
+      counts: {
+        fixtures: fixtures.rowCount,
+        odds: odds.rowCount,
+        analyses: analyses.rowCount,
+        coupons: coupons.rowCount
+      },
+      fixtures: fixtures.rows,
+      odds: odds.rows,
+      analyses: analyses.rows,
+      coupons: coupons.rows
+    };
+    const stamp = exportedAt.replace(/[:.]/g, "-");
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="winscope-full-archive-${stamp}.json"`);
+    res.setHeader("Cache-Control", "no-store");
+    res.status(200).send(JSON.stringify(archive));
+  } catch (error) {
+    res.status(500).json({ error: error.message || "Arşiv dışa aktarılamadı." });
+  }
+});
+
 app.get("/api/market-shortlist", async (req, res) => {
   const date = String(req.query.date || "");
   const marketKey = String(req.query.market || "");
