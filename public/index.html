@@ -64,7 +64,8 @@ window.analyze=analyze;window.stats=stats;$('refresh').onclick=live;$('bulletin'
      list.innerHTML='<div class="market-empty">Bu markette belirlenen değer şartlarını karşılayan maç yok. Değerli olmayan adaylar özellikle gösterilmedi.</div>';
      return;
    }
-   list.innerHTML=data.picks.map((p,i)=>`<article class="market-pick"><div class="market-pick-top"><div class="market-pick-teams">${i+1}. ${esc(p.home)} <span style="color:#42e6a0">VS</span> ${esc(p.away)}</div><div class="market-pick-pct">%${Number(p.percent).toFixed(1)}</div></div><div class="market-pick-meta">${esc(p.league||'Lig bilgisi yok')} · ${esc(p.market)} · ${data.formOnly?`İY örneklemi: son 5 maç ${p.sampleSize5}/5 · son 10 maç ${p.sampleSize10}/10`:`Değer farkı +${Number(p.edge).toFixed(1)} puan · ${esc(p.bookmaker)}`}</div></article>`).join('');
+   const kickoffText=(iso)=>{if(!iso)return 'Başlama saati yok';const dt=new Date(iso);return Number.isNaN(dt.getTime())?'Başlama saati yok':'🕒 '+new Intl.DateTimeFormat('tr-TR',{timeZone:'Europe/Istanbul',hour:'2-digit',minute:'2-digit',hour12:false}).format(dt)+' (TSİ)';};
+   list.innerHTML=data.picks.map((p,i)=>`<article class="market-pick"><div class="market-pick-top"><div class="market-pick-teams">${i+1}. ${esc(p.home)} <span style="color:#42e6a0">VS</span> ${esc(p.away)}</div><div class="market-pick-pct">%${Number(p.percent).toFixed(1)}</div></div><div class="market-pick-meta">${esc(kickoffText(p.kickoffAt))} · ${esc(p.league||'Lig bilgisi yok')} · ${esc(p.market)} · ${data.formOnly?`İY örneklemi: son 5 maç ${p.sampleSize5}/5 · son 10 maç ${p.sampleSize10}/10`:`Değer farkı +${Number(p.edge).toFixed(1)} puan · ${esc(p.bookmaker)}`}</div></article>`).join('');
  }catch(error){
    info.textContent='';list.innerHTML=`<div class="market-empty">${esc(error.message)}</div>`;
  }
