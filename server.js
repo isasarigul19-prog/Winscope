@@ -307,6 +307,10 @@ if (databasePool) {
       for (const row of goalTrackingRows.rows) {
         const id = Number(row.fixture_id);
         if (!id) continue;
+        if (String(row.source_label || "") === "İlk yarı erken gol hazırlık takibi") {
+          await databasePool.query("DELETE FROM winscope_goal_alert_tracking WHERE fixture_id=$1", [id]);
+          continue;
+        }
         const lastScore = String(row.last_score || "0-0");
         goalTrackedFixtures.set(id, { home:row.home_team, away:row.away_team, league:row.league,
           sourceLabel:row.source_label || "Canlı maç takibi", baselineScore:lastScore });
@@ -3411,7 +3415,7 @@ async function runDailyAnalysisJob(job) {
         const other = mainPick === "KG VAR" ? "MS 2.5 ÜST" : "KG VAR";
         const altRow = oddsForFixture(oddsRow).find(x=>x.market===other && Number(x.odd)>=DAILY_MARKET_ODDS_MIN && Number(x.odd)<=DAILY_MARKET_ODDS_MAX);
         const analysis = {
-          fixtureId:match.id, matchDate:date, home:match.home, away:match.away, league:match.league,
+          fixtureId:match.id, matchDate:date, kickoffAt:match.fixtureDate || null, home:match.home, away:match.away, league:match.league,
           halfTimeScore:scores.halfTimeScore, fullTimeScore:scores.fullTimeScore,
           alternativeFullTimeScore:scores.alternativeFullTimeScore || null,
           sixPlusProbability:scores.sixPlusProbability ?? null,
@@ -3768,8 +3772,12 @@ app.get("/api/market-shortlist", async (req, res) => {
     await archiveDatabaseReady;
     const stored = databasePool
       ? (await databasePool.query(
-          "SELECT payload FROM winscope_archive WHERE category='analysis' ORDER BY id DESC"
-        )).rows.map(row => row.payload)
+          `SELECT a.payload, f.kickoff_at FROM winscope_archive a
+           LEFT JOIN winscope_fixture_archive f
+             ON f.fixture_id = COALESCE(NULLIF(a.payload->>'fixture_id','')::bigint,
+                                        NULLIF(a.payload->'analysis'->>'fixtureId','')::bigint)
+           WHERE a.category='analysis' ORDER BY a.id DESC`
+        )).rows.map(row => ({ ...row.payload, archiveKickoffAt:row.kickoff_at }))
       : (archives.analyses || []);
     const unique = new Map();
     for (const record of stored) {
@@ -3808,6 +3816,7 @@ app.get("/api/market-shortlist", async (req, res) => {
         home: record?.home_team || a?.home || a?.home_team || "",
         away: record?.away_team || a?.away || a?.away_team || "",
         league: a?.league || record?.league || "",
+        kickoffAt: a?.kickoffAt || a?.fixtureDate || record?.archiveKickoffAt || null,
         market: cfg.label,
         percent,
         edge: edge == null ? null : Number(edge.toFixed(1)),
@@ -3899,17 +3908,9 @@ async function runEarlyFirstHalfPick() {
         fetchLiveGoalProfile(f.homeId, f.id),
         fetchLiveGoalProfile(f.awayId, f.id)
       ]);
-      // Sessiz T-5 hazırlığı aynı zamanda skor değişimi alarmı için başlangıç
-      // skorunu kaydeder; böylece maç erken golle 3. dakika taramasından çıksa da
-      // GOOOOL tarayıcısı bu maçı takip edebilir.
-      const earlyGoalTrack = {
-        home: f.home, away: f.away, league: f.league || '',
-        sourceLabel: 'İlk yarı erken gol hazırlık takibi', baselineScore: '0-0'
-      };
-      goalTrackedFixtures.set(Number(f.id), earlyGoalTrack);
-      if (!goalScoreCache.has(Number(f.id))) goalScoreCache.set(Number(f.id), '0-0');
-      await persistGoalTracking(Number(f.id), earlyGoalTrack);
-      console.log(`[EARLY HT PREPARED] fixture=${f.id} window=T-5 notification=false goalTracking=true`);
+      // T-5 sessiz hazırlık: gol alarmı TAKİBİ BAŞLATILMAZ.
+      // Takip ancak 3-5. dakikada başarılı Telegram tercih bildiriminden sonra açılır.
+      console.log(`[EARLY HT PREPARED] fixture=${f.id} window=T-5 notification=false goalTracking=false`);
     }
 
     // Tek bildirim yalnızca 3-5. dakikada, gerçek 1H canlı istatistikleriyle.
@@ -4258,6 +4259,12 @@ setInterval(async () => {
     const liveById = new Map(liveMatches.map(m => [Number(m.id), m]));
 
     for (const [fixtureId, tracked] of goalTrackedFixtures.entries()) {
+      if (tracked.sourceLabel === "İlk yarı erken gol hazırlık takibi") {
+        goalTrackedFixtures.delete(fixtureId);
+        goalScoreCache.delete(fixtureId);
+        if (databasePool) await databasePool.query("DELETE FROM winscope_goal_alert_tracking WHERE fixture_id=$1", [fixtureId]).catch(()=>{});
+        continue;
+      }
       let match = liveById.get(fixtureId);
 
       // API'nin genel canlı listesinden düşen takipli maçı fixture ID ile tekrar kontrol et.
