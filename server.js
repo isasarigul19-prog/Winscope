@@ -3719,6 +3719,67 @@ app.get("/api/archive/odds", async (req, res) => {
   }
 });
 
+app.get("/api/market-shortlist", async (req, res) => {
+  const date = String(req.query.date || "");
+  const marketKey = String(req.query.market || "");
+  const configs = {
+    ht05: { label:"İY 0.5 ÜST", pct:"ht05", price:"overOdd", opposite:"underOdd" },
+    ht15: { label:"İY 1.5 ÜST", pct:"ht15", price:"overOdd", opposite:"underOdd" },
+    btts: { label:"KG VAR", pct:"btts", price:"yesOdd", opposite:"noOdd" },
+    ms25: { label:"MS 2.5 ÜST", pct:"ms25", price:"overOdd", opposite:"underOdd" }
+  };
+  const cfg = configs[marketKey];
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !cfg) {
+    return res.status(400).json({ error:"Tarih veya market seçimi geçersiz." });
+  }
+  try {
+    await archiveDatabaseReady;
+    const stored = databasePool
+      ? (await databasePool.query(
+          "SELECT payload FROM winscope_archive WHERE category='analysis' ORDER BY id DESC"
+        )).rows.map(row => row.payload)
+      : (archives.analyses || []);
+    const unique = new Map();
+    for (const record of stored) {
+      const a = record?.analysis || record;
+      const rowDate = String(record?.match_date || a?.matchDate || a?.match_date || "").slice(0,10);
+      const fixtureId = Number(record?.fixture_id || a?.fixtureId || a?.fixture_id || 0);
+      if (rowDate !== date || !fixtureId || unique.has(fixtureId)) continue;
+      const percentages = a?.marketPercentages || {};
+      const percent = Number(percentages?.[cfg.pct]?.percent);
+      if (!Number.isFinite(percent)) continue;
+      const marketRows = Array.isArray(a?.rawPrematchMarkets) ? a.rawPrematchMarkets : [];
+      const candidates = marketRows.filter(x => String(x.market || "").toUpperCase() === cfg.label);
+      candidates.sort((x,y) => Number(/bet365/i.test(y.bookmaker)) - Number(/bet365/i.test(x.bookmaker)));
+      const quote = candidates[0];
+      const odd = Number(quote?.[cfg.price]);
+      const oppositeOdd = Number(quote?.[cfg.opposite]);
+      if (!Number.isFinite(odd) || odd < 1.50 || odd > 1.75) continue;
+      let marketFairPercent = 100 / odd;
+      if (Number.isFinite(oppositeOdd) && oppositeOdd > 1) {
+        const inv = 1 / odd, invOpp = 1 / oppositeOdd;
+        marketFairPercent = inv / (inv + invOpp) * 100;
+      }
+      const edge = percent - marketFairPercent;
+      if (edge < 2) continue;
+      unique.set(fixtureId, {
+        fixtureId,
+        home: record?.home_team || a?.home || a?.home_team || "",
+        away: record?.away_team || a?.away || a?.away_team || "",
+        league: a?.league || record?.league || "",
+        market: cfg.label,
+        percent,
+        edge: Number(edge.toFixed(1)),
+        bookmaker: quote?.bookmaker || a?.oddsBookmaker || "Kaynak belirtilmedi"
+      });
+    }
+    const picks = [...unique.values()].sort((a,b) => b.percent-a.percent || b.edge-a.edge);
+    res.json({ date, market:cfg.label, count:picks.length, picks, minEdge:2, oddsBand:"1.50–1.75" });
+  } catch (error) {
+    res.status(500).json({ error:error.message });
+  }
+});
+
 app.get("/api/archives", async (_req, res) => {
   await archiveDatabaseReady;
   const analyses = dedupeAnalysisArchiveRows(archives.analyses || []).slice(0,1000);
