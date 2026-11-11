@@ -3623,9 +3623,54 @@ function score6Predict(odds){
   const total=rows.reduce((s,x)=>s+weight(x),0)||1;
   const six=rows.reduce((s,x)=>s+((x.r[7]===true || (x.r[3] && Number(x.r[3].split('-')[0])+Number(x.r[3].split('-')[1])>=6))?weight(x):0),0)/total;
   const fmt=x=>x?`${x} (benzer oran örnekleri)`:'Yeterli skor örneği yok';
-  const htScore=ht[0]?.[0]||null, ftScore=ft[0]?.[0]||null;
-  // HT/FT code must agree with the selected HT and FT scores. Never independently
-  // combine a modal score pair with an unrelated modal 1/2 or 2/1 label.
+  const parsePair=value=>{
+    const m=String(value||'').match(/^(\\d+)\\s*-\\s*(\\d+)$/);
+    return m?{home:Number(m[1]),away:Number(m[2])}:null;
+  };
+  // İY ve MS skorları bağımsız modlardan seçilmez. Önce aynı referans
+  // kaydındaki tutarlı İY/MS çiftleri ağırlıklandırılır.
+  const jointPairs=new Map();
+  for(const item of rows){
+    const htPair=parsePair(item.r[5]), ftPair=parsePair(item.r[3]);
+    if(!htPair||!ftPair) continue;
+    if(ftPair.home<htPair.home||ftPair.away<htPair.away) continue;
+    const key=`${htPair.home}-${htPair.away}|${ftPair.home}-${ftPair.away}`;
+    const current=jointPairs.get(key)||{ht:`${htPair.home}-${htPair.away}`,ft:`${ftPair.home}-${ftPair.away}`,weight:0};
+    current.weight+=weight(item);
+    jointPairs.set(key,current);
+  }
+  const rankedPairs=[...jointPairs.values()].sort((a,b)=>b.weight-a.weight);
+  let htScore=rankedPairs[0]?.ht||null;
+  let ftScore=rankedPairs[0]?.ft||null;
+  // Referanslarda eşleşmiş çift bulunamazsa da skor mantıksal olarak
+  // korunur: seçilen İY skorunun altına düşmeyen en güçlü MS skoru alınır.
+  if(!htScore){
+    htScore=ht[0]?.[0]||null;
+    const hp=parsePair(htScore);
+    const compatible=ft.filter(([score])=>{
+      const fp=parsePair(score);
+      return hp&&fp&&fp.home>=hp.home&&fp.away>=hp.away;
+    });
+    ftScore=compatible[0]?.[0]||null;
+  }
+  const alternativeCandidates=new Map();
+  if(htScore){
+    for(const item of rows){
+      const hp=parsePair(htScore), rowHt=parsePair(item.r[5]), rowFt=parsePair(item.r[3]);
+      if(!hp||!rowFt||rowFt.home<hp.home||rowFt.away<hp.away) continue;
+      if(rowHt&&(rowHt.home!==hp.home||rowHt.away!==hp.away)) continue;
+      const key=`${rowFt.home}-${rowFt.away}`;
+      alternativeCandidates.set(key,(alternativeCandidates.get(key)||0)+weight(item));
+    }
+  }
+  const alternatives=[...alternativeCandidates].sort((a,b)=>b[1]-a[1]).map(x=>x[0]).filter(x=>x!==ftScore);
+  if(!alternatives.length&&htScore){
+    const hp=parsePair(htScore);
+    for(const [score,w] of ft){
+      const fp=parsePair(score);
+      if(fp&&hp&&fp.home>=hp.home&&fp.away>=hp.away&&score!==ftScore) alternatives.push(score);
+    }
+  }
   const resultCode=score=>{if(!score)return null;const [h,a]=score.split('-').map(Number);return h>a?'1':h<a?'2':'X';};
   const derivedHtft=htScore&&ftScore?`${resultCode(htScore)}/${resultCode(ftScore)}`:null;
   const htft=derivedHtft || explicitHtft[0]?.[0] || null;
@@ -3633,12 +3678,12 @@ function score6Predict(odds){
   const distinctOddsPatterns=new Set(rows.map(x=>x.r.slice(0,3).map(v=>Number(v).toFixed(2)).join('|'))).size;
   return {
     halfTimeScore:fmt(htScore),fullTimeScore:fmt(ftScore),
-    alternativeFullTimeScore:ft[1]?.[0]||'Yeterli alternatif örnek yok',
+    alternativeFullTimeScore:alternatives[0]||'Yeterli tutarlı alternatif örnek yok',
     sixPlusProbability:Number(six.toFixed(4)),sixPlusCandidate:six>=0.25,
     htft,htftSource:derivedHtft?'selected_scores_consistent':'reference_label_fallback',
     neighborCount:rows.length,referenceCount:SCORE6_REFERENCE_ROWS.length,
     distinctOddsPatterns,nearestDistance:Number((nearestDistances[0]??0).toFixed(4)),
-    model:'USER_ODDS_RESULT_NEAREST_NEIGHBOR_V2'
+    model:'USER_ODDS_RESULT_NEAREST_NEIGHBOR_V3_HT_FT_CONSISTENT'
   };
 }
 function score6PlainScore(value) {
