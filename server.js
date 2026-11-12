@@ -2066,15 +2066,57 @@ app.get("/api/surprise-thesis", async (req, res) => {
 
 // ── İY/MS ters sonuç motorları: deneysel, bağımsız takip ──
 function reversalOddsForFixture(oddsRow) {
+  // First use the shared odds parser so all existing bookmaker/market handling stays intact.
   const parsed = oddsForFixture(oddsRow);
   const rows = parsed.filter(x => x.market === "MS 1" && x.home && x.draw && x.away);
-  const bet365 = rows.find(x => /bet\s*365/i.test(x.bookmaker));
-  const chosen = bet365 || rows[0] || null;
+  let chosen = rows.find(x => /bet\s*365/i.test(x.bookmaker)) || rows[0] || null;
+
+  // API-Football feeds are not fully consistent: some providers label 1X2 as
+  // "Home Win / Draw / Away Win" or expose market id 1 without a market name.
+  // Read those variants locally for this experimental motor only; do not change
+  // the shared parser used by live picks, coupons, or daily analysis.
+  if (!chosen) {
+    const books = bookmakerRows(oddsRow);
+    const extracted = [];
+    const norm = value => String(value ?? "").toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[–—−]/g, "-").replace(/[()]/g, " ")
+      .replace(/\s+/g, " ").trim();
+    for (const book of books) {
+      const bookName = String(book.name || book.bookmaker?.name || oddsRow?.bookmaker?.name || "Kaynak belirtilmedi");
+      const bets = Array.isArray(book.bets) ? book.bets : (Array.isArray(book.odds) ? book.odds : []);
+      for (const bet of bets) {
+        const marketName = norm(bet.name || bet.bet || bet.market || "");
+        const values = Array.isArray(bet.values) ? bet.values : [];
+        const labels = values.map(v => norm(v.value ?? v.name ?? v.label ?? v.selection ?? ""));
+        const hasThreeWayLabels = labels.some(x => /^(home|home win|1|1 home|team 1)$/.test(x))
+          && labels.some(x => /^(draw|tie|x)$/.test(x))
+          && labels.some(x => /^(away|away win|2|2 away|team 2)$/.test(x));
+        const marketIs1X2 = /(1x2|match winner|full.?time result|full time result|match result|regular time result|three.?way|3.?way|moneyline|winner)/.test(marketName)
+          || Number(bet.id ?? bet.bet_id) === 1 || hasThreeWayLabels;
+        if (!marketIs1X2) continue;
+        let home = null, draw = null, away = null;
+        for (const value of values) {
+          const label = norm(value.value ?? value.name ?? value.label ?? value.selection ?? "");
+          const odd = Number(value.odd ?? value.odds ?? value.price);
+          if (!Number.isFinite(odd) || odd <= 1.01 || odd > 1000) continue;
+          if (/^(home|home win|1|1 home|team 1)$/.test(label)) home = odd;
+          else if (/^(draw|tie|x)$/.test(label)) draw = odd;
+          else if (/^(away|away win|2|2 away|team 2)$/.test(label)) away = odd;
+        }
+        if ([home, draw, away].every(x => Number.isFinite(x) && x > 1.01)) {
+          extracted.push({ bookmaker: bookName, home, draw, away });
+        }
+      }
+    }
+    chosen = extracted.find(x => /bet\s*365/i.test(x.bookmaker)) || extracted[0] || null;
+  }
   if (!chosen) return null;
   const raw = [Number(chosen.home), Number(chosen.draw), Number(chosen.away)];
-  if (!raw.every(x => Number.isFinite(x) && x > 1.01)) return null;
+  if (!raw.every(x => Number.isFinite(x) && x > 1.01 && x <= 1000)) return null;
   const inv = raw.map(x => 1 / x);
   const sum = inv.reduce((a,b) => a+b, 0);
+  if (!Number.isFinite(sum) || sum <= 0) return null;
   return { bookmaker: chosen.bookmaker, home: inv[0]/sum, draw: inv[1]/sum, away: inv[2]/sum };
 }
 
@@ -2147,14 +2189,16 @@ app.get("/api/reversal-motors", async (req,res) => {
       const pageData=await cachedProviderRequest(`reversal-odds:${date}:${page}`,`/odds?date=${date}&page=${page}`,5*60*1000);
       for(const row of pageData.response||[]) if(row.fixture?.id) oddsById.set(Number(row.fixture.id),row);
     }
-    let checked=0, noOdds=0, candidates=0;
+    let checked=0, noOdds=0, candidates=0, fixtureOddsRows=0, no1X2=0, rejectedByScenario=0;
     for(const match of fixtures){
       const oddsRow=oddsById.get(match.id);
       if(!oddsRow){noOdds++;continue;}
+      fixtureOddsRows++;
       const prob=reversalOddsForFixture(oddsRow);
-      if(!prob) continue;
+      if(!prob){no1X2++;continue;}
       checked++;
       const scored=scoreReversalScenario(prob,scenario);
+      if(!scored) rejectedByScenario++;
       if(!scored) continue;
       candidates++;
       await databasePool.query(`INSERT INTO winscope_reversal_predictions
@@ -2169,7 +2213,7 @@ app.get("/api/reversal-motors", async (req,res) => {
     const wins=result.rows.filter(x=>x.outcome==="won").length;
     const losses=result.rows.filter(x=>x.outcome==="lost").length;
     const pending=result.rows.filter(x=>!x.outcome).length;
-    res.json({success:true,date,scenario,diagnostics:{fixtures:fixtures.length,oddsMatched:checked,noOdds,candidates,saved:result.rowCount},summary:{total:wins+losses,won:wins,lost:losses,pending,winRate:wins+losses?Math.round(wins*100/(wins+losses)):null},rows:result.rows});
+    res.json({success:true,date,scenario,diagnostics:{fixtures:fixtures.length,oddsRows:oddsById.size,oddsMatched:fixtureOddsRows,parsed1X2:checked,noOdds,no1X2,candidates,rejectedByScenario,saved:result.rowCount},summary:{total:wins+losses,won:wins,lost:losses,pending,winRate:wins+losses?Math.round(wins*100/(wins+losses)):null},rows:result.rows});
   } catch(error){res.status(500).json({error:error.message,rows:[]});}
 });
 
@@ -3290,75 +3334,17 @@ app.post("/api/analyses/approve", async (req, res) => {
   res.json({ success: true, persisted: storage.persisted, trackingPersisted, storageReason: storage.reason || storage.error || null });
 });
 
-// Günün Analizleri arşivindeki HER tahmin otomatik sonuç takibine alınır.
-// Var olan takip kaydı varsa tahmini veya sonucunu asla ezmez.
-async function backfillArchivedAnalysisPredictions() {
-  const source = dedupeAnalysisArchiveRows(archives.analyses || []).slice(0, 1000);
-  let inserted = 0;
-  const parseScore = value => {
-    const m = String(value || "").match(/(\d+)\s*[-:]\s*(\d+)/);
-    return m ? `${Number(m[1])}-${Number(m[2])}` : null;
-  };
-  const seen = new Set();
-  for (const row of source) {
-    const a = row?.analysis || row || {};
-    const fixtureId = Number(row?.fixture_id || row?.fixtureId || a.fixtureId || 0);
-    if (!fixtureId || seen.has(fixtureId)) continue;
-    seen.add(fixtureId);
-    const home = String(row?.home_team || row?.home || a.home || "").trim();
-    const away = String(row?.away_team || row?.away || a.away || "").trim();
-    const predictedHT = parseScore(a.halfTimeScore);
-    const predictedFT = parseScore(a.fullTimeScore);
-    const matchDate = String(row?.match_date || a.matchDate || "").slice(0,10);
-    if (!home || !away || !predictedFT || !/^\d{4}-\d{2}-\d{2}$/.test(matchDate)) continue;
-    const existing = predictionTracking.find(x => Number(x.fixtureId) === fixtureId);
-    if (!existing) predictionTracking.push({
-      fixtureId, home, away, predictedHT, predictedFT,
-      alternativeFT:parseScore(a.alternativeFullTimeScore), actualHT:null, actualFT:null,
-      exactFT:null, exactHT:null, matchDate, settled:false,
-      createdAt:row?.created_at || a.created_at || new Date().toISOString()
-    });
-    if (databasePool) {
-      const result = await databasePool.query(`INSERT INTO winscope_predictions
-        (fixture_id,home_team,away_team,predicted_ht,predicted_ft,alternative_ft,match_date)
-        VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(fixture_id) DO NOTHING`,
-        [fixtureId,home,away,predictedHT,predictedFT,parseScore(a.alternativeFullTimeScore),matchDate]);
-      inserted += result.rowCount || 0;
-    }
-  }
-  return { scanned:source.length, inserted, inMemory:predictionTracking.length };
-}
-
 app.get("/api/predictions/summary", async (_req, res) => {
   await archiveDatabaseReady;
-  try {
-    const backfill = await backfillArchivedAnalysisPredictions();
-    await settleApprovedPredictions();
-    let rows = predictionTracking;
-    if (databasePool) {
-      const stored = await databasePool.query(`SELECT fixture_id,home_team,away_team,predicted_ht,predicted_ft,
-        alternative_ft,actual_ht,actual_ft,exact_ft,exact_ht,match_date,settled_at,created_at
-        FROM winscope_predictions ORDER BY created_at DESC LIMIT 1000`);
-      rows = stored.rows.map(row => ({
-        fixtureId:Number(row.fixture_id),home:row.home_team,away:row.away_team,
-        predictedHT:row.predicted_ht,predictedFT:row.predicted_ft,alternativeFT:row.alternative_ft,
-        actualHT:row.actual_ht,actualFT:row.actual_ft,exactFT:row.exact_ft,exactHT:row.exact_ht,
-        matchDate:row.match_date,settled:Boolean(row.settled_at),createdAt:row.created_at
-      }));
-    }
-    const settled = rows.filter(x => x.settled && x.actualFT);
-    const exactFT = settled.filter(x => x.exactFT === true).length;
-    const exactHTRows = settled.filter(x => x.exactHT !== null);
-    res.json({ total:rows.length, settled:settled.length, pending:rows.length-settled.length,
-      exactFullTime:exactFT, exactFullTimeRate:settled.length?Math.round(100*exactFT/settled.length):null,
-      exactHalfTime:exactHTRows.filter(x=>x.exactHT===true).length,
-      exactHalfTimeRate:exactHTRows.length?Math.round(100*exactHTRows.filter(x=>x.exactHT===true).length/exactHTRows.length):null,
-      backfill, results:rows.slice(0,1000),
-      note:"Günün Analizleri arşivindeki tüm tahminler otomatik takip edilir; sonuçlar maç tamamlanınca API-Football'dan doğrulanır." });
-  } catch (error) {
-    console.error(`[Prediction summary] ${error.message}`);
-    res.status(500).json({error:"Tahmin sonuçları alınamadı.",detail:error.message,results:[]});
-  }
+  const rows = predictionTracking;
+  const settled = rows.filter(x => x.settled && x.actualFT);
+  const exactFT = settled.filter(x => x.exactFT === true).length;
+  const exactHTRows = settled.filter(x => x.exactHT !== null);
+  res.json({ total:rows.length, settled:settled.length, pending:rows.length-settled.length,
+    exactFullTime:exactFT, exactFullTimeRate:settled.length?Math.round(100*exactFT/settled.length):null,
+    exactHalfTime:exactHTRows.filter(x=>x.exactHT===true).length,
+    exactHalfTimeRate:exactHTRows.length?Math.round(100*exactHTRows.filter(x=>x.exactHT===true).length/exactHTRows.length):null,
+    results:settled.slice(0,100), note:"Yalnızca kullanıcı tarafından onaylanıp takip kaydına alınan analizler ölçülür." });
 });
 
 // Canlı tercih takip paneli: yalnızca Telegram'a gerçekten gönderilen canlı seçimleri sayar.
@@ -3671,16 +3657,12 @@ async function runDailyAnalysisJob(job) {
           ? supported.market : market.market;
         // Ana tercih yalnızca ayrı market senaryosunu etkiler; kesin skor koşulsuz kalır.
         scores = scorePrediction(prematchFixture, homeForm, awayForm, null, oddsRow, mainPick);
-        console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | unconditional=${JSON.stringify(scores.topScoreCandidates)} | marketScenario=${JSON.stringify(scores.marketScenarioCandidates)} | model=${scores.modelVersion} fit=${scores.modelFitError} markets=${JSON.stringify(scores.marketTargetsUsed)} | pick=${mainPick} | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} conditional=${scores.marketScenarioScore||"n/a"} | basis=${scores.scoreBasis} | HTbasis=${scores.halfTimeBasis}`);
+        console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | unconditional=${JSON.stringify(scores.topScoreCandidates)} | marketScenario=${JSON.stringify(scores.marketScenarioCandidates)} | model=${scores.modelVersion} fit=${scores.modelFitError} markets=${JSON.stringify(scores.marketTargetsUsed)} | pick=${mainPick} | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} | basis=${scores.scoreBasis} | HTbasis=${scores.halfTimeBasis}`);
         const other = mainPick === "KG VAR" ? "MS 2.5 ÜST" : "KG VAR";
         const altRow = oddsForFixture(oddsRow).find(x=>x.market===other && Number(x.odd)>=DAILY_MARKET_ODDS_MIN && Number(x.odd)<=DAILY_MARKET_ODDS_MAX);
         const analysis = {
           fixtureId:match.id, matchDate:date, home:match.home, away:match.away, league:match.league,
           halfTimeScore:scores.halfTimeScore, fullTimeScore:scores.fullTimeScore,
-          // Ana tercih için koşullu skor ayrıca gösterilir; koşulsuz en olası skor korunur.
-          unconditionalFullTimeScore:scores.unconditionalFullTimeScore || null,
-          marketScenarioScore:scores.marketScenarioScore || null,
-          marketScenarioAlternativeScore:scores.marketScenarioAlternativeScore || null,
           alternativeFullTimeScore:scores.alternativeFullTimeScore || null,
           sixPlusProbability:scores.sixPlusProbability ?? null,
           sixPlusCandidate:scores.sixPlusCandidate === true,
@@ -4974,7 +4956,7 @@ app.get("/api/daily-market-tracking/summary", async (req, res) => {
 
 async function settleApprovedPredictions() {
   if (!predictionTracking.some(x => !x.settled)) return;
-  for (const item of predictionTracking.filter(x => !x.settled).slice(0, 100)) {
+  for (const item of predictionTracking.filter(x => !x.settled).slice(0, 20)) {
     try {
       const payload = await cachedProviderRequest(`settle-fixture:${item.fixtureId}`, `/fixtures?id=${item.fixtureId}`, 5 * 60 * 1000);
       const row = payload.response?.[0];
@@ -4992,7 +4974,6 @@ async function settleApprovedPredictions() {
     } catch (error) { console.warn(`[Prediction settlement] fixture=${item.fixtureId}: ${error.message}`); }
   }
 }
-setTimeout(() => { void (async()=>{ try { await archiveDatabaseReady; const r=await backfillArchivedAnalysisPredictions(); console.log(`[Prediction archive backfill] scanned=${r.scanned} inserted=${r.inserted} tracked=${r.inMemory}`); await settleApprovedPredictions(); } catch(e) { console.warn(`[Prediction archive backfill] ${e.message}`); } })(); }, 90000);
 setInterval(() => { void settleApprovedPredictions(); }, 15 * 60 * 1000);
 setInterval(() => { void settleLivePredictions(); }, 15 * 60 * 1000);
 setInterval(() => { void settleDailyMarketPredictions(); }, 15 * 60 * 1000);
