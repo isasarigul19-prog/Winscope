@@ -711,8 +711,8 @@ function oddsForFixture(oddsRow, { includeFirstHalfBtts = false } = {}) {
         let key = null;
         if (isHomeTeam && [0.5, 1.5].includes(Number(line))) key = `EV ${line} ÜST`;
         else if (isAwayTeam && [0.5, 1.5].includes(Number(line))) key = `DEP ${line} ÜST`;
-        else if (isHalf && [0.5, 1.5, 2.5].includes(Number(line))) key = `İY ${line} ÜST`;
-        else if (isTotal && [0.5, 1.5, 2.5, 3.5, 5.5].includes(Number(line))) key = `MS ${line} ÜST`;
+        else if (isHalf && [0.5, 1.5, 2.5, 3.5].includes(Number(line))) key = `İY ${line} ÜST`;
+        else if (isTotal && [0.5, 1.5, 2.5, 3.5, 4.5, 5.5].includes(Number(line))) key = `MS ${line} ÜST`;
         if (key) add(book, key, side, odd);
       }
     }
@@ -1057,7 +1057,7 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     away:Number(outcomePct.away)/100
   } : null;
 
-  const totalLines = [["MS 1.5 ÜST",2],["MS 2.5 ÜST",3],["MS 3.5 ÜST",4],["MS 5.5 ÜST",6]];
+  const totalLines = [["MS 1.5 ÜST",2],["MS 2.5 ÜST",3],["MS 3.5 ÜST",4],["MS 4.5 ÜST",5],["MS 5.5 ÜST",6]];
   const totalLambdas = totalLines.map(([market,threshold]) =>
     lambdaFromMarketProbability(pre[market],threshold,0)
   ).filter(Number.isFinite).sort((a,b)=>a-b);
@@ -1097,14 +1097,14 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     return cells;
   };
   const matrixStats=(lh,la)=>{
-    let home=0,draw=0,away=0,over15=0,over25=0,over35=0,over55=0,btts=0,home15=0,away15=0;
+    let home=0,draw=0,away=0,over15=0,over25=0,over35=0,over45=0,over55=0,btts=0,home15=0,away15=0;
     for(const cell of dcGrid(lh,la,10)){
       const {home:h,away:a,probability:p}=cell, total=h+a;
       if(h>a) home+=p; else if(h===a) draw+=p; else away+=p;
       if(total>=2) over15+=p; if(total>=3) over25+=p; if(total>=4) over35+=p; if(total>=6) over55+=p;
       if(h>0&&a>0) btts+=p; if(h>=2) home15+=p; if(a>=2) away15+=p;
     }
-    return {home,draw,away,over15,over25,over35,over55,btts,home15,away15};
+    return {home,draw,away,over15,over25,over35,over45,over55,btts,home15,away15};
   };
   const targets=[];
   const addTarget=(key,target,weight)=>{
@@ -1119,7 +1119,8 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   addTarget("over15",pre["MS 1.5 ÜST"],1.0);
   addTarget("over25",pre["MS 2.5 ÜST"],2.2);
   addTarget("over35",pre["MS 3.5 ÜST"],1.2);
-  addTarget("over55",pre["MS 5.5 ÜST"],0.45);
+  addTarget("over45",pre["MS 4.5 ÜST"],0.75);
+  addTarget("over55",pre["MS 5.5 ÜST"],0.90);
   addTarget("btts",pre["KG VAR"],1.8);
   addTarget("home15",pre["EV 1.5 ÜST"],1.0);
   addTarget("away15",pre["DEP 1.5 ÜST"],1.0);
@@ -1141,14 +1142,14 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   // Kaba tarama + en iyi bölgenin hassas taraması. Her maçta iki gol
   // beklentisi ayrı optimize edilir; tek bir sabit gol paylaşımı yoktur.
   if(targets.length||priorHome!=null||priorAway!=null){
-    for(let h=0.20;h<=3.8001;h+=0.10) for(let a=0.20;a<=3.8001;a+=0.10){
+    for(let h=0.20;h<=5.5001;h+=0.10) for(let a=0.20;a<=5.5001;a+=0.10){
       const loss=lossAt(h,a);
       if(loss<bestLoss){bestLoss=loss;lambdaHome=h;lambdaAway=a;}
     }
     if(lambdaHome!=null){
       const centerH=lambdaHome,centerA=lambdaAway;
-      for(let h=Math.max(0.12,centerH-0.12);h<=Math.min(4.0,centerH+0.12)+0.0001;h+=0.02)
-        for(let a=Math.max(0.12,centerA-0.12);a<=Math.min(4.0,centerA+0.12)+0.0001;a+=0.02){
+      for(let h=Math.max(0.12,centerH-0.12);h<=Math.min(5.8,centerH+0.12)+0.0001;h+=0.02)
+        for(let a=Math.max(0.12,centerA-0.12);a<=Math.min(5.8,centerA+0.12)+0.0001;a+=0.02){
           const loss=lossAt(h,a);
           if(loss<bestLoss){bestLoss=loss;lambdaHome=h;lambdaAway=a;}
         }
@@ -1159,8 +1160,8 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     sixPlusProbability:null,sixPlusCandidate:false,
     scoreBasis:"Maç önü oranı veya iki takımın son 5 maç gol verisi yetersiz"
   };
-  lambdaHome=Math.max(0.08,Math.min(4.5,lambdaHome));
-  lambdaAway=Math.max(0.08,Math.min(4.5,lambdaAway));
+  lambdaHome=Math.max(0.08,Math.min(6.0,lambdaHome));
+  lambdaAway=Math.max(0.08,Math.min(6.0,lambdaAway));
 
   const scores=dcGrid(lambdaHome,lambdaAway,10)
     .filter(x=>x.home<=9&&x.away<=9)
@@ -1225,26 +1226,30 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   // İlk yarı modeli: önce maç önü İY gol çizgileri, yoksa son 5 maçın
   // gerçek devre arası gol frekansları kullanılır. Sabit %44 varsayımı artık
   // tek başına kullanılmaz; yalnızca veri yoksa emniyetli yedek olarak kalır.
-  const ht05=pre["İY 0.5 ÜST"], ht15=pre["İY 1.5 ÜST"];
-  const fitLambdaFromRates = (p05, p15) => {
-    if (!Number.isFinite(p05) && !Number.isFinite(p15)) return null;
+  const ht05=pre["İY 0.5 ÜST"], ht15=pre["İY 1.5 ÜST"], ht25=pre["İY 2.5 ÜST"], ht35=pre["İY 3.5 ÜST"];
+  // İlk yarı 2.5/3.5 çizgileri de modele girer. Önceki sürüm bu yüksek gol
+  // sinyallerini tamamen yok saydığı için 3-0 gibi devre skorlarını sistematik
+  // olarak düşük tahmin edebilirdi. Her mevcut çizgi eşit kalibrasyon ağırlığı alır.
+  const fitLambdaFromRates = (rates) => {
+    const usable = rates.filter(x => Number.isFinite(x.p));
+    if (!usable.length) return null;
     let bestLambda=null, bestError=Infinity;
-    for(let l=0.05;l<=4.00;l+=0.005){
-      let error=0, count=0;
-      if(Number.isFinite(p05)){ error+=Math.pow(poissonProbabilityAtLeast(1,l,0)-p05,2); count++; }
-      if(Number.isFinite(p15)){ error+=Math.pow(poissonProbabilityAtLeast(2,l,0)-p15,2); count++; }
-      if(count && error/count<bestError){bestError=error/count;bestLambda=l;}
+    for(let l=0.05;l<=6.00;l+=0.005){
+      let error=0;
+      for(const x of usable) error += Math.pow(poissonProbabilityAtLeast(x.threshold,l,0)-x.p,2);
+      error /= usable.length;
+      if(error<bestError){bestError=error;bestLambda=l;}
     }
     return bestLambda;
   };
-  const marketHtLambda=fitLambdaFromRates(ht05,ht15);
+  const marketHtLambda=fitLambdaFromRates([{threshold:1,p:ht05},{threshold:2,p:ht15},{threshold:3,p:ht25},{threshold:4,p:ht35}]);
   const formHt05Vals=[homeForm?.htOver05Pct,awayForm?.htOver05Pct]
     .filter(Number.isFinite).map(x=>Number(x)/100);
   const formHt15Vals=[homeForm?.htOver15Pct,awayForm?.htOver15Pct]
     .filter(Number.isFinite).map(x=>Number(x)/100);
   const formHt05=formHt05Vals.length ? formHt05Vals.reduce((a,b)=>a+b,0)/formHt05Vals.length : null;
   const formHt15=formHt15Vals.length ? formHt15Vals.reduce((a,b)=>a+b,0)/formHt15Vals.length : null;
-  const formHtLambda=fitLambdaFromRates(formHt05,formHt15);
+  const formHtLambda=fitLambdaFromRates([{threshold:1,p:formHt05},{threshold:2,p:formHt15}]);
   let htTotal=null, halfTimeBasis="yedek %44 tam maç gol payı";
   if(Number.isFinite(marketHtLambda) && Number.isFinite(formHtLambda)){
     htTotal=0.65*marketHtLambda+0.35*formHtLambda;
@@ -1316,7 +1321,7 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     scoreCondition:preferredMarket || "UNCONDITIONAL",
     scoreProbabilityType:preferredMarket ? "MARKET_CONDITIONAL_FOR_PREDICTED_SCORE" : "UNCONDITIONAL",
     unconditionalScoreProbability:Number(best.probability.toFixed(4)),
-    modelVersion:"V7_UNCONDITIONAL_SCORE_MARKET_SCENARIO_SPLIT",
+    modelVersion:"V8_HT_HIGH_LINE_AND_HIGH_GOAL_RANGE",
     scoreModelMethod:"DIXON_COLES_LOW_SCORE_CORRECTION",
     dixonColesRho:Number(dcRho(lambdaHome,lambdaAway).toFixed(4)),
     htTeamFormUsed:Boolean(htTeamFormAvailable),
@@ -1387,7 +1392,7 @@ function chooseFormFallbackMarket(mode, fixture, forms, excludeMarket = null) {
   else if (minute < 66) allowed = total === 0 ? ["MS 1.5 ÜST"] : total === 1 ? ["MS 1.5 ÜST", "KG VAR"] : ["MS 2.5 ÜST", "KG VAR"];
   else if (minute <= 75) allowed = total <= 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST", "KG VAR"] : ["MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
   else allowed = total <= 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST"] : ["MS 2.5 ÜST", "MS 3.5 ÜST"];
-  const thresholds = { "EV 1.5 ÜST": 45, "DEP 1.5 ÜST": 45, "MS 0.5 ÜST": 55, "MS 1.5 ÜST": 50, "MS 2.5 ÜST": 48, "MS 3.5 ÜST": 34, "KG VAR": 48, "İY 0.5 ÜST": 52, "İY 1.5 ÜST": 34 };
+  const thresholds = { "EV 1.5 ÜST": 45, "DEP 1.5 ÜST": 45, "MS 0.5 ÜST": 55, "MS 1.5 ÜST": 50, "MS 2.5 ÜST": 48, "MS 3.5 ÜST": 34, "KG VAR": 48, "İY 0.5 ÜST": 52, "İY 1.5 ÜST": 34, "İY 2.5 ÜST": 24 };
   const scoreObj = scorePrediction(fixture, forms.home, forms.away, null, null);
   const candidates = allowed.filter(m => m !== excludeMarket && marketConsistentWithScore(m, scoreObj))
     .map(m => ({ market: m, formPct: marketSupport(m, forms.home, forms.away), bookmaker: "Son 5 maç formu (oran bulunamadı)", oddsTiming: "form-fallback", probability: null }))
