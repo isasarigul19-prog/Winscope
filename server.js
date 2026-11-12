@@ -2643,6 +2643,42 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
   evaluations.sort((a,b) => (b.ev + b.edge) - (a.ev + a.edge) || b.ev - a.ev);
   const chosen = candidates[0] || null;
   const directionLabel = goalDirection === "home" ? "Ev sahibi golü daha olası" : goalDirection === "away" ? "Deplasman golü daha olası" : "Gol yönü net değil";
+  const pctValue = value => Number.isFinite(Number(value)) ? Math.round(Number(value)) : null;
+  const averagePct = (a, b) => {
+    const values = [a, b].map(pctValue).filter(v => v != null);
+    return values.length ? Math.round(values.reduce((sum, v) => sum + v, 0) / values.length) : null;
+  };
+  const oneXTwoRows = oddsForFixture(prematchOddsRow || null).filter(x =>
+    x.market === "MS 1" && x.outcomeProbabilities &&
+    [x.outcomeProbabilities.home, x.outcomeProbabilities.draw, x.outcomeProbabilities.away].every(v => Number.isFinite(Number(v)))
+  ).sort((a, b) => (/bet365/i.test(b.bookmaker) - /bet365/i.test(a.bookmaker)));
+  const oneXTwo = oneXTwoRows[0]?.outcomeProbabilities || null;
+  const livePercentages = {
+    home: {
+      htGoal: pctValue(teamForms?.home?.htTeamScoredPct),
+      htSampleSize: Number(teamForms?.home?.htSampleSize || 0),
+      ftGoal: pctValue(teamForms?.home?.teamScoredPct),
+      sampleSize: Number(teamForms?.home?.sampleSize || 0)
+    },
+    away: {
+      htGoal: pctValue(teamForms?.away?.htTeamScoredPct),
+      htSampleSize: Number(teamForms?.away?.htSampleSize || 0),
+      ftGoal: pctValue(teamForms?.away?.teamScoredPct),
+      sampleSize: Number(teamForms?.away?.sampleSize || 0)
+    },
+    match: {
+      btts: averagePct(teamForms?.home?.bttsPct, teamForms?.away?.bttsPct),
+      over25: averagePct(teamForms?.home?.over25Pct, teamForms?.away?.over25Pct),
+      ms1: oneXTwo ? Number(oneXTwo.home.toFixed(1)) : null,
+      draw: oneXTwo ? Number(oneXTwo.draw.toFixed(1)) : null,
+      ms2: oneXTwo ? Number(oneXTwo.away.toFixed(1)) : null,
+      resultLean: oneXTwo
+        ? (oneXTwo.home >= oneXTwo.draw && oneXTwo.home >= oneXTwo.away ? "MS 1 eğilimi" :
+           oneXTwo.away >= oneXTwo.draw && oneXTwo.away >= oneXTwo.home ? "MS 2 eğilimi" : "Beraberlik eğilimi")
+        : null
+    },
+    note: "Takım yüzdeleri son tamamlanmış maçlardan; KG VAR ve 2.5 ÜST iki takım form ortalamasından; MS 1/X/2 maç önü 1X2 oranlarından hesaplanır."
+  };
   return {
     fixtureId: fixture.id, currentScore: `${homeGoals}-${awayGoals}`, minute, periodStatus: phase,
     mainPick: chosen?.market || null, alternative: candidates[1]?.market || null,
@@ -2650,6 +2686,7 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
     oddsTiming: liveOddsRow ? "live" : "unavailable",
     stats: { available: stats.available, totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners,
       pressure: Number((stats.pressure || 0).toFixed(1)), home: stats.home, away: stats.away },
+    livePercentages,
     teamForm: { available: formsAvailable,
       homeSample: teamForms?.home?.sampleSize || 0, awaySample: teamForms?.away?.sampleSize || 0,
       homeRecentSample: teamForms?.home?.recentSampleSize || 0, awayRecentSample: teamForms?.away?.recentSampleSize || 0,
@@ -2682,9 +2719,11 @@ app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
     if (!row) return res.status(404).json({ error: "Maç verisi bulunamadı." });
     const fixture = normalizeProviderMatch(row);
     if (fixture.status !== "LIVE") return res.status(409).json({ error: "Bu maç API tarafından canlı olarak işaretlenmiyor." });
-    const [statsPayload, oddsPayload] = await Promise.all([
+    const fixtureDate = fixture.fixtureDate ? String(fixture.fixtureDate).slice(0, 10) : null;
+    const [statsPayload, oddsPayload, prematchOddsRow] = await Promise.all([
       cachedProviderRequest(`stats:${fixtureId}`, `/fixtures/statistics?fixture=${fixtureId}`, 15000).catch(e => { console.warn(`[Live analysis] stats failed fixture=${fixtureId}: ${e.message}`); return { response: [] }; }),
-      cachedProviderRequest(`odds-live-fixture:${fixtureId}`, `/odds/live?fixture=${fixtureId}`, 10000).catch(e => { console.warn(`[Live analysis] live odds failed fixture=${fixtureId}: ${e.message}`); return { response: [] }; })
+      cachedProviderRequest(`odds-live-fixture:${fixtureId}`, `/odds/live?fixture=${fixtureId}`, 10000).catch(e => { console.warn(`[Live analysis] live odds failed fixture=${fixtureId}: ${e.message}`); return { response: [] }; }),
+      getOddsForFixture(fixtureId, fixtureDate).catch(e => { console.warn(`[Live analysis] prematch 1X2 percentages unavailable fixture=${fixtureId}: ${e.message}`); return null; })
     ]);
     let liveOddsRow = (oddsPayload.response || []).find(x => Number(x.fixture?.fixture?.id ?? x.fixture?.id ?? x.fixtureId ?? x.id) === fixtureId) || null;
     if (!liveOddsRow) {
@@ -2695,7 +2734,7 @@ app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
       fetchLiveGoalProfile(fixture.awayId, fixture.id)
     ]);
     const liveGoalForms = { home: homeGoalProfile, away: awayGoalProfile };
-    return res.json(await analyzeLiveFixture(fixture, liveOddsRow, statsPayload.response || [], liveGoalForms));
+    return res.json(await analyzeLiveFixture(fixture, liveOddsRow, statsPayload.response || [], liveGoalForms, prematchOddsRow));
   } catch (error) {
     const message = String(error?.message || error);
     const limited = /429|rate.?limit|quota|istek sınırı/i.test(message);
