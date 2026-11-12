@@ -91,6 +91,30 @@ if (databasePool) {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`);
 
+      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_reversal_predictions (
+        fixture_id BIGINT NOT NULL,
+        scenario TEXT NOT NULL CHECK (scenario IN ('1/2','2/1')),
+        match_date DATE NOT NULL,
+        kickoff_at TIMESTAMPTZ,
+        league TEXT,
+        home_team TEXT NOT NULL,
+        away_team TEXT NOT NULL,
+        bookmaker TEXT NOT NULL,
+        captured_home_prob NUMERIC,
+        captured_draw_prob NUMERIC,
+        captured_away_prob NUMERIC,
+        score NUMERIC NOT NULL DEFAULT 0,
+        reason JSONB NOT NULL DEFAULT '{}'::jsonb,
+        halftime_score TEXT,
+        final_score TEXT,
+        actual_htft TEXT,
+        outcome TEXT CHECK (outcome IN ('won','lost')),
+        settled_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY(fixture_id, scenario)
+      )`);
+      await databasePool.query("CREATE INDEX IF NOT EXISTS winscope_reversal_date_idx ON winscope_reversal_predictions(match_date, scenario, kickoff_at)");
+
       await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_surprise_scenarios (
         fixture_id BIGINT PRIMARY KEY,
         match_date TEXT NOT NULL,
@@ -4909,6 +4933,129 @@ app.get("/api/early-goal-tracking/summary", async (req,res) => {
     return res.json({success:true,date,total:rows.length,won,lost,pending:rows.length-won-lost,winRate:won+lost?Number((won/(won+lost)*100).toFixed(1)):null,rows});
   } catch(e) { return res.status(500).json({success:false,error:e.message}); }
 });
+
+// ── İY/MS ters sonuç motorları: deneysel, bağımsız takip ──
+function reversalOddsForFixture(oddsRow) {
+  const parsed = oddsForFixture(oddsRow);
+  const rows = parsed.filter(x => x.market === "MS 1" && x.home && x.draw && x.away);
+  const bet365 = rows.find(x => /bet\s*365/i.test(x.bookmaker));
+  const chosen = bet365 || rows[0] || null;
+  if (!chosen) return null;
+  const raw = [Number(chosen.home), Number(chosen.draw), Number(chosen.away)];
+  if (!raw.every(x => Number.isFinite(x) && x > 1.01)) return null;
+  const inv = raw.map(x => 1 / x);
+  const sum = inv.reduce((a,b) => a+b, 0);
+  return { bookmaker: chosen.bookmaker, home: inv[0]/sum, draw: inv[1]/sum, away: inv[2]/sum };
+}
+
+function scoreReversalScenario(prob, scenario) {
+  if (!prob) return null;
+  const {home,draw,away} = prob;
+  const favoriteProb = Math.max(home, away);
+  // Araştırmada bulunan yaklaşık %41,3 sınırı yalnızca aday havuzu eşiğidir;
+  // bu bir kazanma olasılığı veya garanti değildir.
+  if (favoriteProb > 0.413 || favoriteProb < 0.30) return null;
+  if (scenario === "1/2") {
+    // Ev sahibinin ilk yarı üstünlüğü sonrası deplasman dönüşü için dengeli 1X2 profili.
+    if (home < away || away < 0.245 || draw < 0.245) return null;
+    const score = 100 - Math.abs(home-away)*120 - Math.abs(draw-0.30)*70 - Math.abs(home-0.37)*35;
+    return { score, reason: { rule:"Dengeli favori + güçlü deplasman payı + yüksek beraberlik payı", favoriteProb, homeProb:home, drawProb:draw, awayProb:away } };
+  }
+  // 2/1 motoru: zayıf ama önde olan ev sahibi favorisi ve oyunda kalan deplasman payı.
+  if (home <= away || away < 0.18 || draw < 0.23) return null;
+  const score = 100 - Math.abs(home-away)*100 - Math.abs(draw-0.29)*65 - Math.abs(home-0.38)*35;
+  return { score, reason: { rule:"Zayıf ev sahibi favorisi + dirençli deplasman olasılığı + beraberlik payı", favoriteProb, homeProb:home, drawProb:draw, awayProb:away } };
+}
+
+function reversalHtftLabel(htHome, htAway, ftHome, ftAway) {
+  const values = [htHome, htAway, ftHome, ftAway].map(Number);
+  if (!values.every(Number.isFinite)) return null;
+  const sign = (h,a) => h > a ? "1" : h < a ? "2" : "X";
+  return `${sign(values[0],values[1])}/${sign(values[2],values[3])}`;
+}
+
+async function settleReversalPredictions(date) {
+  if (!databasePool) return;
+  const pending = await databasePool.query(
+    "SELECT DISTINCT fixture_id FROM winscope_reversal_predictions WHERE match_date=$1 AND settled_at IS NULL",
+    [date]
+  );
+  for (const item of pending.rows) {
+    try {
+      const payload = await cachedProviderRequest(`reversal-settle:${item.fixture_id}`, `/fixtures?id=${item.fixture_id}`, 5*60*1000);
+      const raw = payload.response?.[0];
+      const status = String(raw?.fixture?.status?.short || "").toUpperCase();
+      if (!raw || !["FT","AET","PEN"].includes(status) || raw.goals?.home == null || raw.goals?.away == null) continue;
+      const ht = raw.score?.halftime;
+      if (ht?.home == null || ht?.away == null) continue;
+      const htScore = `${Number(ht.home)}-${Number(ht.away)}`;
+      const ftScore = `${Number(raw.goals.home)}-${Number(raw.goals.away)}`;
+      const label = reversalHtftLabel(ht.home, ht.away, raw.goals.home, raw.goals.away);
+      await databasePool.query(`UPDATE winscope_reversal_predictions SET halftime_score=$2,final_score=$3,actual_htft=$4,
+        outcome=CASE WHEN scenario=$5 THEN 'won' ELSE 'lost' END, settled_at=NOW()
+        WHERE fixture_id=$1 AND settled_at IS NULL`, [item.fixture_id,htScore,ftScore,label,label]);
+    } catch (error) { console.warn(`[Reversal settle] fixture=${item.fixture_id}: ${error.message}`); }
+  }
+}
+
+app.get("/api/reversal-motors", async (req,res) => {
+  const date = String(req.query.date || turkeyDateString());
+  const scenario = String(req.query.scenario || "1/2");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({error:"Tarih YYYY-MM-DD biçiminde olmalı."});
+  if (!["1/2","2/1"].includes(scenario)) return res.status(400).json({error:"Senaryo 1/2 veya 2/1 olmalı."});
+  if (!databasePool) return res.status(503).json({error:"Deneme sonuçlarını kalıcı izlemek için DATABASE_URL gerekli."});
+  try {
+    await archiveDatabaseReady;
+    const fixturePayload = await cachedProviderRequest(`reversal-fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 60*1000);
+    const fixtures = (fixturePayload.response||[]).map(normalizeProviderMatch)
+      .filter(m=>m.id && m.status==="NS" && !isExcludedAnalysisCompetition(m));
+    const oddsById = new Map();
+    const first = await cachedProviderRequest(`reversal-odds:${date}:1`, `/odds?date=${date}&page=1`, 5*60*1000);
+    for (const row of first.response||[]) if(row.fixture?.id) oddsById.set(Number(row.fixture.id),row);
+    const pages = Math.min(50,Math.max(1,Number(first.paging?.total||1)));
+    for(let page=2;page<=pages;page++){
+      const pageData=await cachedProviderRequest(`reversal-odds:${date}:${page}`,`/odds?date=${date}&page=${page}`,5*60*1000);
+      for(const row of pageData.response||[]) if(row.fixture?.id) oddsById.set(Number(row.fixture.id),row);
+    }
+    let checked=0, noOdds=0, candidates=0;
+    for(const match of fixtures){
+      const oddsRow=oddsById.get(match.id);
+      if(!oddsRow){noOdds++;continue;}
+      const prob=reversalOddsForFixture(oddsRow);
+      if(!prob) continue;
+      checked++;
+      const scored=scoreReversalScenario(prob,scenario);
+      if(!scored) continue;
+      candidates++;
+      await databasePool.query(`INSERT INTO winscope_reversal_predictions
+        (fixture_id,scenario,match_date,kickoff_at,league,home_team,away_team,bookmaker,captured_home_prob,captured_draw_prob,captured_away_prob,score,reason)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)
+        ON CONFLICT(fixture_id,scenario) DO NOTHING`,
+        [match.id,scenario,date,match.fixtureDate,match.league,match.home,match.away,prob.bookmaker,prob.home,prob.draw,prob.away,scored.score,JSON.stringify(scored.reason)]);
+    }
+    await settleReversalPredictions(date);
+    const result=await databasePool.query(`SELECT fixture_id,scenario,match_date,kickoff_at,league,home_team,away_team,score,reason,halftime_score,final_score,actual_htft,outcome,settled_at
+      FROM winscope_reversal_predictions WHERE match_date=$1 AND scenario=$2 ORDER BY score DESC,kickoff_at NULLS LAST`,[date,scenario]);
+    const wins=result.rows.filter(x=>x.outcome==="won").length;
+    const losses=result.rows.filter(x=>x.outcome==="lost").length;
+    const pending=result.rows.filter(x=>!x.outcome).length;
+    res.json({success:true,date,scenario,diagnostics:{fixtures:fixtures.length,oddsMatched:checked,noOdds,candidates,saved:result.rowCount},summary:{total:wins+losses,won:wins,lost:losses,pending,winRate:wins+losses?Math.round(wins*100/(wins+losses)):null},rows:result.rows});
+  } catch(error){res.status(500).json({error:error.message,rows:[]});}
+});
+
+app.get("/api/reversal-motors/summary", async(req,res)=>{
+  const date=String(req.query.date||turkeyDateString());
+  if(!databasePool)return res.status(503).json({error:"DATABASE_URL gerekli."});
+  try{
+    await archiveDatabaseReady; await settleReversalPredictions(date);
+    const result=await databasePool.query(`SELECT scenario,COUNT(*)::int total,
+      COUNT(*) FILTER(WHERE outcome='won')::int won,COUNT(*) FILTER(WHERE outcome='lost')::int lost,
+      COUNT(*) FILTER(WHERE settled_at IS NULL)::int pending
+      FROM winscope_reversal_predictions WHERE match_date=$1 GROUP BY scenario ORDER BY scenario`,[date]);
+    res.json({success:true,date,motors:result.rows.map(x=>({...x,winRate:x.won+x.lost?Math.round(x.won*100/(x.won+x.lost)):null}))});
+  }catch(error){res.status(500).json({error:error.message,motors:[]});}
+});
+
 
 app.use("/api", (_req, res) => res.status(404).json({ error: "API uç noktası bulunamadı." }));
 
