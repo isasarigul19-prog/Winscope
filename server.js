@@ -18,15 +18,12 @@ const EMBEDDED_INDEX_HTML = Buffer.from("PCFkb2N0eXBlIGh0bWw+PGh0bWwgbGFuZz0idHI
 app.get("/", async (_req, res) => {
   try {
     const html = await fs.readFile(path.join(ROOT, "index.html"), "utf8");
-    res.setHeader("Cache-Control", "no-store, max-age=0");
     return res.type("html").send(html);
   } catch {
-    res.setHeader("Cache-Control", "no-store, max-age=0");
     return res.type("html").send(EMBEDDED_INDEX_HTML);
   }
 });
 app.use(express.static(path.join(ROOT, "public")));
-app.get("/api/build-info", (_req, res) => res.json({ service: "WinScope", build: "2026-11-12-reversal-earlyht-fix-1", routes: ["/api/reversal-motors", "/api/reversal-motors/summary"] }));
 
 const providerCache = new Map();
 const providerInFlight = new Map();
@@ -3293,17 +3290,75 @@ app.post("/api/analyses/approve", async (req, res) => {
   res.json({ success: true, persisted: storage.persisted, trackingPersisted, storageReason: storage.reason || storage.error || null });
 });
 
+// Günün Analizleri arşivindeki HER tahmin otomatik sonuç takibine alınır.
+// Var olan takip kaydı varsa tahmini veya sonucunu asla ezmez.
+async function backfillArchivedAnalysisPredictions() {
+  const source = dedupeAnalysisArchiveRows(archives.analyses || []).slice(0, 1000);
+  let inserted = 0;
+  const parseScore = value => {
+    const m = String(value || "").match(/(\d+)\s*[-:]\s*(\d+)/);
+    return m ? `${Number(m[1])}-${Number(m[2])}` : null;
+  };
+  const seen = new Set();
+  for (const row of source) {
+    const a = row?.analysis || row || {};
+    const fixtureId = Number(row?.fixture_id || row?.fixtureId || a.fixtureId || 0);
+    if (!fixtureId || seen.has(fixtureId)) continue;
+    seen.add(fixtureId);
+    const home = String(row?.home_team || row?.home || a.home || "").trim();
+    const away = String(row?.away_team || row?.away || a.away || "").trim();
+    const predictedHT = parseScore(a.halfTimeScore);
+    const predictedFT = parseScore(a.fullTimeScore);
+    const matchDate = String(row?.match_date || a.matchDate || "").slice(0,10);
+    if (!home || !away || !predictedFT || !/^\d{4}-\d{2}-\d{2}$/.test(matchDate)) continue;
+    const existing = predictionTracking.find(x => Number(x.fixtureId) === fixtureId);
+    if (!existing) predictionTracking.push({
+      fixtureId, home, away, predictedHT, predictedFT,
+      alternativeFT:parseScore(a.alternativeFullTimeScore), actualHT:null, actualFT:null,
+      exactFT:null, exactHT:null, matchDate, settled:false,
+      createdAt:row?.created_at || a.created_at || new Date().toISOString()
+    });
+    if (databasePool) {
+      const result = await databasePool.query(`INSERT INTO winscope_predictions
+        (fixture_id,home_team,away_team,predicted_ht,predicted_ft,alternative_ft,match_date)
+        VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(fixture_id) DO NOTHING`,
+        [fixtureId,home,away,predictedHT,predictedFT,parseScore(a.alternativeFullTimeScore),matchDate]);
+      inserted += result.rowCount || 0;
+    }
+  }
+  return { scanned:source.length, inserted, inMemory:predictionTracking.length };
+}
+
 app.get("/api/predictions/summary", async (_req, res) => {
   await archiveDatabaseReady;
-  const rows = predictionTracking;
-  const settled = rows.filter(x => x.settled && x.actualFT);
-  const exactFT = settled.filter(x => x.exactFT === true).length;
-  const exactHTRows = settled.filter(x => x.exactHT !== null);
-  res.json({ total:rows.length, settled:settled.length, pending:rows.length-settled.length,
-    exactFullTime:exactFT, exactFullTimeRate:settled.length?Math.round(100*exactFT/settled.length):null,
-    exactHalfTime:exactHTRows.filter(x=>x.exactHT===true).length,
-    exactHalfTimeRate:exactHTRows.length?Math.round(100*exactHTRows.filter(x=>x.exactHT===true).length/exactHTRows.length):null,
-    results:settled.slice(0,100), note:"Yalnızca kullanıcı tarafından onaylanıp takip kaydına alınan analizler ölçülür." });
+  try {
+    const backfill = await backfillArchivedAnalysisPredictions();
+    await settleApprovedPredictions();
+    let rows = predictionTracking;
+    if (databasePool) {
+      const stored = await databasePool.query(`SELECT fixture_id,home_team,away_team,predicted_ht,predicted_ft,
+        alternative_ft,actual_ht,actual_ft,exact_ft,exact_ht,match_date,settled_at,created_at
+        FROM winscope_predictions ORDER BY created_at DESC LIMIT 1000`);
+      rows = stored.rows.map(row => ({
+        fixtureId:Number(row.fixture_id),home:row.home_team,away:row.away_team,
+        predictedHT:row.predicted_ht,predictedFT:row.predicted_ft,alternativeFT:row.alternative_ft,
+        actualHT:row.actual_ht,actualFT:row.actual_ft,exactFT:row.exact_ft,exactHT:row.exact_ht,
+        matchDate:row.match_date,settled:Boolean(row.settled_at),createdAt:row.created_at
+      }));
+    }
+    const settled = rows.filter(x => x.settled && x.actualFT);
+    const exactFT = settled.filter(x => x.exactFT === true).length;
+    const exactHTRows = settled.filter(x => x.exactHT !== null);
+    res.json({ total:rows.length, settled:settled.length, pending:rows.length-settled.length,
+      exactFullTime:exactFT, exactFullTimeRate:settled.length?Math.round(100*exactFT/settled.length):null,
+      exactHalfTime:exactHTRows.filter(x=>x.exactHT===true).length,
+      exactHalfTimeRate:exactHTRows.length?Math.round(100*exactHTRows.filter(x=>x.exactHT===true).length/exactHTRows.length):null,
+      backfill, results:rows.slice(0,1000),
+      note:"Günün Analizleri arşivindeki tüm tahminler otomatik takip edilir; sonuçlar maç tamamlanınca API-Football'dan doğrulanır." });
+  } catch (error) {
+    console.error(`[Prediction summary] ${error.message}`);
+    res.status(500).json({error:"Tahmin sonuçları alınamadı.",detail:error.message,results:[]});
+  }
 });
 
 // Canlı tercih takip paneli: yalnızca Telegram'a gerçekten gönderilen canlı seçimleri sayar.
@@ -3616,12 +3671,16 @@ async function runDailyAnalysisJob(job) {
           ? supported.market : market.market;
         // Ana tercih yalnızca ayrı market senaryosunu etkiler; kesin skor koşulsuz kalır.
         scores = scorePrediction(prematchFixture, homeForm, awayForm, null, oddsRow, mainPick);
-        console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | unconditional=${JSON.stringify(scores.topScoreCandidates)} | marketScenario=${JSON.stringify(scores.marketScenarioCandidates)} | model=${scores.modelVersion} fit=${scores.modelFitError} markets=${JSON.stringify(scores.marketTargetsUsed)} | pick=${mainPick} | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} | basis=${scores.scoreBasis} | HTbasis=${scores.halfTimeBasis}`);
+        console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | unconditional=${JSON.stringify(scores.topScoreCandidates)} | marketScenario=${JSON.stringify(scores.marketScenarioCandidates)} | model=${scores.modelVersion} fit=${scores.modelFitError} markets=${JSON.stringify(scores.marketTargetsUsed)} | pick=${mainPick} | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} conditional=${scores.marketScenarioScore||"n/a"} | basis=${scores.scoreBasis} | HTbasis=${scores.halfTimeBasis}`);
         const other = mainPick === "KG VAR" ? "MS 2.5 ÜST" : "KG VAR";
         const altRow = oddsForFixture(oddsRow).find(x=>x.market===other && Number(x.odd)>=DAILY_MARKET_ODDS_MIN && Number(x.odd)<=DAILY_MARKET_ODDS_MAX);
         const analysis = {
           fixtureId:match.id, matchDate:date, home:match.home, away:match.away, league:match.league,
           halfTimeScore:scores.halfTimeScore, fullTimeScore:scores.fullTimeScore,
+          // Ana tercih için koşullu skor ayrıca gösterilir; koşulsuz en olası skor korunur.
+          unconditionalFullTimeScore:scores.unconditionalFullTimeScore || null,
+          marketScenarioScore:scores.marketScenarioScore || null,
+          marketScenarioAlternativeScore:scores.marketScenarioAlternativeScore || null,
           alternativeFullTimeScore:scores.alternativeFullTimeScore || null,
           sixPlusProbability:scores.sixPlusProbability ?? null,
           sixPlusCandidate:scores.sixPlusCandidate === true,
@@ -4227,7 +4286,7 @@ async function runEarlyFirstHalfPick() {
       const minute = Number(f.minute);
       const total = Number(f.homeScore) + Number(f.awayScore);
       return f.id && f.status === 'LIVE' && f.periodStatus === '1H' &&
-        Number.isFinite(minute) && minute >= 5 && minute <= 7 && isFreshLiveFixture(f) &&
+        Number.isFinite(minute) && minute >= 1 && minute <= 20 && isFreshLiveFixture(f) &&
         Number.isFinite(total) && total === 0 && !isExcludedAnalysisCompetition(f);
     });
     let sent = 0;
@@ -4252,34 +4311,47 @@ async function runEarlyFirstHalfPick() {
           const rows = markets.filter(x => x.market === name && Number.isFinite(Number(x.probability)));
           return rows.find(x => /bet365/i.test(String(x.bookmaker || ''))) || rows[0] || null;
         };
-        // 5. dakika erken alarmı yalnızca ilk yarı toplam 0.5 üst pazarını değerlendirir.
-        // Tam maç EV/DEP 0.5 oranları burada kullanılmaz.
-        const htMarket = marketFor('İY 0.5 ÜST');
-        const pct = value => {
-          const n = Number(value);
-          return Number.isFinite(n) && n >= 0 && n <= 100 ? n : null;
+        const homeMarket = marketFor('EV 0.5 ÜST');
+        const awayMarket = marketFor('DEP 0.5 ÜST');
+
+        // Kısmi veriyle de takım karşılaştırması yap: tek bir eksik kaynak tahmini bloke etmez.
+        const sideScore = (form, market, live) => {
+          const h10 = Number(form?.htTeamScoredPct);
+          const h5 = Number(form?.recent?.htTeamScoredPct);
+          const has10 = Number.isFinite(h10), has5 = Number.isFinite(h5);
+          const profile = has10 && has5 ? h10 * 0.55 + h5 * 0.45 : has10 ? h10 : has5 ? h5 : null;
+          const oddsProb = Number(market?.probability);
+          const hasOdds = Number.isFinite(oddsProb);
+          const pressure = Number(live?.shotsOnTarget || 0) * 12 + Number(live?.totalShots || 0) * 3 + Number(live?.corners || 0) * 5;
+          const hasPressure = Boolean(stats.available);
+          // Kullanılabilir bileşenleri normalize ederek ağırlıklandır.
+          const parts = [];
+          if (profile != null) parts.push({ value: profile, weight: 0.60 });
+          if (hasOdds) parts.push({ value: oddsProb, weight: 0.25 });
+          if (hasPressure) parts.push({ value: Math.min(100, pressure), weight: 0.15 });
+          const weight = parts.reduce((sum, p) => sum + p.weight, 0);
+          if (!weight) return null;
+          const score = parts.reduce((sum, p) => sum + p.value * p.weight, 0) / weight;
+          return { score, profile, pressure, h10: has10 ? h10 : null, h5: has5 ? h5 : null,
+            market, hasOdds, hasPressure, sample10: Number(form?.htSampleSize || 0),
+            sample5: Number(form?.recent?.htSampleSize || 0) };
         };
-        const home10 = pct(homeForm?.htTeamScoredPct);
-        const away10 = pct(awayForm?.htTeamScoredPct);
-        const home5 = pct(homeForm?.recent?.htTeamScoredPct);
-        const away5 = pct(awayForm?.recent?.htTeamScoredPct);
-        const homeRate = home10 != null && home5 != null ? home10 * 0.55 + home5 * 0.45 : home10;
-        const awayRate = away10 != null && away5 != null ? away10 * 0.55 + away5 * 0.45 : away10;
-        const odd = Number(htMarket?.odd);
-        const hasValidOdds = Number.isFinite(odd) && odd > 1.01 && odd <= 1.45;
-        const bothTeamsSupport = homeRate != null && awayRate != null && homeRate >= 75 && awayRate >= 75;
-        const sampleReady = Number(homeForm?.htSampleSize || 0) >= 5 && Number(awayForm?.htSampleSize || 0) >= 5;
-        if (!htMarket || !hasValidOdds || !bothTeamsSupport || !sampleReady) {
-          console.log(`[EARLY HT REJECTED] fixture=${fixture.id} minute=${fixture.minute} market=${Boolean(htMarket)} odd=${Number.isFinite(odd)?odd:'na'} homeHT=${homeRate??'na'} awayHT=${awayRate??'na'} samples=${homeForm?.htSampleSize||0}/${awayForm?.htSampleSize||0} reason=${!htMarket?'NO_HT05_MARKET':!hasValidOdds?'HT05_ODD_OUTSIDE_1.01_1.45':!bothTeamsSupport?'TEAM_HT_FORM_BELOW_75':'SAMPLE_LT_5'}`);
-          continue;
-        }
-        const combinedProbability = 100 * (1 - (1 - homeRate / 100) * (1 - awayRate / 100));
-        const chosen = {
-          market: 'İY 0.5 ÜST', side: 'İLK YARI TOPLAM GOL', team: 'İki takım',
-          score: combinedProbability, h10: home10, h5: home5, a10: away10, a5: away5,
-          odds: odd, bookmaker: htMarket.bookmaker, hasOdds: true,
-          hasPressure: Boolean(stats.available), pressure: Number(stats.pressure || 0)
-        };
+        const home = sideScore(homeForm, homeMarket, stats.home);
+        const away = sideScore(awayForm, awayMarket, stats.away);
+        const sides = [
+          home && { ...home, market: 'EV 0.5 ÜST', side: 'EV SAHİBİ', team: fixture.home },
+          away && { ...away, market: 'DEP 0.5 ÜST', side: 'DEPLASMAN', team: fixture.away }
+        ].filter(Boolean).sort((a,b) => b.score-a.score);
+
+        // Takım tarafı için karşılaştırılabilir veri varsa en güçlü taraf; yoksa ortak İY 0.5 ÜST.
+        // Sinyal eşiği nedeniyle bildirim iptal edilmez; mevcut veriyle en iyi analiz gönderilir.
+        const chosen = sides.length && sides[0].score >= 45 &&
+          (sides.length === 1 || sides[0].score - sides[1].score >= 3)
+          ? sides[0]
+          : { market: 'İY 0.5 ÜST', side: 'İLK YARI TOPLAM GOL', team: 'İki takım',
+              score: Math.max(home?.score ?? 0, away?.score ?? 0),
+              profile: null, pressure: Number(stats.pressure || 0), h10: null, h5: null,
+              hasOdds: Boolean(homeMarket || awayMarket), hasPressure: Boolean(stats.available) };
 
         const deliveryKey = telegramDeliveryKey(fixture.id, 'early_ht', chosen.market);
         if (telegramSentKeys.has(deliveryKey)) { earlyHalfSent.add(key); continue; }
@@ -4293,11 +4365,9 @@ async function runEarlyFirstHalfPick() {
           } catch (e) { console.warn(`[EARLY HT DEDUPE CHECK] fixture=${fixture.id}: ${e.message}`); }
         }
         const dataNotes = [
-          chosen.h10 != null ? `Ev son 10 İY gol: %${chosen.h10}` : null,
-          chosen.a10 != null ? `Dep son 10 İY gol: %${chosen.a10}` : null,
-          chosen.h5 != null ? `Ev son 5 İY gol: %${chosen.h5}` : null,
-          chosen.a5 != null ? `Dep son 5 İY gol: %${chosen.a5}` : null,
-          chosen.hasOdds ? `Maç önü İY 0.5 oranı kontrol edildi (${chosen.bookmaker})` : 'Maç önü İY 0.5 oranı yok',
+          chosen.h10 != null ? `Son 10 İY gol: %${chosen.h10}` : null,
+          chosen.h5 != null ? `Son 5 İY gol: %${chosen.h5}` : null,
+          chosen.hasOdds ? 'Maç önü oranı kullanıldı' : 'Maç önü oranı yok',
           chosen.hasPressure ? `Canlı baskı: ${chosen.pressure.toFixed(1)}` : 'Canlı istatistik henüz yok'
         ].filter(Boolean).join(' · ');
         const message = [
@@ -4339,7 +4409,7 @@ async function runEarlyFirstHalfPick() {
         }
       } catch (e) { console.warn(`[EARLY HT ERROR] fixture=${fixture.id}: ${e.message}`); }
     }
-    console.log(`[EARLY HT SCAN] prep=${prep.length} live5to7=${fixtures.length} sent=${sent}`);
+    console.log(`[EARLY HT SCAN] prep=${prep.length} live1to20=${fixtures.length} sent=${sent}`);
   } catch (e) {
     console.error(`[EARLY HT SCAN ERROR] ${e.message}`);
   } finally {
@@ -4904,7 +4974,7 @@ app.get("/api/daily-market-tracking/summary", async (req, res) => {
 
 async function settleApprovedPredictions() {
   if (!predictionTracking.some(x => !x.settled)) return;
-  for (const item of predictionTracking.filter(x => !x.settled).slice(0, 20)) {
+  for (const item of predictionTracking.filter(x => !x.settled).slice(0, 100)) {
     try {
       const payload = await cachedProviderRequest(`settle-fixture:${item.fixtureId}`, `/fixtures?id=${item.fixtureId}`, 5 * 60 * 1000);
       const row = payload.response?.[0];
@@ -4922,6 +4992,7 @@ async function settleApprovedPredictions() {
     } catch (error) { console.warn(`[Prediction settlement] fixture=${item.fixtureId}: ${error.message}`); }
   }
 }
+setTimeout(() => { void (async()=>{ try { await archiveDatabaseReady; const r=await backfillArchivedAnalysisPredictions(); console.log(`[Prediction archive backfill] scanned=${r.scanned} inserted=${r.inserted} tracked=${r.inMemory}`); await settleApprovedPredictions(); } catch(e) { console.warn(`[Prediction archive backfill] ${e.message}`); } })(); }, 90000);
 setInterval(() => { void settleApprovedPredictions(); }, 15 * 60 * 1000);
 setInterval(() => { void settleLivePredictions(); }, 15 * 60 * 1000);
 setInterval(() => { void settleDailyMarketPredictions(); }, 15 * 60 * 1000);
