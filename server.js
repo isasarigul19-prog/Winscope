@@ -4947,8 +4947,31 @@ app.get("/api/early-goal-tracking/summary", async (req,res) => {
 
 // ── İY/MS ters sonuç motorları: deneysel, bağımsız takip ──
 function reversalOddsForFixture(oddsRow) {
+  // Use the shared parser first, then fall back to API-Football's raw Match Winner
+  // market. Providers sometimes vary the market label/selection spelling.
   const parsed = oddsForFixture(oddsRow);
-  const rows = parsed.filter(x => x.market === "MS 1" && x.home && x.draw && x.away);
+  let rows = parsed.filter(x => x.market === "MS 1" && x.home && x.draw && x.away);
+  if (!rows.length) {
+    const rawBooks = bookmakerRows(oddsRow);
+    rows = [];
+    for (const book of rawBooks) {
+      for (const bet of (book.bets || [])) {
+        const marketName = String(bet.name || bet.bet || "").toLowerCase();
+        const isMatchWinner = /match winner|1x2|full.?time result|match result|regular time result|winner/.test(marketName) || Number(bet.id) === 1;
+        if (!isMatchWinner) continue;
+        let home = null, draw = null, away = null;
+        for (const value of (bet.values || [])) {
+          const label = String(value.value ?? value.name ?? "").toLowerCase().trim();
+          const odd = Number(value.odd);
+          if (!Number.isFinite(odd) || odd <= 1.01) continue;
+          if (/^(home|1|team 1|1 \(home\)|home win)$/.test(label)) home = odd;
+          else if (/^(draw|x|tie)$/.test(label)) draw = odd;
+          else if (/^(away|2|team 2|2 \(away\)|away win)$/.test(label)) away = odd;
+        }
+        if (home && draw && away) rows.push({ bookmaker: book.name || "API-Football", home, draw, away });
+      }
+    }
+  }
   const bet365 = rows.find(x => /bet\s*365/i.test(x.bookmaker));
   const chosen = bet365 || rows[0] || null;
   if (!chosen) return null;
@@ -5022,7 +5045,7 @@ app.get("/api/reversal-motors", async (req,res) => {
       .filter(m=>m.id && m.status==="NS" && !isExcludedAnalysisCompetition(m));
     const oddsById = new Map();
     const first = await cachedProviderRequest(`reversal-odds:${date}:1`, `/odds?date=${date}&page=1`, 5*60*1000);
-    for (const row of first.response||[]) if(row.fixture?.id) oddsById.set(Number(row.fixture.id),row);
+    for (const row of first.response||[]) { const fid=Number(row.fixture?.id ?? row.fixture_id ?? row.fixtureId ?? row.id); if(Number.isFinite(fid)&&fid>0) oddsById.set(fid,row); }
     const pages = Math.min(50,Math.max(1,Number(first.paging?.total||1)));
     for(let page=2;page<=pages;page++){
       const pageData=await cachedProviderRequest(`reversal-odds:${date}:${page}`,`/odds?date=${date}&page=${page}`,5*60*1000);
@@ -5112,11 +5135,11 @@ app.get('/api/reversal-lab',async(req,res)=>{
     const fx=await cachedProviderRequest(`reversal-lab-fixtures:${date}`,`/fixtures?date=${date}&timezone=Europe/Istanbul`,60*1000);
     const fixtures=(fx.response||[]).map(normalizeProviderMatch).filter(m=>m.id&&m.status==='NS'&&!isExcludedAnalysisCompetition(m));
     const odds=await cachedProviderRequest(`reversal-lab-odds:${date}:1`,`/odds?date=${date}&page=1`,5*60*1000);
-    const oddsMap=new Map((odds.response||[]).filter(x=>x.fixture?.id).map(x=>[Number(x.fixture.id),x]));
+    const oddsMap=new Map((odds.response||[]).map(x=>[Number(x.fixture?.id ?? x.fixture_id ?? x.fixtureId ?? x.id),x]).filter(([id])=>Number.isFinite(id)&&id>0));
     const pages=Math.min(50,Math.max(1,Number(odds.paging?.total||1)));
     for(let page=2;page<=pages;page++){
       const next=await cachedProviderRequest(`reversal-lab-odds:${date}:${page}`,`/odds?date=${date}&page=${page}`,5*60*1000);
-      for(const item of next.response||[])if(item.fixture?.id)oddsMap.set(Number(item.fixture.id),item);
+      for(const item of next.response||[]){const fid=Number(item.fixture?.id ?? item.fixture_id ?? item.fixtureId ?? item.id);if(Number.isFinite(fid)&&fid>0)oddsMap.set(fid,item);}
     }
     let oddsMatched=0,candidates=0,profilesFetched=0;
     for(const m of fixtures){
