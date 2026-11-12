@@ -982,6 +982,9 @@ async function fetchLiveGoalProfile(teamId, fixtureId) {
         teamScoredPct: pct(x => x.gf >= 1),
         teamScored2PlusPct: pct(x => x.gf >= 2),
         teamConcededPct: pct(x => x.ga >= 1),
+        teamWinPct: pct(x => x.gf > x.ga),
+        teamDrawPct: pct(x => x.gf === x.ga),
+        teamLossPct: pct(x => x.gf < x.ga),
         over15Pct: pct(x => x.gf + x.ga >= 2),
         over25Pct: pct(x => x.gf + x.ga >= 3),
         bttsPct: pct(x => x.btts),
@@ -2066,57 +2069,15 @@ app.get("/api/surprise-thesis", async (req, res) => {
 
 // ── İY/MS ters sonuç motorları: deneysel, bağımsız takip ──
 function reversalOddsForFixture(oddsRow) {
-  // First use the shared odds parser so all existing bookmaker/market handling stays intact.
   const parsed = oddsForFixture(oddsRow);
   const rows = parsed.filter(x => x.market === "MS 1" && x.home && x.draw && x.away);
-  let chosen = rows.find(x => /bet\s*365/i.test(x.bookmaker)) || rows[0] || null;
-
-  // API-Football feeds are not fully consistent: some providers label 1X2 as
-  // "Home Win / Draw / Away Win" or expose market id 1 without a market name.
-  // Read those variants locally for this experimental motor only; do not change
-  // the shared parser used by live picks, coupons, or daily analysis.
-  if (!chosen) {
-    const books = bookmakerRows(oddsRow);
-    const extracted = [];
-    const norm = value => String(value ?? "").toLowerCase()
-      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-      .replace(/[–—−]/g, "-").replace(/[()]/g, " ")
-      .replace(/\s+/g, " ").trim();
-    for (const book of books) {
-      const bookName = String(book.name || book.bookmaker?.name || oddsRow?.bookmaker?.name || "Kaynak belirtilmedi");
-      const bets = Array.isArray(book.bets) ? book.bets : (Array.isArray(book.odds) ? book.odds : []);
-      for (const bet of bets) {
-        const marketName = norm(bet.name || bet.bet || bet.market || "");
-        const values = Array.isArray(bet.values) ? bet.values : [];
-        const labels = values.map(v => norm(v.value ?? v.name ?? v.label ?? v.selection ?? ""));
-        const hasThreeWayLabels = labels.some(x => /^(home|home win|1|1 home|team 1)$/.test(x))
-          && labels.some(x => /^(draw|tie|x)$/.test(x))
-          && labels.some(x => /^(away|away win|2|2 away|team 2)$/.test(x));
-        const marketIs1X2 = /(1x2|match winner|full.?time result|full time result|match result|regular time result|three.?way|3.?way|moneyline|winner)/.test(marketName)
-          || Number(bet.id ?? bet.bet_id) === 1 || hasThreeWayLabels;
-        if (!marketIs1X2) continue;
-        let home = null, draw = null, away = null;
-        for (const value of values) {
-          const label = norm(value.value ?? value.name ?? value.label ?? value.selection ?? "");
-          const odd = Number(value.odd ?? value.odds ?? value.price);
-          if (!Number.isFinite(odd) || odd <= 1.01 || odd > 1000) continue;
-          if (/^(home|home win|1|1 home|team 1)$/.test(label)) home = odd;
-          else if (/^(draw|tie|x)$/.test(label)) draw = odd;
-          else if (/^(away|away win|2|2 away|team 2)$/.test(label)) away = odd;
-        }
-        if ([home, draw, away].every(x => Number.isFinite(x) && x > 1.01)) {
-          extracted.push({ bookmaker: bookName, home, draw, away });
-        }
-      }
-    }
-    chosen = extracted.find(x => /bet\s*365/i.test(x.bookmaker)) || extracted[0] || null;
-  }
+  const bet365 = rows.find(x => /bet\s*365/i.test(x.bookmaker));
+  const chosen = bet365 || rows[0] || null;
   if (!chosen) return null;
   const raw = [Number(chosen.home), Number(chosen.draw), Number(chosen.away)];
-  if (!raw.every(x => Number.isFinite(x) && x > 1.01 && x <= 1000)) return null;
+  if (!raw.every(x => Number.isFinite(x) && x > 1.01)) return null;
   const inv = raw.map(x => 1 / x);
   const sum = inv.reduce((a,b) => a+b, 0);
-  if (!Number.isFinite(sum) || sum <= 0) return null;
   return { bookmaker: chosen.bookmaker, home: inv[0]/sum, draw: inv[1]/sum, away: inv[2]/sum };
 }
 
@@ -2189,16 +2150,14 @@ app.get("/api/reversal-motors", async (req,res) => {
       const pageData=await cachedProviderRequest(`reversal-odds:${date}:${page}`,`/odds?date=${date}&page=${page}`,5*60*1000);
       for(const row of pageData.response||[]) if(row.fixture?.id) oddsById.set(Number(row.fixture.id),row);
     }
-    let checked=0, noOdds=0, candidates=0, fixtureOddsRows=0, no1X2=0, rejectedByScenario=0;
+    let checked=0, noOdds=0, candidates=0;
     for(const match of fixtures){
       const oddsRow=oddsById.get(match.id);
       if(!oddsRow){noOdds++;continue;}
-      fixtureOddsRows++;
       const prob=reversalOddsForFixture(oddsRow);
-      if(!prob){no1X2++;continue;}
+      if(!prob) continue;
       checked++;
       const scored=scoreReversalScenario(prob,scenario);
-      if(!scored) rejectedByScenario++;
       if(!scored) continue;
       candidates++;
       await databasePool.query(`INSERT INTO winscope_reversal_predictions
@@ -2213,7 +2172,7 @@ app.get("/api/reversal-motors", async (req,res) => {
     const wins=result.rows.filter(x=>x.outcome==="won").length;
     const losses=result.rows.filter(x=>x.outcome==="lost").length;
     const pending=result.rows.filter(x=>!x.outcome).length;
-    res.json({success:true,date,scenario,diagnostics:{fixtures:fixtures.length,oddsRows:oddsById.size,oddsMatched:fixtureOddsRows,parsed1X2:checked,noOdds,no1X2,candidates,rejectedByScenario,saved:result.rowCount},summary:{total:wins+losses,won:wins,lost:losses,pending,winRate:wins+losses?Math.round(wins*100/(wins+losses)):null},rows:result.rows});
+    res.json({success:true,date,scenario,diagnostics:{fixtures:fixtures.length,oddsMatched:checked,noOdds,candidates,saved:result.rowCount},summary:{total:wins+losses,won:wins,lost:losses,pending,winRate:wins+losses?Math.round(wins*100/(wins+losses)):null},rows:result.rows});
   } catch(error){res.status(500).json({error:error.message,rows:[]});}
 });
 
@@ -2817,8 +2776,47 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
   evaluations.sort((a,b) => (b.ev + b.edge) - (a.ev + a.edge) || b.ev - a.ev);
   const chosen = candidates[0] || null;
   const directionLabel = goalDirection === "home" ? "Ev sahibi golü daha olası" : goalDirection === "away" ? "Deplasman golü daha olası" : "Gol yönü net değil";
+  const pctOrNull = value => value == null || !Number.isFinite(Number(value)) ? null : Math.round(Number(value));
+  const avgPct = (a,b) => a == null || b == null ? null : Math.round((Number(a)+Number(b))/2);
+  const prematchWinner = oddsForFixture(prematchOddsRow || null).find(x => x.market === "MS 1" && x.home && x.draw && x.away);
+  let ms1Pct = null, ms2Pct = null, drawPct = null;
+  if (prematchWinner) {
+    const prices = [Number(prematchWinner.home), Number(prematchWinner.draw), Number(prematchWinner.away)];
+    if (prices.every(x => Number.isFinite(x) && x > 1.01)) {
+      const implied = prices.map(x => 1 / x); const total = implied.reduce((a,b) => a+b, 0);
+      ms1Pct = Math.round(implied[0] / total * 100);
+      drawPct = Math.round(implied[1] / total * 100);
+      ms2Pct = Math.round(implied[2] / total * 100);
+    }
+  }
+  const livePercentages = {
+    home: {
+      htGoal: pctOrNull(teamForms?.home?.htTeamScoredPct),
+      ftGoal: pctOrNull(teamForms?.home?.teamScoredPct),
+      win: pctOrNull(teamForms?.home?.teamWinPct),
+      sampleSize: Number(teamForms?.home?.sampleSize || 0),
+      htSampleSize: Number(teamForms?.home?.htSampleSize || 0)
+    },
+    away: {
+      htGoal: pctOrNull(teamForms?.away?.htTeamScoredPct),
+      ftGoal: pctOrNull(teamForms?.away?.teamScoredPct),
+      win: pctOrNull(teamForms?.away?.teamWinPct),
+      sampleSize: Number(teamForms?.away?.sampleSize || 0),
+      htSampleSize: Number(teamForms?.away?.htSampleSize || 0)
+    },
+    match: {
+      btts: avgPct(teamForms?.home?.bttsPct, teamForms?.away?.bttsPct),
+      over25: avgPct(teamForms?.home?.over25Pct, teamForms?.away?.over25Pct),
+      ms1: ms1Pct, draw: drawPct, ms2: ms2Pct,
+      resultLean: ms1Pct == null || ms2Pct == null ? null : (Math.abs(ms1Pct-ms2Pct) < 5 ? "Dengeli" : ms1Pct > ms2Pct ? "MS 1 eğilimi" : "MS 2 eğilimi"),
+      resultSource: prematchWinner ? `Maç önü 1X2 · ${prematchWinner.bookmaker}` : null
+    },
+    source: "Takımların son 10 tamamlanmış maçı; MS 1/X/2 için maç önü 1X2 oranı",
+    note: "Yüzdeler geçmiş maç sıklığı ve maç önü piyasa olasılığıdır; canlı kazanma garantisi değildir."
+  };
   return {
     fixtureId: fixture.id, currentScore: `${homeGoals}-${awayGoals}`, minute, periodStatus: phase,
+    livePercentages,
     mainPick: chosen?.market || null, alternative: candidates[1]?.market || null,
     source: chosen?.bookmaker || null, valueScore: chosen?.ev ?? null, edge: chosen?.edge ?? null,
     oddsTiming: liveOddsRow ? "live" : "unavailable",
@@ -2856,9 +2854,10 @@ app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
     if (!row) return res.status(404).json({ error: "Maç verisi bulunamadı." });
     const fixture = normalizeProviderMatch(row);
     if (fixture.status !== "LIVE") return res.status(409).json({ error: "Bu maç API tarafından canlı olarak işaretlenmiyor." });
-    const [statsPayload, oddsPayload] = await Promise.all([
+    const [statsPayload, oddsPayload, prematchOddsPayload] = await Promise.all([
       cachedProviderRequest(`stats:${fixtureId}`, `/fixtures/statistics?fixture=${fixtureId}`, 15000).catch(e => { console.warn(`[Live analysis] stats failed fixture=${fixtureId}: ${e.message}`); return { response: [] }; }),
-      cachedProviderRequest(`odds-live-fixture:${fixtureId}`, `/odds/live?fixture=${fixtureId}`, 10000).catch(e => { console.warn(`[Live analysis] live odds failed fixture=${fixtureId}: ${e.message}`); return { response: [] }; })
+      cachedProviderRequest(`odds-live-fixture:${fixtureId}`, `/odds/live?fixture=${fixtureId}`, 10000).catch(e => { console.warn(`[Live analysis] live odds failed fixture=${fixtureId}: ${e.message}`); return { response: [] }; }),
+      cachedProviderRequest(`odds-fixture:${fixtureId}`, `/odds?fixture=${fixtureId}`, 5 * 60 * 1000).catch(e => { console.warn(`[Live analysis] prematch odds failed fixture=${fixtureId}: ${e.message}`); return { response: [] }; })
     ]);
     let liveOddsRow = (oddsPayload.response || []).find(x => Number(x.fixture?.fixture?.id ?? x.fixture?.id ?? x.fixtureId ?? x.id) === fixtureId) || null;
     if (!liveOddsRow) {
@@ -2869,7 +2868,8 @@ app.get("/api/match/:id/live-goal-analysis", async (req, res) => {
       fetchLiveGoalProfile(fixture.awayId, fixture.id)
     ]);
     const liveGoalForms = { home: homeGoalProfile, away: awayGoalProfile };
-    return res.json(await analyzeLiveFixture(fixture, liveOddsRow, statsPayload.response || [], liveGoalForms));
+    const prematchOddsRow = (prematchOddsPayload.response || []).find(x => Number(x.fixture?.id) === fixtureId) || null;
+    return res.json(await analyzeLiveFixture(fixture, liveOddsRow, statsPayload.response || [], liveGoalForms, prematchOddsRow));
   } catch (error) {
     const message = String(error?.message || error);
     const limited = /429|rate.?limit|quota|istek sınırı/i.test(message);
