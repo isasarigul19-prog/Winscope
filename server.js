@@ -81,6 +81,14 @@ if (databasePool) {
         sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         PRIMARY KEY(match_date, session)
       )`);
+      await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_daily_automation_events (
+        event_key TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        match_date DATE NOT NULL,
+        status TEXT NOT NULL,
+        details JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`);
       await databasePool.query(`CREATE TABLE IF NOT EXISTS winscope_daily_analysis_runs (
         match_date DATE PRIMARY KEY,
         status TEXT NOT NULL,
@@ -4327,6 +4335,9 @@ async function runAutomaticLivePick() {
 const dailyAnalysisCouponRefreshStarted = new Map();
 const dailyAnalysisCouponInFlight = new Set();
 const dailyAnalysisCouponSentMemory = new Map();
+const dailyAutomationRefreshFallback = new Set();
+let dailyCouponSchedulerInFlight = false;
+let dailyCouponSchedulerLastLogKey = "";
 
 function turkeyClockParts() {
   const parts = new Intl.DateTimeFormat("en-GB", {
@@ -4334,6 +4345,54 @@ function turkeyClockParts() {
   }).formatToParts(new Date());
   const get = type => Number(parts.find(p=>p.type===type)?.value || 0);
   return { hour:get("hour"), minute:get("minute") };
+}
+
+async function claimDailyAutomationRefresh(eventKey, date, session) {
+  if (!databasePool) {
+    if (dailyAutomationRefreshFallback.has(eventKey)) return false;
+    dailyAutomationRefreshFallback.add(eventKey);
+    return true;
+  }
+  await archiveDatabaseReady;
+  const q = await databasePool.query(`
+    INSERT INTO winscope_daily_automation_events(event_key,event_type,match_date,status,details)
+    VALUES($1,'analysis_refresh',$2::date,'running',$3::jsonb)
+    ON CONFLICT(event_key) DO UPDATE SET status='running',details=EXCLUDED.details,updated_at=NOW()
+    WHERE winscope_daily_automation_events.status='failed'
+       OR (winscope_daily_automation_events.status='running' AND winscope_daily_automation_events.updated_at < NOW()-INTERVAL '20 minutes')
+    RETURNING event_key
+  `,[eventKey,date,JSON.stringify({session})]);
+  return q.rowCount > 0;
+}
+
+async function finishDailyAutomationRefresh(eventKey, status, details={}) {
+  if (!databasePool) return;
+  try {
+    await databasePool.query(`UPDATE winscope_daily_automation_events SET status=$2,details=$3::jsonb,updated_at=NOW() WHERE event_key=$1`,
+      [eventKey,status,JSON.stringify(details)]);
+  } catch(error) { console.warn(`[DAILY AUTOMATION] refresh durum kaydı yazılamadı: ${error.message}`); }
+}
+
+async function withDailyCouponSchedulerLock(task) {
+  if (!databasePool) return await task();
+  let client;
+  let locked=false;
+  try {
+    await archiveDatabaseReady;
+    client=await databasePool.connect();
+    const result=await client.query("SELECT pg_try_advisory_lock(731131004) AS locked");
+    locked=Boolean(result.rows[0]?.locked);
+    if (!locked) return;
+    await task();
+  } finally {
+    if (client) {
+      if (locked) {
+        try { await client.query("SELECT pg_advisory_unlock(731131004)"); }
+        catch(error) { console.warn(`[DAILY AUTOMATION] advisory lock bırakılamadı: ${error.message}`); }
+      }
+      client.release();
+    }
+  }
 }
 
 async function dailyAnalysisRowsForCoupon(date) {
@@ -4372,14 +4431,14 @@ async function sendDailyAnalysisTopThree(session, date) {
         [date,session]
       );
       if (sent.rowCount) {
-        console.log(`[DAILY ANALYSIS 3] ${key} zaten gönderilmiş; tekrar yok.`);
+        console.log(`[DAILY ANALYSIS COUPON] ${key} zaten gönderilmiş; tekrar yok.`);
         return;
       }
     } else if (dailyAnalysisCouponSentMemory.has(key)) return;
 
     const job=await findDailyAnalysisRun(date);
     if (!job || job.status!=="completed") {
-      console.log(`[DAILY ANALYSIS 3] ${key} beklemede; analiz durumu=${job?.status || "yok"}.`);
+      console.log(`[DAILY ANALYSIS COUPON] ${key} beklemede; analiz durumu=${job?.status || "yok"}.`);
       return;
     }
 
@@ -4412,10 +4471,9 @@ async function sendDailyAnalysisTopThree(session, date) {
       Number(b.marketProbability||0)-Number(a.marketProbability||0) ||
       Number(b.formSupport||0)-Number(a.formSupport||0)
     );
-    // Her otomatik kupon tam iki farklı maçtan oluşur; yeterli aday yoksa kupon zorlanmaz.
     const chosen=deduped.slice(0,2);
     if (chosen.length<2) {
-      console.warn(`[DAILY ANALYSIS COUPON] ${key} gönderilmedi; güvenilir ve başlamamış aday=${chosen.length}/2.`);
+      console.warn(`[DAILY ANALYSIS COUPON] ${key} gönderilmedi; uygun ve başlamamış aday=${chosen.length}/2 (analiz=${rows.length}, başlamamış=${upcoming.size}).`);
       return;
     }
     const sessionLabel=session==="early"?"GÜVENİLİR KUPON":"ALTERNATİF KUPON";
@@ -4424,7 +4482,8 @@ async function sendDailyAnalysisTopThree(session, date) {
       lines.push(`${i+1}. ${a.home} VS ${a.away}`);
       lines.push(`Ana tercih: ${a.mainPick}`);
       lines.push(`Tahmin İY / MS: ${a.halfTimeScore || "—"} / ${a.fullTimeScore || "—"}`);
-      lines.push(`Lig: ${a.league || "—"}`,"");
+      lines.push(`Lig: ${a.league || "—"}`);
+      lines.push("");
     });
     lines.push("Not: Yalnızca başlamamış, oran ve son 5 maç formu desteği bulunan analizler seçildi. Sayısal oran gösterilmez; başarı garantisi yoktur.");
     const picks=chosen.map(a=>({
@@ -4434,7 +4493,7 @@ async function sendDailyAnalysisTopThree(session, date) {
     }));
     const sent=await sendTelegram(lines.join("\n"));
     if (!sent.sent) {
-      console.warn(`[DAILY ANALYSIS 3] ${key} Telegram gönderilemedi: ${sent.reason||"bilinmeyen neden"}`);
+      console.warn(`[DAILY ANALYSIS COUPON] ${key} Telegram gönderilemedi: ${sent.reason||"bilinmeyen neden"}`);
       return;
     }
     if (databasePool) {
@@ -4446,7 +4505,7 @@ async function sendDailyAnalysisTopThree(session, date) {
     }
     dailyAnalysisCouponSentMemory.set(key,picks);
     const trackingCoupon={draftId:`daily-analysis-${key}`,date,type:`daily3_${session}`,picks,autoGenerated:true};
-    await saveCouponTracking(trackingCoupon).catch(e=>console.warn(`[DAILY ANALYSIS 3] takip kaydı: ${e.message}`));
+    await saveCouponTracking(trackingCoupon).catch(e=>console.warn(`[DAILY ANALYSIS COUPON] takip kaydı: ${e.message}`));
     await saveArchiveItem("coupon",{date,type:`daily3_${session}`,picks,createdAt:new Date().toISOString()});
     console.log(`[DAILY ANALYSIS COUPON SENT] session=${session} date=${date} legs=2 fixtures=${picks.map(p=>p.fixtureId).join(",")} telegramMessageId=${sent.messageId}`);
   } catch(error) {
@@ -4457,33 +4516,54 @@ async function sendDailyAnalysisTopThree(session, date) {
 }
 
 async function runDailyAnalysisCouponSchedule() {
-  const date=turkeyDateString();
-  const {hour,minute}=turkeyClockParts();
-  const now=hour*60+minute;
-  const sessions=[
-    {key:"early",refreshAt:9*60+15,sendAt:10*60},
-    {key:"second",refreshAt:15*60+15,sendAt:16*60}
-  ];
-  for (const session of sessions) {
-    const refreshKey=`${date}:${session.key}`;
-    const lastRefresh=dailyAnalysisCouponRefreshStarted.get(refreshKey)||0;
-    if (now>=session.refreshAt && now<session.sendAt && Date.now()-lastRefresh>=5*60*1000) {
-      dailyAnalysisCouponRefreshStarted.set(refreshKey,Date.now());
-      try {
-        const job=await startDailyAnalysisIfNeeded(date,{force:true});
-        console.log(`[DAILY ANALYSIS 3 REFRESH] session=${session.key} date=${date} status=${job.status}`);
-      } catch(error) {
-        dailyAnalysisCouponRefreshStarted.delete(refreshKey);
-        console.error(`[DAILY ANALYSIS 3 REFRESH ERROR] ${refreshKey}: ${error.message}`);
+  if (dailyCouponSchedulerInFlight) return;
+  dailyCouponSchedulerInFlight=true;
+  try {
+    await withDailyCouponSchedulerLock(async()=>{
+      const date=turkeyDateString();
+      const {hour,minute}=turkeyClockParts();
+      const now=hour*60+minute;
+      const sessions=[
+        {key:"early",refreshAt:9*60+15,sendAt:10*60},
+        {key:"second",refreshAt:15*60+15,sendAt:16*60}
+      ];
+      for (const session of sessions) {
+        const refreshKey=`${date}:refresh:${session.key}`;
+        if (now>=session.refreshAt && now<session.sendAt) {
+          const claimed=await claimDailyAutomationRefresh(refreshKey,date,session.key);
+          if (claimed) {
+            try {
+              const existing=await findDailyAnalysisRun(date);
+              // Running/queued işi yeniden başlatma; tamamlandıysa bu oturum için tek kez yenile.
+              const shouldForce=existing?.status==="completed" || existing?.status==="failed";
+              const job=await startDailyAnalysisIfNeeded(date,{force:shouldForce});
+              await finishDailyAutomationRefresh(refreshKey,"completed",{session:session.key,jobStatus:job.status});
+              console.log(`[DAILY AUTOMATION] analysis refresh started date=${date} session=${session.key} status=${job.status}`);
+            } catch(error) {
+              await finishDailyAutomationRefresh(refreshKey,"failed",{session:session.key,error:error.message});
+              console.error(`[DAILY AUTOMATION] analysis refresh failed date=${date} session=${session.key}: ${error.message}`);
+            }
+          }
+        }
+        const sendWindowEnd=session.sendAt+60;
+        const sendAttemptKey=`${date}:send:${session.key}`;
+        const lastAttempt=dailyAnalysisCouponRefreshStarted.get(sendAttemptKey)||0;
+        if (now>=session.sendAt && now<sendWindowEnd && Date.now()-lastAttempt>=5*60*1000) {
+          dailyAnalysisCouponRefreshStarted.set(sendAttemptKey,Date.now());
+          console.log(`[DAILY AUTOMATION] coupon check date=${date} session=${session.key} time=${String(hour).padStart(2,"0")}:${String(minute).padStart(2,"0")}`);
+          await sendDailyAnalysisTopThree(session.key,date);
+        }
       }
-    }
-    // If the analysis is still running or fewer than two qualified matches exist,
-    // retry every five minutes for up to one hour; never manufacture a pick.
-    const lastAttempt=dailyAnalysisCouponRefreshStarted.get(`${refreshKey}:send`)||0;
-    if (now>=session.sendAt && now<session.sendAt+60 && Date.now()-lastAttempt>=5*60*1000) {
-      dailyAnalysisCouponRefreshStarted.set(`${refreshKey}:send`,Date.now());
-      await sendDailyAnalysisTopThree(session.key,date);
-    }
+      const logKey=`${date}:${hour}:${Math.floor(minute/5)}`;
+      if (logKey!==dailyCouponSchedulerLastLogKey) {
+        dailyCouponSchedulerLastLogKey=logKey;
+        console.log(`[DAILY AUTOMATION HEARTBEAT] date=${date} time=${String(hour).padStart(2,"0")}:${String(minute).padStart(2,"0")} timezone=Europe/Istanbul schedule=09:15/10:00,15:15/16:00`);
+      }
+    });
+  } catch(error) {
+    console.error(`[DAILY AUTOMATION SCHEDULER ERROR] ${error.message}`);
+  } finally {
+    dailyCouponSchedulerInFlight=false;
   }
 }
 
