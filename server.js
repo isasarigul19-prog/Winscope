@@ -3604,6 +3604,38 @@ async function runDailyAnalysisJob(job) {
         console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | unconditional=${JSON.stringify(scores.topScoreCandidates)} | marketScenario=${JSON.stringify(scores.marketScenarioCandidates)} | model=${scores.modelVersion} fit=${scores.modelFitError} markets=${JSON.stringify(scores.marketTargetsUsed)} | pick=${mainPick} | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} | basis=${scores.scoreBasis} | HTbasis=${scores.halfTimeBasis}`);
         const other = mainPick === "KG VAR" ? "MS 2.5 ÜST" : "KG VAR";
         const altRow = oddsForFixture(oddsRow).find(x=>x.market===other && Number(x.odd)>=DAILY_MARKET_ODDS_MIN && Number(x.odd)<=DAILY_MARKET_ODDS_MAX);
+        // chooseSupportedMarket() gerçek değerleri "score" ve "probability"
+        // alanlarında döndürür. Günlük analiz arşivinin beklediği alan adları
+        // selectionScore / marketProbability olduğundan, seçilen ANA PAZAR için
+        // aynı maç önü odds satırından açıkça eşleştiriyoruz. Böylece başka bir
+        // marketin puanı yanlışlıkla ana tercihe yazılmaz.
+        const mainMarketOdds = oddsForFixture(oddsRow)
+          .filter(x => x.market === mainPick &&
+            Number.isFinite(Number(x.odd)) &&
+            Number(x.odd) >= DAILY_MARKET_ODDS_MIN &&
+            Number(x.odd) <= DAILY_MARKET_ODDS_MAX)
+          .sort((a,b) => (/bet365/i.test(b.bookmaker)-/bet365/i.test(a.bookmaker)) ||
+            Math.abs(Number(a.odd)-1.615)-Math.abs(Number(b.odd)-1.615))[0] || null;
+        const mainMarketFormPct = marketSupport(mainPick, homeForm, awayForm);
+        const mainMarketProbability = mainMarketOdds &&
+          Number.isFinite(Number(mainMarketOdds.probability))
+          ? Number(mainMarketOdds.probability) : null;
+        const mainMarketOdd = mainMarketOdds && Number.isFinite(Number(mainMarketOdds.odd))
+          ? Number(mainMarketOdds.odd) : null;
+        const mainMarketEstimatedPct = mainMarketProbability != null && mainMarketFormPct != null
+          ? mainMarketProbability * 0.55 + Number(mainMarketFormPct) * 0.45
+          : mainMarketProbability;
+        const mainMarketImpliedPct = mainMarketOdd != null && mainMarketOdd > 1.01
+          ? 100 / mainMarketOdd : null;
+        const mainMarketValueEdge = mainMarketEstimatedPct != null && mainMarketImpliedPct != null
+          ? mainMarketEstimatedPct - mainMarketImpliedPct : null;
+        const mainMarketValueBonus = mainMarketValueEdge == null ? 0
+          : Math.max(-8, Math.min(8, mainMarketValueEdge * 0.45));
+        const mainMarketSelectionScore = mainMarketProbability != null
+          ? mainMarketProbability * 0.62 +
+            (mainMarketFormPct == null ? 0 : Number(mainMarketFormPct) * 0.20) +
+            mainMarketValueBonus
+          : null;
         const analysis = {
           fixtureId:match.id, matchDate:date, home:match.home, away:match.away, league:match.league,
           halfTimeScore:scores.halfTimeScore, fullTimeScore:scores.fullTimeScore,
@@ -3611,8 +3643,11 @@ async function runDailyAnalysisJob(job) {
           sixPlusProbability:scores.sixPlusProbability ?? null,
           sixPlusCandidate:scores.sixPlusCandidate === true,
           mainPick, alternative:altRow ? other : "Aralıkta doğrulanmış alternatif yok",
-          selectionScore: supported && Number.isFinite(Number(supported.selectionScore)) ? Number(supported.selectionScore) : null,
-          marketProbability: supported && Number.isFinite(Number(supported.marketProbability)) ? Number(supported.marketProbability) : null,
+          selectionScore:Number.isFinite(mainMarketSelectionScore) ? Math.round(mainMarketSelectionScore * 10) / 10 : null,
+          marketProbability:Number.isFinite(mainMarketProbability) ? Math.round(mainMarketProbability * 10) / 10 : null,
+          marketFormSupport:Number.isFinite(Number(mainMarketFormPct)) ? Math.round(Number(mainMarketFormPct) * 10) / 10 : null,
+          marketOdd:mainMarketOdd,
+          marketProbabilitySource:mainMarketOdds?.bookmaker || null,
           marketPercentages:analysisPercentages(oddsRow, homeForm, awayForm),
           formSupport: supported?.teamFormAvailable === true ? 1 : 0,
           selectionBookmaker: supported?.bookmaker || null,
