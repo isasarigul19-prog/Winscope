@@ -4242,13 +4242,13 @@ async function runEarlyFirstHalfPick() {
       console.log(`[EARLY HT PREPARED] fixture=${f.id} window=T-5 notification=false`);
     }
 
-    // Erken tahmin penceresi 3-5 dakikaya sıkıştırılmaz; 1-20. dakika boyunca taranır.
+    // Erken tahmin penceresi yalnızca ilk 10 dakikadır; 11. dakikadan itibaren yeni tahmin üretilmez.
     const liveRows = (livePayload.response || []).map(normalizeProviderMatch);
     const fixtures = liveRows.filter(f => {
       const minute = Number(f.minute);
       const total = Number(f.homeScore) + Number(f.awayScore);
       return f.id && f.status === 'LIVE' && f.periodStatus === '1H' &&
-        Number.isFinite(minute) && minute >= 1 && minute <= 20 && isFreshLiveFixture(f) &&
+        Number.isFinite(minute) && minute >= 1 && minute <= 10 && isFreshLiveFixture(f) &&
         Number.isFinite(total) && total === 0 && !isExcludedAnalysisCompetition(f);
     });
     let sent = 0;
@@ -4383,7 +4383,7 @@ async function runEarlyFirstHalfPick() {
         }
       } catch (e) { console.warn(`[EARLY HT ERROR] fixture=${fixture.id}: ${e.message}`); }
     }
-    console.log(`[EARLY HT SCAN] prep=${prep.length} live1to20=${fixtures.length} sent=${sent}`);
+    console.log(`[EARLY HT SCAN] prep=${prep.length} live1to10=${fixtures.length} sent=${sent}`);
   } catch (e) {
     console.error(`[EARLY HT SCAN ERROR] ${e.message}`);
   } finally {
