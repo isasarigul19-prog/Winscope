@@ -1,6 +1,8 @@
 import express from "express";
 import pg from "pg";
 import archiver from "archiver";
+import os from "node:os";
+import { once } from "node:events";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -4018,6 +4020,13 @@ app.get("/api/archive/odds", async (req, res) => {
 app.get("/api/archive/export", async (_req, res) => {
   if (!databasePool) return res.status(503).json({ error: "PostgreSQL bağlantısı yok; arşiv dışa aktarılamıyor." });
   let archive;
+  let tempDir;
+  let cleaned = false;
+  const cleanup = async () => {
+    if (cleaned) return;
+    cleaned = true;
+    if (tempDir) await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  };
   try {
     await archiveDatabaseReady;
     const batchSize = 2500;
@@ -4035,6 +4044,67 @@ app.get("/api/archive/export", async (_req, res) => {
       coupons: Number(countQueries[3].rows[0]?.total || 0)
     };
 
+    // Build JSONL files on temporary disk in bounded batches. Do not accumulate
+    // the archive or ZIP entries in the Node.js heap.
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "winscope-score-shot-"));
+    const manifest = {
+      exportedAt,
+      format: "winscope-score-shot-archive-v2",
+      batchSize,
+      counts,
+      files: ["fixtures.jsonl", "odds.jsonl", "analyses.jsonl", "coupons.jsonl"],
+      note: "UTF-8 JSONL; one database record per line. Export is read-only."
+    };
+    await fs.writeFile(path.join(tempDir, "manifest.json"), JSON.stringify(manifest, null, 2));
+
+    const writePaged = async ({ file, sql, keyColumn }) => {
+      const outputPath = path.join(tempDir, file);
+      const out = (await import("node:fs")).createWriteStream(outputPath, { encoding: "utf8" });
+      let lastKey = "0";
+      let written = 0;
+      try {
+        while (true) {
+          const result = await databasePool.query(sql, [lastKey, batchSize]);
+          if (!result.rows.length) break;
+          for (const row of result.rows) {
+            const line = JSON.stringify(row) + "\n";
+            if (!out.write(line)) await once(out, "drain");
+            lastKey = String(row[keyColumn]);
+            written += 1;
+          }
+          if (result.rows.length < batchSize) break;
+        }
+        out.end();
+        await once(out, "finish");
+      } catch (error) {
+        out.destroy(error);
+        throw error;
+      }
+      return written;
+    };
+
+    const written = {};
+    written.fixtures = await writePaged({
+      file: "fixtures.jsonl", keyColumn: "fixture_id",
+      sql: "SELECT fixture_id, match_date, kickoff_at, status, home_team, away_team, league, payload, source_endpoint, first_seen_at, last_seen_at FROM winscope_fixture_archive WHERE fixture_id > $1::bigint ORDER BY fixture_id LIMIT $2"
+    });
+    written.odds = await writePaged({
+      file: "odds.jsonl", keyColumn: "id",
+      sql: "SELECT id, fixture_id, payload, source_endpoint, captured_at FROM winscope_fixture_odds_archive WHERE id > $1::bigint ORDER BY id LIMIT $2"
+    });
+    written.analyses = await writePaged({
+      file: "analyses.jsonl", keyColumn: "id",
+      sql: "SELECT id, payload, created_at FROM winscope_archive WHERE category='analysis' AND id > $1::bigint ORDER BY id LIMIT $2"
+    });
+    written.coupons = await writePaged({
+      file: "coupons.jsonl", keyColumn: "id",
+      sql: "SELECT id, payload, created_at FROM winscope_archive WHERE category='coupon' AND id > $1::bigint ORDER BY id LIMIT $2"
+    });
+
+    const complete = Object.keys(counts).every(key => counts[key] === written[key]);
+    await fs.writeFile(path.join(tempDir, "export-check.json"), JSON.stringify({ counts, written, complete }, null, 2));
+    if (!complete) throw new Error(`Arşiv kayıt sayısı uyuşmuyor: ${JSON.stringify({ counts, written })}`);
+
     const stamp = exportedAt.replace(/[:.]/g, "-");
     res.status(200);
     res.setHeader("Content-Type", "application/zip");
@@ -4043,56 +4113,17 @@ app.get("/api/archive/export", async (_req, res) => {
     archive = archiver("zip", { zlib: { level: 1 } });
     archive.on("warning", error => { if (error.code !== "ENOENT") res.destroy(error); });
     archive.on("error", error => res.destroy(error));
+    res.on("close", () => { if (!res.writableFinished) archive.abort(); void cleanup(); });
     archive.pipe(res);
-
-    archive.append(JSON.stringify({
-      exportedAt,
-      format: "winscope-score-shot-archive-v1",
-      batchSize,
-      counts,
-      files: ["fixtures/", "odds/", "analyses/", "coupons/"],
-      note: "Each JSONL file contains one JSON record per line. Export is read-only."
-    }, null, 2), { name: "manifest.json" });
-
-    const appendPaged = async ({ name, sql, params = [], keyColumn, keyStart = 0 }) => {
-      let lastKey = keyStart;
-      let written = 0;
-      let part = 0;
-      const folder = name.replace(/\.jsonl$/, "");
-      while (true) {
-        const result = await databasePool.query(sql(lastKey, batchSize, ...params));
-        if (!result.rows.length) break;
-        part += 1;
-        const partName = `${folder}/part-${String(part).padStart(4, "0")}.jsonl`;
-        archive.append(result.rows.map(row => JSON.stringify(row)).join("\n") + "\n", { name: partName });
-        written += result.rows.length;
-        lastKey = result.rows[result.rows.length - 1][keyColumn];
-        if (result.rows.length < batchSize) break;
-      }
-      return written;
-    };
-
-    const written = {};
-    written.fixtures = await appendPaged({
-      name: "fixtures.jsonl", keyColumn: "fixture_id", keyStart: 0,
-      sql: (last, limit) => `SELECT fixture_id, match_date, kickoff_at, status, home_team, away_team, league, payload, source_endpoint, first_seen_at, last_seen_at FROM winscope_fixture_archive WHERE fixture_id > ${Number(last)} ORDER BY fixture_id LIMIT ${Number(limit)}`
-    });
-    written.odds = await appendPaged({
-      name: "odds.jsonl", keyColumn: "id",
-      sql: (last, limit) => `SELECT id, fixture_id, payload, source_endpoint, captured_at FROM winscope_fixture_odds_archive WHERE id > ${Number(last)} ORDER BY id LIMIT ${Number(limit)}`
-    });
-    written.analyses = await appendPaged({
-      name: "analyses.jsonl", keyColumn: "id",
-      sql: (last, limit) => `SELECT id, payload, created_at FROM winscope_archive WHERE category='analysis' AND id > ${Number(last)} ORDER BY id LIMIT ${Number(limit)}`
-    });
-    written.coupons = await appendPaged({
-      name: "coupons.jsonl", keyColumn: "id",
-      sql: (last, limit) => `SELECT id, payload, created_at FROM winscope_archive WHERE category='coupon' AND id > ${Number(last)} ORDER BY id LIMIT ${Number(limit)}`
-    });
-    archive.append(JSON.stringify({ counts, written, complete: Object.keys(counts).every(key => counts[key] === written[key]) }, null, 2), { name: "export-check.json" });
+    for (const file of ["manifest.json", "fixtures.jsonl", "odds.jsonl", "analyses.jsonl", "coupons.jsonl", "export-check.json"]) {
+      archive.file(path.join(tempDir, file), { name: file });
+    }
+    archive.on("end", () => { void cleanup(); });
     await archive.finalize();
   } catch (error) {
     if (archive) archive.abort();
+    await cleanup();
+    console.error(`[ARCHIVE EXPORT] ${error.stack || error.message}`);
     if (!res.headersSent) res.status(500).json({ error: error.message || "Arşiv ZIP oluşturulamadı." });
     else res.destroy(error);
   }
