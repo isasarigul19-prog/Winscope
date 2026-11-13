@@ -1,6 +1,7 @@
 import express from "express";
 import pg from "pg";
 import archiver from "archiver";
+import QueryStream from "pg-query-stream";
 import os from "node:os";
 import { once } from "node:events";
 import path from "node:path";
@@ -4029,7 +4030,7 @@ app.get("/api/archive/export", async (_req, res) => {
   };
   try {
     await archiveDatabaseReady;
-    const batchSize = 2500;
+    const batchSize = 2000;
     const exportedAt = new Date().toISOString();
     const countQueries = await Promise.all([
       databasePool.query("SELECT COUNT(*)::bigint AS total FROM winscope_fixture_archive"),
@@ -4057,48 +4058,50 @@ app.get("/api/archive/export", async (_req, res) => {
     };
     await fs.writeFile(path.join(tempDir, "manifest.json"), JSON.stringify(manifest, null, 2));
 
-    const writePaged = async ({ file, sql, keyColumn }) => {
+    const writePaged = async ({ file, sql }) => {
       const outputPath = path.join(tempDir, file);
       const out = (await import("node:fs")).createWriteStream(outputPath, { encoding: "utf8" });
-      let lastKey = "0";
+      const client = await databasePool.connect();
+      let queryStream;
       let written = 0;
       try {
-        while (true) {
-          const result = await databasePool.query(sql, [lastKey, batchSize]);
-          if (!result.rows.length) break;
-          for (const row of result.rows) {
-            const line = JSON.stringify(row) + "\n";
-            if (!out.write(line)) await once(out, "drain");
-            lastKey = String(row[keyColumn]);
-            written += 1;
-          }
-          if (result.rows.length < batchSize) break;
+        // pg-query-stream uses a PostgreSQL cursor and fetches no more than
+        // batchSize rows at a time instead of materializing the full result.
+        queryStream = client.query(new QueryStream(sql, [], { batchSize }));
+        for await (const row of queryStream) {
+          const line = JSON.stringify(row) + "\n";
+          if (!out.write(line)) await once(out, "drain");
+          written += 1;
         }
         out.end();
         await once(out, "finish");
       } catch (error) {
+        queryStream?.destroy(error);
         out.destroy(error);
         throw error;
+      } finally {
+        queryStream?.destroy();
+        client.release();
       }
       return written;
     };
 
     const written = {};
     written.fixtures = await writePaged({
-      file: "fixtures.jsonl", keyColumn: "fixture_id",
-      sql: "SELECT fixture_id, match_date, kickoff_at, status, home_team, away_team, league, payload, source_endpoint, first_seen_at, last_seen_at FROM winscope_fixture_archive WHERE fixture_id > $1::bigint ORDER BY fixture_id LIMIT $2"
+      file: "fixtures.jsonl",
+      sql: "SELECT fixture_id, match_date, kickoff_at, status, home_team, away_team, league, payload, source_endpoint, first_seen_at, last_seen_at FROM winscope_fixture_archive ORDER BY fixture_id"
     });
     written.odds = await writePaged({
-      file: "odds.jsonl", keyColumn: "id",
-      sql: "SELECT id, fixture_id, payload, source_endpoint, captured_at FROM winscope_fixture_odds_archive WHERE id > $1::bigint ORDER BY id LIMIT $2"
+      file: "odds.jsonl",
+      sql: "SELECT id, fixture_id, payload, source_endpoint, captured_at FROM winscope_fixture_odds_archive ORDER BY id"
     });
     written.analyses = await writePaged({
-      file: "analyses.jsonl", keyColumn: "id",
-      sql: "SELECT id, payload, created_at FROM winscope_archive WHERE category='analysis' AND id > $1::bigint ORDER BY id LIMIT $2"
+      file: "analyses.jsonl",
+      sql: "SELECT id, payload, created_at FROM winscope_archive WHERE category='analysis' ORDER BY id"
     });
     written.coupons = await writePaged({
-      file: "coupons.jsonl", keyColumn: "id",
-      sql: "SELECT id, payload, created_at FROM winscope_archive WHERE category='coupon' AND id > $1::bigint ORDER BY id LIMIT $2"
+      file: "coupons.jsonl",
+      sql: "SELECT id, payload, created_at FROM winscope_archive WHERE category='coupon' ORDER BY id"
     });
 
     const complete = Object.keys(counts).every(key => counts[key] === written[key]);
