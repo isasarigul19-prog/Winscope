@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": { "start": "node server.js" },
   "dependencies": {
+    "archiver": "^7.0.1",
     "express": "^4.21.2",
     "pg": "^8.13.1"
   }
