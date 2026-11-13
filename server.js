@@ -4173,9 +4173,8 @@ async function ensureAutomaticDailyAnalysis() {
 setTimeout(() => { void ensureAutomaticDailyAnalysis(); }, 45000);
 setInterval(() => { void ensureAutomaticDailyAnalysis(); }, 5 * 60 * 1000);
 
-// Maç başlangıcına yakın ilk yarı pazar karşılaştırması:
-// T-5 dakika ve 1. dakika pencerelerinde İY 0.5 / İY 1.5 arasından
-// maç önü oranı + son 10 / son 5 ilk yarı gol verisi daha güçlü olan TEK pazar seçilir.
+// İlk 10 dakika erken gol motoru: maç önü İY takım/total oranları + son 5 İY takım gol/yeme istatistikleri.
+// Canlı baskı, şut ve korner verileri bu motorun puanına dahil edilmez.
 let earlyHalfScanInFlight = false;
 // İlk yarı takım gol oranlarını ham maç önü bookmaker pazarından ayıkla.
 // Genel maç toplamı veya tam maç EV/DEP oranları bu fonksiyona asla karışmaz.
@@ -4256,22 +4255,22 @@ async function runEarlyFirstHalfPick() {
       try {
         const key = `${date}|${fixture.id}`;
         if (earlyHalfSent.has(key) || !fixture.homeId || !fixture.awayId) continue;
-        const [oddsPayload, homeForm, awayForm, statsPayload] = await Promise.all([
+        const [oddsPayload, homeForm, awayForm] = await Promise.all([
           cachedProviderRequest(`early-ht-prematch-odds:${fixture.id}`, `/odds?fixture=${fixture.id}`, 60000)
             .catch(e => { console.warn(`[EARLY HT ODDS] fixture=${fixture.id}: ${e.message}`); return { response: [] }; }),
           fetchLiveGoalProfile(fixture.homeId, fixture.id),
-          fetchLiveGoalProfile(fixture.awayId, fixture.id),
-          cachedProviderRequest(`early-ht-live-stats:${fixture.id}`, `/fixtures/statistics?fixture=${fixture.id}`, 12000)
-            .catch(e => { console.warn(`[EARLY HT STATS] fixture=${fixture.id}: ${e.message}`); return { response: [] }; })
+          fetchLiveGoalProfile(fixture.awayId, fixture.id)
         ]);
         const oddsRow = (oddsPayload.response || []).find(r =>
           Number(r.fixture?.id ?? r.fixture?.fixture?.id ?? r.fixtureId ?? r.id) === Number(fixture.id)
         ) || null;
-        const stats = liveStatsMetrics(statsPayload.response || [], fixture);
-        // Sadece gerçek İY EV/DEP 0.5 takım gol oranları kullanılır.
-        // Tam maç takım golü veya İY toplam gol oranı taraf seçimine karıştırılmaz.
+        // Yalnızca maç önü oranları ve tamamlanmış maçların ilk yarı takım istatistikleri kullanılır.
+        // Canlı şut/korner/baskı verisi bu motora dahil değildir.
         const teamOdds = earlyHalfTeamGoalOdds(oddsRow);
-        const sideScore = (form, opponentForm, market, live) => {
+        const firstHalfTotalOdds = oddsForFixture(oddsRow)
+          .filter(x => x.market === 'İY 0.5 ÜST' && Number.isFinite(Number(x.probability)))
+          .sort((a,b) => (/bet365/i.test(b.bookmaker)-/bet365/i.test(a.bookmaker)) || b.probability-a.probability)[0] || null;
+        const sideScore = (form, opponentForm, market) => {
           const h10 = Number(form?.htTeamScoredPct);
           const h5 = Number(form?.recent?.htTeamScoredPct);
           const conceded5 = Number(opponentForm?.recent?.htTeamConcededPct);
@@ -4279,28 +4278,22 @@ async function runEarlyFirstHalfPick() {
           const opponentSample5 = Number(opponentForm?.recent?.htSampleSize || 0);
           const has5 = Number.isFinite(h5) && sample5 >= 5;
           const hasDefense = Number.isFinite(conceded5) && opponentSample5 >= 5;
-          const hasOdds = Boolean(market && Number.isFinite(Number(market.probability)));
-          // Oran yoksa EV/DEP tarafı seçme: eksik fiyatı tahmin gibi göstermeyiz.
-          if (!has5 || h5 <= 50 || !hasDefense || !hasOdds) return null;
-          const attack = Number.isFinite(h10) ? h10 * 0.35 + h5 * 0.65 : h5;
-          const pressure = Number(live?.shotsOnTarget || 0) * 12 + Number(live?.totalShots || 0) * 3 + Number(live?.corners || 0) * 5;
-          const hasPressure = Boolean(stats.available);
-          // Rakibin İY gol yeme yüzdesi savunma zaafı olarak, gerçek oran ise piyasa
-          // beklentisi olarak puana katılır. Son 5 maç örneklemi zorunludur.
-          const parts = [
-            { value: attack, weight: 0.35 },
-            { value: conceded5, weight: 0.25 },
-            { value: Number(market.probability), weight: 0.30 }
-          ];
-          if (hasPressure) parts.push({ value: Math.min(100, pressure), weight: 0.10 });
-          const weight = parts.reduce((sum, item) => sum + item.weight, 0);
-          const score = parts.reduce((sum, item) => sum + item.value * item.weight, 0) / weight;
-          return { score, profile: attack, pressure, h10: Number.isFinite(h10) ? h10 : null,
-            h5, opponentConceded5: conceded5, market, hasOdds, hasPressure,
+          const hasTeamOdds = Boolean(market && Number.isFinite(Number(market.probability)));
+          const hasTotalOdds = Boolean(firstHalfTotalOdds && Number.isFinite(Number(firstHalfTotalOdds.probability)));
+          // Her iki gerçek maç önü İY oranı ve iki takımın son 5 İY örneklemi zorunludur.
+          if (!has5 || h5 <= 50 || !hasDefense || !hasTeamOdds || !hasTotalOdds) return null;
+          const attack = h5; // Kullanıcının belirlediği son 5 tamamlanmış maç örneklemi
+          // Motor puanı: takım İY gol atma %25, rakibin İY gol yeme %25,
+          // ilgili takımın İY 0.5 oranı %30, maçın İY 0.5 toplam oranı %20.
+          const score = attack * 0.25 + conceded5 * 0.25 +
+            Number(market.probability) * 0.30 + Number(firstHalfTotalOdds.probability) * 0.20;
+          return { score, profile: attack, h10: Number.isFinite(h10) ? h10 : null,
+            h5, opponentConceded5: conceded5, teamMarket: market, hasTeamOdds, hasTotalOdds,
+            totalOdds: firstHalfTotalOdds,
             sample10: Number(form?.htSampleSize || 0), sample5, opponentSample5 };
         };
-        const home = sideScore(homeForm, awayForm, teamOdds.home, stats.home);
-        const away = sideScore(awayForm, homeForm, teamOdds.away, stats.away);
+        const home = sideScore(homeForm, awayForm, teamOdds.home);
+        const away = sideScore(awayForm, homeForm, teamOdds.away);
         const sides = [
           home && { ...home, market: 'EV 0.5 ÜST', side: 'EV SAHİBİ', team: fixture.home },
           away && { ...away, market: 'DEP 0.5 ÜST', side: 'DEPLASMAN', team: fixture.away }
@@ -4312,6 +4305,10 @@ async function runEarlyFirstHalfPick() {
           continue;
         }
         const chosen = sides[0];
+        if (chosen.score < 70) {
+          console.log(`[EARLY HT REJECT] fixture=${fixture.id} reason=score_below_70 score=${chosen.score.toFixed(1)}`);
+          continue;
+        }
         if (sides.length > 1 && Math.abs(sides[0].score - sides[1].score) < 5) {
           console.log(`[EARLY HT REJECT] fixture=${fixture.id} reason=balanced_home=${sides[0].score.toFixed(1)} away=${sides[1].score.toFixed(1)}`);
           continue;
@@ -4329,11 +4326,11 @@ async function runEarlyFirstHalfPick() {
           } catch (e) { console.warn(`[EARLY HT DEDUPE CHECK] fixture=${fixture.id}: ${e.message}`); }
         }
         const dataNotes = [
-          chosen.h10 != null ? `Son 10 İY gol: %${chosen.h10}` : null,
+          chosen.h10 != null ? `Son 10 İY gol atma: %${chosen.h10}` : null,
           chosen.h5 != null ? `Son 5 maç İY gol atma: %${chosen.h5}` : null,
           chosen.opponentConceded5 != null ? `Rakibin son 5 maç İY gol yeme: %${chosen.opponentConceded5}` : null,
-          chosen.hasOdds ? `İY takım gol oranı: ${chosen.market.overOdd} (${chosen.market.bookmaker})` : 'İY takım gol oranı yok',
-          chosen.hasPressure ? `Canlı baskı: ${chosen.pressure.toFixed(1)}` : 'Canlı istatistik henüz yok'
+          chosen.hasTeamOdds ? `İY takım gol oranı: ${chosen.teamMarket.overOdd} (${chosen.teamMarket.bookmaker})` : null,
+          chosen.hasTotalOdds ? `İY 0.5 toplam oranı: ${chosen.totalOdds.overOdd} (${chosen.totalOdds.bookmaker})` : null
         ].filter(Boolean).join(' · ');
         const message = [
           '⚡ WINSCOPE İLK YARI ERKEN GOL TAHMİNİ',
@@ -4377,7 +4374,7 @@ async function runEarlyFirstHalfPick() {
               );
             } catch (e) { console.warn(`[EARLY HT DEDUPE DB] fixture=${fixture.id}: ${e.message}`); }
           }
-          console.log(`[EARLY HT SENT] fixture=${fixture.id} minute=${fixture.minute} market=${chosen.side} score=${Number(chosen.score || 0).toFixed(1)} odds=${chosen.market.bookmaker}:${chosen.market.overOdd} stats=${chosen.hasPressure}`);
+          console.log(`[EARLY HT SENT] fixture=${fixture.id} minute=${fixture.minute} market=${chosen.market} side=${chosen.side} score=${Number(chosen.score || 0).toFixed(1)} teamOdds=${chosen.teamMarket.bookmaker}:${chosen.teamMarket.overOdd} totalOdds=${chosen.totalOdds.bookmaker}:${chosen.totalOdds.overOdd}`);
         } else {
           console.error(`[EARLY HT TELEGRAM NOT SENT] fixture=${fixture.id}: ${result.reason || 'Telegram gönderimi başarısız'}`);
         }
