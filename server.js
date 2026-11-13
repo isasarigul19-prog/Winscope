@@ -1017,6 +1017,9 @@ async function fetchLiveGoalProfile(teamId, fixtureId) {
         htOver15Pct: htPct(x => x.htTotal >= 2),
         htBttsPct: htPct(x => x.htFor >= 1 && x.htAgainst >= 1),
         htTeamScoredPct: htPct(x => x.htFor >= 1),
+        // Needed by the early first-half engine: share of valid recent matches
+        // in which this team conceded at least one goal before half-time.
+        htTeamConcededPct: htPct(x => x.htAgainst >= 1),
         avgGoalsFor: vals.length ? Number((vals.reduce((s,x)=>s+x.gf,0)/vals.length).toFixed(2)) : null,
         avgGoalsAgainst: vals.length ? Number((vals.reduce((s,x)=>s+x.ga,0)/vals.length).toFixed(2)) : null,
         htAvgGoalsFor: ht.length ? Number((ht.reduce((s,x)=>s+x.htFor,0)/ht.length).toFixed(2)) : null
