@@ -547,9 +547,6 @@ let providerQueue = [];
 let providerQueueRunning = false;
 let lastProviderRequestAt = 0;
 let providerCooldownUntil = 0;
-// Günlük kota hatası dakikalık hız sınırından farklıdır: sağlayıcının günlük
-// penceresi yenilenene kadar yeni istekler durdurulur; kuyruk korunur.
-let providerDailyQuotaBlockedUntil = 0;
 const PROVIDER_MIN_INTERVAL_MS = Math.max(1000, Number(process.env.API_FOOTBALL_MIN_INTERVAL_MS) || 1200);
 let providerQueueSequence = 0;
 let lastProviderUsageLogAt = 0;
@@ -591,6 +588,7 @@ async function pumpProviderQueue() {
     while (providerQueue.length) {
       const item = providerQueue.shift();
       try {
+        const now = Date.now();
         const allowedAt = Math.max(lastProviderRequestAt + PROVIDER_MIN_INTERVAL_MS, providerCooldownUntil);
         if (allowedAt > Date.now()) await delay(allowedAt - Date.now());
         lastProviderRequestAt = Date.now();
@@ -610,10 +608,6 @@ async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
   const cached = providerCache.get(cacheKey);
   if (cached && now - cached.at < ttlMs) return cached.payload;
   if (providerInFlight.has(cacheKey)) return providerInFlight.get(cacheKey);
-  if (providerDailyQuotaBlockedUntil > Date.now()) {
-    const resetAt = new Date(providerDailyQuotaBlockedUntil).toISOString();
-    throw new Error(`API-Football günlük kotası dolu; yeni istekler ${resetAt} UTC sonrasına kadar durduruldu.`);
-  }
   if (!API_KEY) throw new Error("Render Environment Variables içinde API_FOOTBALL_KEY eksik.");
 
   const priority = providerRequestPriority(pathname);
@@ -639,27 +633,12 @@ async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
     const errors = payload.errors && Object.keys(payload.errors).length ? payload.errors : null;
     const errorText = errors ? JSON.stringify(errors) : "";
     if (!response.ok || errors) {
-      const quotaText = `${errorText} ${raw}`.toLowerCase();
-      const isDailyQuota = /daily request limit|daily.*(quota|limit)|requests per day|per day.*(limit|quota)|reached.*daily/.test(quotaText);
-      if (isDailyQuota) {
-        const now = new Date();
-        const nextUtcReset = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 5, 0);
-        providerDailyQuotaBlockedUntil = Math.max(providerDailyQuotaBlockedUntil, nextUtcReset);
-        const waitMinutes = Math.ceil((providerDailyQuotaBlockedUntil - Date.now()) / 60000);
-        const quotaError = new Error(`API-Football günlük isteği kotası dolu. Yeni istekler UTC kota yenilenmesine kadar durduruldu. ${errorText || raw}`);
-        // Eski kuyruk işlerini bekletip analiz görevlerini saatlerce askıda tutma:
-        // bekleyen istekleri açık bir kota hatasıyla bitir; yeni çağrılar kapıda kesilir.
-        const pending = providerQueue.splice(0);
-        for (const queued of pending) queued.reject(quotaError);
-        console.error(`[API DAILY QUOTA] Sağlayıcı günlük kotayı dolu bildirdi. API istekleri yaklaşık ${waitMinutes} dk durduruldu; reddedilen kuyruk=${pending.length}. Yerel sayaç ile sağlayıcı kotası uyuşmayabilir; aynı API anahtarını kullanan diğer süreçleri kontrol edin.`);
-        throw quotaError;
-      }
       if (response.status === 429 || /rate.?limit|too many requests|per-minute|per-second/i.test(errorText)) {
         const retryHeader = Number(response.headers.get("retry-after")) || 0;
         const retryBody = Number((errorText.match(/retry after\s+(\d+)/i) || [])[1]) || 0;
         const waitMs = Math.max(90_000, (Math.max(retryHeader, retryBody) + 5) * 1000);
         providerCooldownUntil = Math.max(providerCooldownUntil, Date.now() + waitMs);
-        console.error(`[API 429] ${Math.ceil(waitMs / 1000)} sn bekleme; istek önceliği=${priority}, kuyruk=${providerQueue.length}.`);
+        console.error(`[API 429] ${Math.ceil(waitMs / 1000)} sn bekleme; istek önceliği=${priority}, kuyruk=${providerQueue.length}. Aynı API anahtarını kullanan başka süreç olup olmadığını kontrol edin.`);
         throw new Error(`API-Football hız sınırı; ${Math.ceil(waitMs / 1000)} saniye bekleme uygulandı. ${errorText}`);
       }
       throw new Error(`API-Football hatası: ${errors ? errorText : `HTTP ${response.status}`}`);
@@ -2401,13 +2380,6 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   rejected.duplicate = candidates.length - availableCandidates.length;
   console.log(`[COUPON SCAN ${mode.toUpperCase()}] date=${date} live=${isLiveMode} fixtures=${allFixtures.length} prioritized=${fixtures.length} analyzed=${analyzedFixtures} candidates=${candidates.length} available=${availableCandidates.length} rejected=${JSON.stringify(rejected)} seasonStats=home-away-blend youthReserveWomen=excluded oddsPagesMax=50 errors=${errors.length}`);
   availableCandidates.sort((a,b)=>b.score-a.score || b.formSupport-a.formSupport || a.internalOdd-b.internalOdd);
-  if (options.dailyAiPool) {
-    const pool = availableCandidates.slice(0, 10).map(({ internalOdd, score, ...pick }) => pick);
-    return { date, status: pool.length ? "READY" : "NO_MATCHES", candidates: pool,
-      diagnostics: { fixtures: allFixtures.length, analyzed: analyzedFixtures, oddsFixtures: dateOdds.size,
-        candidates: candidates.length, excludedYouthWomenReserve: true },
-      message: pool.length ? "Ayrı yapay zekâ kuponları için doğrulanmış aday havuzu hazır." : "Seçim koşullarını karşılayan maç bulunamadı; kupon üretilmedi." };
-  }
   const count = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
   const chosen = availableCandidates.slice(0,count);
   if (!chosen.length || (mode === "prematch" && chosen.length < 2)) {
@@ -2938,34 +2910,6 @@ app.get("/api/coupon/daily", async (req, res) => {
   try { res.json(await createCouponByMode(String(req.query.date || ""), "prematch")); }
   catch (e) { res.status(502).json({ status: "ERROR", picks: [], error: "Maç önü kuponu oluşturulamadı.", detail: e.message }); }
 });
-app.get("/api/coupon/daily-ai", async (req, res) => {
-  try {
-    const date = String(req.query.date || "");
-    const poolResult = await createCouponByMode(date, "prematch", { dailyAiPool: true });
-    const pool = Array.isArray(poolResult.candidates) ? poolResult.candidates : [];
-    const definitions = [
-      { type: "ai_reliable", title: "Güvenilir Kupon", picks: pool.slice(0, 2) },
-      { type: "ai_alternative", title: "Alternatif Kupon", picks: pool.slice(2, 4) },
-      { type: "ai_surprise", title: "Sürpriz Kupon", picks: pool.slice(4, 6) }
-    ];
-    const coupons = [];
-    for (const item of definitions) {
-      if (item.picks.length !== 2) continue;
-      const draftId = `daily-ai-${date}-${item.type}`;
-      const coupon = { draftId, date, type: item.type, picks: item.picks };
-      const tracked = await saveCouponTracking(coupon).catch(() => ({ saved: 0, persistent: false }));
-      coupons.push({ type: item.type, title: item.title, picks: item.picks, trackingSaved: tracked.saved || 0 });
-    }
-    res.json({ date, status: coupons.length ? "READY" : "NO_MATCHES", coupons,
-      diagnostics: poolResult.diagnostics || {},
-      message: coupons.length ? "Her kupon iki farklı maçtan oluşur. Kuponlar Telegram'a otomatik gönderilmez; sonuçları ayrı türlerde takip edilir." :
-        "En az iki doğrulanmış maç bulunamadı. Kupon zorlanmadı.",
-      excludedCompetitions: "Kadın, U19/U20/U21 ve rezerv ligleri hariç; büyük ligler ve A milli takım maçları öncelikli, diğer senior ligler yedek havuz." });
-  } catch (e) {
-    res.status(502).json({ status: "ERROR", coupons: [], error: "Günün yapay zekâ kuponları oluşturulamadı.", detail: e.message });
-  }
-});
-
 app.get("/api/coupon/best", async (req, res) => {
   try { res.json(await createCouponByMode(String(req.query.date || ""), "prematch")); }
   catch (e) { res.status(502).json({ status: "ERROR", picks: [], error: "Maç önü kuponu oluşturulamadı.", detail: e.message }); }
@@ -4468,13 +4412,14 @@ async function sendDailyAnalysisTopThree(session, date) {
       Number(b.marketProbability||0)-Number(a.marketProbability||0) ||
       Number(b.formSupport||0)-Number(a.formSupport||0)
     );
-    const chosen=deduped.slice(0,3);
-    if (chosen.length<3) {
-      console.warn(`[DAILY ANALYSIS 3] ${key} gönderilmedi; güvenilir ve başlamamış aday=${chosen.length}/3.`);
+    // Her otomatik kupon tam iki farklı maçtan oluşur; yeterli aday yoksa kupon zorlanmaz.
+    const chosen=deduped.slice(0,2);
+    if (chosen.length<2) {
+      console.warn(`[DAILY ANALYSIS COUPON] ${key} gönderilmedi; güvenilir ve başlamamış aday=${chosen.length}/2.`);
       return;
     }
-    const sessionLabel=session==="early"?"ERKEN SEANS":"GÜNÜN İKİNCİ KUPONU";
-    const lines=[`📊 WINSCOPE ${sessionLabel} · 3 MAÇ`,`Tarih: ${date}`,"","Seçimler Günün Analizleri içindeki en yüksek doğrulanmış seçim puanına göre yapıldı.",""];
+    const sessionLabel=session==="early"?"GÜVENİLİR KUPON":"ALTERNATİF KUPON";
+    const lines=[`🤖 WINSCOPE ${sessionLabel} · 2 MAÇ`,`Tarih: ${date}`,"","Seçimler Günün Analizleri içindeki en yüksek doğrulanmış seçim puanına göre yapıldı.",""];
     chosen.forEach((a,i)=>{
       lines.push(`${i+1}. ${a.home} VS ${a.away}`);
       lines.push(`Ana tercih: ${a.mainPick}`);
@@ -4503,9 +4448,9 @@ async function sendDailyAnalysisTopThree(session, date) {
     const trackingCoupon={draftId:`daily-analysis-${key}`,date,type:`daily3_${session}`,picks,autoGenerated:true};
     await saveCouponTracking(trackingCoupon).catch(e=>console.warn(`[DAILY ANALYSIS 3] takip kaydı: ${e.message}`));
     await saveArchiveItem("coupon",{date,type:`daily3_${session}`,picks,createdAt:new Date().toISOString()});
-    console.log(`[DAILY ANALYSIS 3 SENT] session=${session} date=${date} fixtures=${picks.map(p=>p.fixtureId).join(",")} telegramMessageId=${sent.messageId}`);
+    console.log(`[DAILY ANALYSIS COUPON SENT] session=${session} date=${date} legs=2 fixtures=${picks.map(p=>p.fixtureId).join(",")} telegramMessageId=${sent.messageId}`);
   } catch(error) {
-    console.error(`[DAILY ANALYSIS 3 ERROR] ${key}: ${error.message}`);
+    console.error(`[DAILY ANALYSIS COUPON ERROR] ${key}: ${error.message}`);
   } finally {
     dailyAnalysisCouponInFlight.delete(key);
   }
@@ -4532,7 +4477,7 @@ async function runDailyAnalysisCouponSchedule() {
         console.error(`[DAILY ANALYSIS 3 REFRESH ERROR] ${refreshKey}: ${error.message}`);
       }
     }
-    // If fewer than three qualified matches exist at the exact session time,
+    // If the analysis is still running or fewer than two qualified matches exist,
     // retry every five minutes for up to one hour; never manufacture a pick.
     const lastAttempt=dailyAnalysisCouponRefreshStarted.get(`${refreshKey}:send`)||0;
     if (now>=session.sendAt && now<session.sendAt+60 && Date.now()-lastAttempt>=5*60*1000) {
