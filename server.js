@@ -2325,8 +2325,11 @@ function isExcludedAnalysisCompetition(match) {
     /(?:\s|^)(?:ii|b|reserves?|reserva|u\d{1,2})$/i.test(String(name || "").trim()) ||
     /\b(?:reserve|reserves|reserva|b team|team b)\b/i.test(String(name || ""))
   );
+  const womenTeamSuffix = [match.home, match.away].some(name =>
+    /(?:\s|^)(?:w|women|ladies|fem|femenino)$/i.test(String(name || "").trim())
+  );
   // Kadın, yaş grubu ve rezerv/ikinci takım organizasyonları kupon havuzuna alınmaz.
-  return women || ageGroup || reserveCompetition || reserveTeam;
+  return women || womenTeamSuffix || ageGroup || reserveCompetition || reserveTeam;
 }
 
 function automaticLeaguePriority(match) {
@@ -3066,20 +3069,31 @@ app.get("/api/coupon/daily-ai", async (req, res) => {
     if(!job || job.status!=="completed") return res.json({status:"OK",date,coupons:[],diagnostics:{fixtures:job?.fixtureFeedCount||0,analyzed:job?.current||0,oddsFixtures:0,candidates:0},message:job?.error||"Günlük analiz tamamlanamadı."});
     const rows=await dailyAnalysisRowsForCoupon(date);
     const fixturePayload=await cachedProviderRequest(`fixtures:${date}`,`/fixtures?date=${date}&timezone=Europe/Istanbul`,30000);
-    const upcoming=new Set((fixturePayload.response||[]).map(normalizeProviderMatch).filter(m=>String(m.status||"").toUpperCase()==="NS").map(m=>Number(m.id)));
+    const upcomingMatches=(fixturePayload.response||[]).map(normalizeProviderMatch)
+      .filter(m=>String(m.status||"").toUpperCase()==="NS");
+    const upcomingById=new Map(upcomingMatches.map(m=>[Number(m.id),m]));
+    const upcoming=new Set(upcomingById.keys());
     const marketName=a=>String(a.mainPick||"").trim().toLocaleUpperCase("tr-TR");
     const allowedMarkets=new Set(["KG VAR","MS 2.5 ÜST","EV 1.5 ÜST","DEP 1.5 ÜST"]);
     const rejection={totalRows:rows.length,validFixtureId:0,upcoming:0,allowedMarket:0,scoreOrProbability:0,blendedSupport:0,accepted:0,missingFixtureId:0,notUpcoming:0,unsupportedMarket:0,missingScoreOrProbability:0};
     const valid=rows.map(a=>({...a,_couponEvidence:dailyCouponEvidence(a)})).filter(a=>{
       const id=Number(a.fixtureId), market=marketName(a);
+      const fixture=upcomingById.get(id);
       const hasId=id>0, isUpcoming=hasId&&upcoming.has(id), isAllowed=allowedMarkets.has(market);
+      // Bülten daha önce üretilmiş olsa bile kupon aşamasında takımları ve ligi
+      // fikstür kaynağından tekrar doğrula; kadın/U/rezerv takımlarını içeri alma.
+      const excluded=isExcludedAnalysisCompetition({
+        league:fixture?.league||a.league, country:fixture?.country||a.country,
+        home:fixture?.home||a.home, away:fixture?.away||a.away
+      }) || isExcludedAnalysisCompetition(a);
       const evidence=a._couponEvidence;
       if(hasId) rejection.validFixtureId++; else rejection.missingFixtureId++;
       if(isUpcoming) rejection.upcoming++; else rejection.notUpcoming++;
       if(isAllowed) rejection.allowedMarket++; else rejection.unsupportedMarket++;
       if(evidence) rejection.scoreOrProbability++; else rejection.missingScoreOrProbability++;
       if(evidence?.source==="prematch_odds_plus_last5_form") rejection.blendedSupport++;
-      const ok=hasId&&isUpcoming&&isAllowed&&Boolean(evidence);
+      if(excluded) rejection.excludedWomenYouthReserve=(rejection.excludedWomenYouthReserve||0)+1;
+      const ok=hasId&&isUpcoming&&isAllowed&&!excluded&&Boolean(evidence);
       if(ok) rejection.accepted++;
       return ok;
     });
@@ -3090,9 +3104,9 @@ app.get("/api/coupon/daily-ai", async (req, res) => {
       Number(b._couponEvidence?.tier||0)-Number(a._couponEvidence?.tier||0) ||
       score(b)-score(a) || Number(b.marketProbability||0)-Number(a.marketProbability||0)
     );
-    // Her kupon kendi içinde iki farklı maçtan oluşur. Kupon türleri arasında
-    // aynı güçlü maçın kullanılabilmesi, üç kupon için altı ayrı aday şartını kaldırır.
-    const makePicks=list=>{const out=[];const used=new Set();for(const a of list){const id=Number(a.fixtureId);if(used.has(id))continue;used.add(id);out.push({fixtureId:id,home:a.home,away:a.away,league:a.league,market:marketName(a),source:a.oddsBookmaker||a.selectionBookmaker||"Maç önü oran kaydı",supportPercent:a._couponEvidence?.supportPercent??null,supportBasis:a._couponEvidence?.source||null,supportSampleSize:a._couponEvidence?.sampleSize??null,startScore:"0-0",currentScore:"0-0",predictedHalfTimeScore:a.halfTimeScore||null,predictedFullTimeScore:a.fullTimeScore||null});if(out.length===2)break;}return out;};
+    // Her yapay zekâ kuponu, maç önü kuponuyla aynı şekilde üç ayrı ve
+    // doğrulanmış maçtan oluşur. Yeterli aday yoksa kupon eksik tamamlanmaz.
+    const makePicks=list=>{const out=[];const used=new Set();for(const a of list){const id=Number(a.fixtureId);if(used.has(id))continue;used.add(id);out.push({fixtureId:id,home:a.home,away:a.away,league:a.league,market:marketName(a),source:a.oddsBookmaker||a.selectionBookmaker||"Maç önü oran kaydı",supportPercent:a._couponEvidence?.supportPercent??null,supportBasis:a._couponEvidence?.source||null,supportSampleSize:a._couponEvidence?.sampleSize??null,startScore:"0-0",currentScore:"0-0",predictedHalfTimeScore:a.halfTimeScore||null,predictedFullTimeScore:a.fullTimeScore||null});if(out.length===3)break;}return out;};
     const alternativeRanked=[...ranked].sort((a,b)=>
       Number(b._couponEvidence?.tier||0)-Number(a._couponEvidence?.tier||0) ||
       score(a)-score(b) || Number(b.marketProbability||0)-Number(a.marketProbability||0)
@@ -3103,15 +3117,15 @@ app.get("/api/coupon/daily-ai", async (req, res) => {
     );
     const definitions=[{type:"ai_reliable",title:"Güvenilir Kupon",picks:makePicks(ranked)},{type:"ai_alternative",title:"Alternatif Kupon",picks:makePicks(alternativeRanked)},{type:"ai_surprise",title:"Sürpriz Kupon",picks:makePicks(surpriseRanked)}];
     const coupons=[];
-    for(const c of definitions){if(c.picks.length!==2)continue;const session=c.type;let alreadySent=false;if(databasePool){await archiveDatabaseReady;const q=await databasePool.query("SELECT 1 FROM winscope_ai_coupon_sessions WHERE match_date=$1::date AND session=$2",[date,session]);alreadySent=Boolean(q.rowCount);}else alreadySent=dailyAnalysisCouponSentMemory.has(`${date}:${session}`);
-      if(alreadySent){coupons.push({...c,trackingSaved:2,telegramSent:true,alreadySent:true});continue;}
-      const lines=[`🤖 WINSCOPE ${c.title.toUpperCase()} · 2 MAÇ`,`Tarih: ${date}`,""];c.picks.forEach((p,i)=>lines.push(`${i+1}. ${p.home} VS ${p.away}`,`Tercih: ${p.market}`,`Tahmin İY / MS: ${p.predictedHalfTimeScore||"—"} / ${p.predictedFullTimeScore||"—"}`,`Lig: ${p.league||"—"}`,""));
+    for(const c of definitions){if(c.picks.length!==3)continue;const session=c.type;let alreadySent=false;if(databasePool){await archiveDatabaseReady;const q=await databasePool.query("SELECT picks FROM winscope_ai_coupon_sessions WHERE match_date=$1::date AND session=$2",[date,session]);const oldPicks=q.rows[0]?.picks;alreadySent=Array.isArray(oldPicks)&&oldPicks.length===3;}else {const oldPicks=dailyAnalysisCouponSentMemory.get(`${date}:${session}`);alreadySent=Array.isArray(oldPicks)&&oldPicks.length===3;}
+      if(alreadySent){coupons.push({...c,trackingSaved:3,telegramSent:true,alreadySent:true});continue;}
+      const lines=[`🤖 WINSCOPE ${c.title.toUpperCase()} · 3 MAÇ`,`Tarih: ${date}`,""];c.picks.forEach((p,i)=>lines.push(`${i+1}. ${p.home} VS ${p.away}`,`Tercih: ${p.market}`,`Tahmin İY / MS: ${p.predictedHalfTimeScore||"—"} / ${p.predictedFullTimeScore||"—"}`,`Lig: ${p.league||"—"}`,""));
       lines.push("Not: Yalnızca kayıtlı günlük analizler, maç önü oranı ve son 5 maç formu desteği kullanıldı. Sayısal oran gösterilmez; başarı garantisi yoktur.");
       const sent=await sendTelegram(lines.join("\n"));if(!sent.sent){coupons.push({...c,trackingSaved:0,telegramSent:false,telegramError:sent.reason||"Telegram gönderilemedi"});continue;}
-      if(databasePool)await databasePool.query(`INSERT INTO winscope_ai_coupon_sessions(match_date,session,picks,telegram_message_id) VALUES($1::date,$2,$3::jsonb,$4) ON CONFLICT(match_date,session) DO NOTHING`,[date,session,JSON.stringify(c.picks),sent.messageId]);
+      if(databasePool)await databasePool.query(`INSERT INTO winscope_ai_coupon_sessions(match_date,session,picks,telegram_message_id) VALUES($1::date,$2,$3::jsonb,$4) ON CONFLICT(match_date,session) DO UPDATE SET picks=EXCLUDED.picks,telegram_message_id=EXCLUDED.telegram_message_id,sent_at=NOW()`,[date,session,JSON.stringify(c.picks),sent.messageId]);
       dailyAnalysisCouponSentMemory.set(`${date}:${session}`,c.picks);const trackingCoupon={draftId:`${session}-${date}`,date,type:session,picks:c.picks,autoGenerated:true};await saveCouponTracking(trackingCoupon).catch(e=>console.warn(`[DAILY AI COUPON] takip kaydı: ${e.message}`));await saveArchiveItem("coupon",{date,type:session,picks:c.picks,createdAt:new Date().toISOString()});coupons.push({...c,trackingSaved:2,telegramSent:true});console.log(`[DAILY AI COUPON SENT] type=${session} date=${date} fixtures=${c.picks.map(p=>p.fixtureId).join(",")} telegramMessageId=${sent.messageId}`);
     }
-    res.json({status:"OK",date,coupons,diagnostics:{fixtures:job.fixtureFeedCount||fixturePayload.response?.length||0,analyzed:Number(job.result?.fixtures ?? job.current ?? job.total ?? 0),oddsFixtures:rows.filter(a=>a.oddsBookmaker||a.selectionBookmaker).length,candidates:unique.length,rejected:job.result?.rejected||{},candidateFilter:rejection,evidenceSources:{model:unique.filter(a=>a._couponEvidence?.tier===2).length,oddsPlusLast5Form:unique.filter(a=>a._couponEvidence?.source==="prematch_odds_plus_last5_form").length},upcomingFixtures:upcoming.size},message:"Kuponlar kayıtlı analizlerden üretildi; her kupon iki farklı maçtan oluşur. Telegram gönderimleri ve takip kayıtları işlendi."});
+    res.json({status:"OK",date,coupons,diagnostics:{fixtures:job.fixtureFeedCount||fixturePayload.response?.length||0,analyzed:Number(job.result?.fixtures ?? job.current ?? job.total ?? 0),oddsFixtures:rows.filter(a=>a.oddsBookmaker||a.selectionBookmaker).length,candidates:unique.length,rejected:job.result?.rejected||{},candidateFilter:rejection,evidenceSources:{model:unique.filter(a=>a._couponEvidence?.tier===2).length,oddsPlusLast5Form:unique.filter(a=>a._couponEvidence?.source==="prematch_odds_plus_last5_form").length},upcomingFixtures:upcoming.size},message:coupons.length?"Kuponlar kayıtlı günlük analizlerden üretildi; her kupon üç farklı, uygun senior takım maçından oluşur. Kadın, genç ve rezerv takımları dışarıda bırakıldı.":"Kadın, genç ve rezerv takımları elendi. Üç güçlü senior maç adayı bulunamadığı için eksik kupon oluşturulmadı."});
   }catch(e){res.status(502).json({status:"ERROR",error:"Yapay zekâ kuponları oluşturulamadı.",detail:e.message});}
 });
 
