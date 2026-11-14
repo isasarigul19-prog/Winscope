@@ -2454,12 +2454,28 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
         if (!fixture.homeId || !fixture.awayId) { rejected.noIds++; continue; }
         const [homeForm, awayForm] = await Promise.all([fetchTeamRecentForm(fixture.homeId,fixture.id,fixture.leagueId,fixture.season,"home"),fetchTeamRecentForm(fixture.awayId,fixture.id,fixture.leagueId,fixture.season,"away")]);
         if (!homeForm.available || !awayForm.available) { rejected.noForm++; continue; }
-        const chosen = chooseSupportedMarket(marketOddsRow, mode, fixture, {home:homeForm,away:awayForm}, null, marketOddsRow);
+        let chosen = chooseSupportedMarket(marketOddsRow, mode, fixture, {home:homeForm,away:awayForm}, null, marketOddsRow);
+        let couponSupport = null;
+        if (!chosen && mode !== "live") {
+          const marketCandidate = dailyMarketCandidate(marketOddsRow);
+          if (marketCandidate) couponSupport = dailyCouponBlendedSupport(marketOddsRow, marketCandidate.market, homeForm, awayForm);
+          if (marketCandidate && couponSupport) {
+            chosen = {
+              market:marketCandidate.market, bookmaker:marketCandidate.bookmaker,
+              odd:marketCandidate.odd, probability:Number(marketCandidate.probability),
+              formPct:couponSupport.percent, score:couponSupport.percent,
+              fallbackType:"PREMATCH_ODDS_PLUS_LAST5_FORM"
+            };
+          }
+        }
         if (!chosen) { rejected.noSignal++; continue; }
-        oddsBasis = "API-Football maç önü son mevcut oran kaydı; resmî kapanış olduğu garanti edilemez";
+        oddsBasis = chosen.fallbackType
+          ? "Maç önü oranı + son 5 maç formu desteği; değer/EV iddiası değildir"
+          : "API-Football maç önü son mevcut oran kaydı; resmî kapanış olduğu garanti edilemez";
         candidates.push({fixtureId:fixture.id,league:fixture.league,country:fixture.country,home:fixture.home,away:fixture.away,
           fixtureDate:fixture.fixtureDate,market:chosen.market,source:chosen.bookmaker,internalOdd:chosen.odd,marketProbability:chosen.probability,
-          formSupport:chosen.formPct,score:chosen.score,minute:null,currentScore:"0-0",isLive:false,oddsBasis,statsSummary:null});
+          formSupport:chosen.formPct,score:chosen.score,scoreBasis:couponSupport?.source || "model edge/EV",supportSampleSize:couponSupport?.sampleSize || null,
+          minute:null,currentScore:"0-0",isLive:false,oddsBasis,statsSummary:null});
       }
     } catch(e) {
       rejected.apiErrors++;
@@ -3010,27 +3026,39 @@ app.get("/api/coupon/daily-ai", async (req, res) => {
     const upcoming=new Set((fixturePayload.response||[]).map(normalizeProviderMatch).filter(m=>String(m.status||"").toUpperCase()==="NS").map(m=>Number(m.id)));
     const marketName=a=>String(a.mainPick||"").trim().toLocaleUpperCase("tr-TR");
     const allowedMarkets=new Set(["KG VAR","MS 2.5 ÜST","EV 1.5 ÜST","DEP 1.5 ÜST"]);
-    const rejection={totalRows:rows.length,validFixtureId:0,upcoming:0,allowedMarket:0,scoreOrProbability:0,accepted:0,missingFixtureId:0,notUpcoming:0,unsupportedMarket:0,missingScoreOrProbability:0};
-    const valid=rows.filter(a=>{
+    const rejection={totalRows:rows.length,validFixtureId:0,upcoming:0,allowedMarket:0,scoreOrProbability:0,blendedSupport:0,accepted:0,missingFixtureId:0,notUpcoming:0,unsupportedMarket:0,missingScoreOrProbability:0};
+    const valid=rows.map(a=>({...a,_couponEvidence:dailyCouponEvidence(a)})).filter(a=>{
       const id=Number(a.fixtureId), market=marketName(a);
       const hasId=id>0, isUpcoming=hasId&&upcoming.has(id), isAllowed=allowedMarkets.has(market);
-      const hasScore=(a.selectionScore!==null&&a.selectionScore!==undefined&&Number.isFinite(Number(a.selectionScore))) || (a.marketProbability!==null&&a.marketProbability!==undefined&&Number.isFinite(Number(a.marketProbability)));
+      const evidence=a._couponEvidence;
       if(hasId) rejection.validFixtureId++; else rejection.missingFixtureId++;
       if(isUpcoming) rejection.upcoming++; else rejection.notUpcoming++;
       if(isAllowed) rejection.allowedMarket++; else rejection.unsupportedMarket++;
-      if(hasScore) rejection.scoreOrProbability++; else rejection.missingScoreOrProbability++;
-      const ok=hasId&&isUpcoming&&isAllowed&&hasScore;
+      if(evidence) rejection.scoreOrProbability++; else rejection.missingScoreOrProbability++;
+      if(evidence?.source==="prematch_odds_plus_last5_form") rejection.blendedSupport++;
+      const ok=hasId&&isUpcoming&&isAllowed&&Boolean(evidence);
       if(ok) rejection.accepted++;
       return ok;
     });
     const unique=[...new Map(valid.map(a=>[Number(a.fixtureId),a])).values()];
-    const score=a=>(a.selectionScore!==null && a.selectionScore!==undefined && Number.isFinite(Number(a.selectionScore)))?Number(a.selectionScore):Number(a.marketProbability||0);
+    const score=a=>Number(a._couponEvidence?.score||0);
     const expected=a=>Number(a.expectedGoals?.home||0)+Number(a.expectedGoals?.away||0);
-    const ranked=[...unique].sort((a,b)=>score(b)-score(a)||Number(b.marketProbability||0)-Number(a.marketProbability||0));
+    const ranked=[...unique].sort((a,b)=>
+      Number(b._couponEvidence?.tier||0)-Number(a._couponEvidence?.tier||0) ||
+      score(b)-score(a) || Number(b.marketProbability||0)-Number(a.marketProbability||0)
+    );
     // Her kupon kendi içinde iki farklı maçtan oluşur. Kupon türleri arasında
     // aynı güçlü maçın kullanılabilmesi, üç kupon için altı ayrı aday şartını kaldırır.
-    const makePicks=list=>{const out=[];const used=new Set();for(const a of list){const id=Number(a.fixtureId);if(used.has(id))continue;used.add(id);out.push({fixtureId:id,home:a.home,away:a.away,league:a.league,market:marketName(a),source:a.oddsBookmaker||a.selectionBookmaker||"Maç önü oran kaydı",startScore:"0-0",currentScore:"0-0",predictedHalfTimeScore:a.halfTimeScore||null,predictedFullTimeScore:a.fullTimeScore||null});if(out.length===2)break;}return out;};
-    const definitions=[{type:"ai_reliable",title:"Güvenilir Kupon",picks:makePicks(ranked)},{type:"ai_alternative",title:"Alternatif Kupon",picks:makePicks([...ranked].sort((a,b)=>score(a)-score(b)||Number(b.marketProbability||0)-Number(a.marketProbability||0)))},{type:"ai_surprise",title:"Sürpriz Kupon",picks:makePicks([...ranked].sort((a,b)=>expected(b)-expected(a)||score(b)-score(a)))}];
+    const makePicks=list=>{const out=[];const used=new Set();for(const a of list){const id=Number(a.fixtureId);if(used.has(id))continue;used.add(id);out.push({fixtureId:id,home:a.home,away:a.away,league:a.league,market:marketName(a),source:a.oddsBookmaker||a.selectionBookmaker||"Maç önü oran kaydı",supportPercent:a._couponEvidence?.supportPercent??null,supportBasis:a._couponEvidence?.source||null,supportSampleSize:a._couponEvidence?.sampleSize??null,startScore:"0-0",currentScore:"0-0",predictedHalfTimeScore:a.halfTimeScore||null,predictedFullTimeScore:a.fullTimeScore||null});if(out.length===2)break;}return out;};
+    const alternativeRanked=[...ranked].sort((a,b)=>
+      Number(b._couponEvidence?.tier||0)-Number(a._couponEvidence?.tier||0) ||
+      score(a)-score(b) || Number(b.marketProbability||0)-Number(a.marketProbability||0)
+    );
+    const surpriseRanked=[...ranked].sort((a,b)=>
+      Number(b._couponEvidence?.tier||0)-Number(a._couponEvidence?.tier||0) ||
+      expected(b)-expected(a) || score(b)-score(a)
+    );
+    const definitions=[{type:"ai_reliable",title:"Güvenilir Kupon",picks:makePicks(ranked)},{type:"ai_alternative",title:"Alternatif Kupon",picks:makePicks(alternativeRanked)},{type:"ai_surprise",title:"Sürpriz Kupon",picks:makePicks(surpriseRanked)}];
     const coupons=[];
     for(const c of definitions){if(c.picks.length!==2)continue;const session=c.type;let alreadySent=false;if(databasePool){await archiveDatabaseReady;const q=await databasePool.query("SELECT 1 FROM winscope_ai_coupon_sessions WHERE match_date=$1::date AND session=$2",[date,session]);alreadySent=Boolean(q.rowCount);}else alreadySent=dailyAnalysisCouponSentMemory.has(`${date}:${session}`);
       if(alreadySent){coupons.push({...c,trackingSaved:2,telegramSent:true,alreadySent:true});continue;}
@@ -3040,7 +3068,7 @@ app.get("/api/coupon/daily-ai", async (req, res) => {
       if(databasePool)await databasePool.query(`INSERT INTO winscope_ai_coupon_sessions(match_date,session,picks,telegram_message_id) VALUES($1::date,$2,$3::jsonb,$4) ON CONFLICT(match_date,session) DO NOTHING`,[date,session,JSON.stringify(c.picks),sent.messageId]);
       dailyAnalysisCouponSentMemory.set(`${date}:${session}`,c.picks);const trackingCoupon={draftId:`${session}-${date}`,date,type:session,picks:c.picks,autoGenerated:true};await saveCouponTracking(trackingCoupon).catch(e=>console.warn(`[DAILY AI COUPON] takip kaydı: ${e.message}`));await saveArchiveItem("coupon",{date,type:session,picks:c.picks,createdAt:new Date().toISOString()});coupons.push({...c,trackingSaved:2,telegramSent:true});console.log(`[DAILY AI COUPON SENT] type=${session} date=${date} fixtures=${c.picks.map(p=>p.fixtureId).join(",")} telegramMessageId=${sent.messageId}`);
     }
-    res.json({status:"OK",date,coupons,diagnostics:{fixtures:job.fixtureFeedCount||fixturePayload.response?.length||0,analyzed:Number(job.result?.fixtures ?? job.current ?? job.total ?? 0),oddsFixtures:rows.filter(a=>a.oddsBookmaker||a.selectionBookmaker).length,candidates:unique.length,rejected:job.result?.rejected||{},candidateFilter:rejection,upcomingFixtures:upcoming.size},message:"Kuponlar kayıtlı analizlerden üretildi; her kupon iki farklı maçtan oluşur. Telegram gönderimleri ve takip kayıtları işlendi."});
+    res.json({status:"OK",date,coupons,diagnostics:{fixtures:job.fixtureFeedCount||fixturePayload.response?.length||0,analyzed:Number(job.result?.fixtures ?? job.current ?? job.total ?? 0),oddsFixtures:rows.filter(a=>a.oddsBookmaker||a.selectionBookmaker).length,candidates:unique.length,rejected:job.result?.rejected||{},candidateFilter:rejection,evidenceSources:{model:unique.filter(a=>a._couponEvidence?.tier===2).length,oddsPlusLast5Form:unique.filter(a=>a._couponEvidence?.source==="prematch_odds_plus_last5_form").length},upcomingFixtures:upcoming.size},message:"Kuponlar kayıtlı analizlerden üretildi; her kupon iki farklı maçtan oluşur. Telegram gönderimleri ve takip kayıtları işlendi."});
   }catch(e){res.status(502).json({status:"ERROR",error:"Yapay zekâ kuponları oluşturulamadı.",detail:e.message});}
 });
 
@@ -3510,6 +3538,57 @@ function dailyMarketCandidate(oddsRow) {
   // Aynı markette birden fazla kaynak varsa 1.615'e en yakın gerçek fiyatı seç.
   valid.sort((a,b) => Math.abs(Number(a.odd)-1.615) - Math.abs(Number(b.odd)-1.615));
   return valid[0];
+}
+
+// Coupon fallback uses only saved, real pre-match odds + recent-form blend.
+// This is a support score, NOT a calibrated probability or a value/EV claim.
+function dailyCouponBlendedSupport(oddsRow, market, homeForm, awayForm) {
+  const keyByMarket = {
+    "KG VAR":"btts", "MS 2.5 ÜST":"ms25",
+    "EV 1.5 ÜST":"home15", "DEP 1.5 ÜST":"away15"
+  };
+  const key = keyByMarket[String(market || "").trim().toLocaleUpperCase("tr-TR")];
+  if (!key) return null;
+  const metric = analysisPercentages(oddsRow, homeForm, awayForm)?.[key];
+  const percent = Number(metric?.percent);
+  const sampleSize = Number(metric?.sampleSize || 0);
+  if (!Number.isFinite(percent) || percent < 55 || percent > 100 ||
+      sampleSize < 5 || metric?.source !== "Maç önü oranı + son 5 maç formu") return null;
+  return { percent, sampleSize, source:metric.source };
+}
+
+// Shared evidence resolver for AI and scheduled daily coupons.
+// Prefer genuine model value evidence; otherwise use the explicit odds+last-5-form blend.
+// Never manufacture a model probability when the model did not return one.
+function dailyCouponEvidence(analysis) {
+  const finite = value => value !== null && value !== undefined && Number.isFinite(Number(value));
+  if (finite(analysis?.selectionScore)) {
+    return {
+      tier:2, score:Number(analysis.selectionScore), source:"model_selection_score",
+      marketProbability:finite(analysis.marketProbability) ? Number(analysis.marketProbability) : null,
+      supportPercent:null, sampleSize:null
+    };
+  }
+  if (finite(analysis?.marketProbability) &&
+      Number(analysis.marketProbability) > 0 && Number(analysis.marketProbability) < 1) {
+    return {
+      tier:2, score:Number(analysis.marketProbability)*100, source:"market_probability",
+      marketProbability:Number(analysis.marketProbability), supportPercent:null, sampleSize:null
+    };
+  }
+  const market = String(analysis?.mainPick || "").trim().toLocaleUpperCase("tr-TR");
+  const keyByMarket = { "KG VAR":"btts", "MS 2.5 ÜST":"ms25", "EV 1.5 ÜST":"home15", "DEP 1.5 ÜST":"away15" };
+  const metric = analysis?.marketPercentages?.[keyByMarket[market]];
+  const percent = Number(metric?.percent);
+  const sampleSize = Number(metric?.sampleSize || 0);
+  if (Number.isFinite(percent) && percent >= 55 && percent <= 100 && sampleSize >= 5 &&
+      metric?.source === "Maç önü oranı + son 5 maç formu") {
+    return {
+      tier:1, score:percent, source:"prematch_odds_plus_last5_form",
+      marketProbability:null, supportPercent:percent, sampleSize
+    };
+  }
+  return null;
 }
 function dailyOpponentBalance(oddsRow) {
   const rows = oddsForFixture(oddsRow).filter(x => x.market === "MS 1" &&
@@ -4634,16 +4713,16 @@ async function sendDailyAnalysisTopThree(session, date) {
         for (const p of dailyAnalysisCouponSentMemory.get(`${date}:early`)||[]) alreadyUsed.add(Number(p.fixtureId));
       }
     }
-    const valid=rows.filter(a=>
+    const valid=rows.map(a=>({...a,_couponEvidence:dailyCouponEvidence(a)})).filter(a=>
       Number(a.fixtureId)>0 && upcoming.has(Number(a.fixtureId)) &&
       !alreadyUsed.has(Number(a.fixtureId)) &&
       ["KG VAR","MS 2.5 ÜST"].includes(String(a.mainPick||"")) &&
-      a.selectionScore !== null && a.selectionScore !== undefined &&
-      Number.isFinite(Number(a.selectionScore))
+      Boolean(a._couponEvidence)
     );
     const deduped=[...new Map(valid.map(a=>[Number(a.fixtureId),a])).values()];
     deduped.sort((a,b)=>
-      Number(b.selectionScore)-Number(a.selectionScore) ||
+      Number(b._couponEvidence.tier)-Number(a._couponEvidence.tier) ||
+      Number(b._couponEvidence.score)-Number(a._couponEvidence.score) ||
       Number(b.marketProbability||0)-Number(a.marketProbability||0) ||
       Number(b.formSupport||0)-Number(a.formSupport||0)
     );
