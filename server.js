@@ -2744,6 +2744,44 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
         // a second fixed 62% gate here would suppress almost every 66–90' candidate.
       }
 
+      // MS 3.5 ÜST özel kalite kapısı:
+      // 2 gol varken iki gol daha gerekir; genel maç baskısı veya takım formu tek başına yetmez.
+      // 3 gol varken tek gol yeterlidir ancak geç dakikalarda süre/baskı şartı sertleşir.
+      if (item.market === "MS 3.5 ÜST") {
+        const neededGoals = Math.max(0, 4 - total);
+        const sot = Number(stats.shotsOnTarget || 0);
+        const shots = Number(stats.totalShots || 0);
+        const corners = Number(stats.corners || 0);
+        const pressure = Number(stats.pressure || 0);
+        let signalStrong = false;
+
+        if (!stats.available || neededGoals <= 0 || minute < 46 || minute > 90) {
+          signalStrong = false;
+        } else if (neededGoals >= 2) {
+          // İki gol daha gerekiyorsa 70'ten sonra aday üretme.
+          if (minute <= 60) {
+            signalStrong = formsAvailable && sot >= 4 && shots >= 14 && corners >= 6 && pressure >= 21;
+          } else if (minute <= 70) {
+            signalStrong = formsAvailable && sot >= 5 && shots >= 16 && corners >= 7 && pressure >= 26;
+          }
+        } else {
+          // Tek gol gerekiyorsa dakika ilerledikçe daha güçlü canlı üretim aranır.
+          if (minute <= 64) {
+            signalStrong = sot >= 2 && (shots >= 8 || corners >= 5) && pressure >= 14;
+          } else if (minute <= 74) {
+            signalStrong = sot >= 3 && (shots >= 12 || corners >= 6) && pressure >= 19;
+          } else if (minute <= 80) {
+            signalStrong = sot >= 4 && shots >= 12 && corners >= 5 && pressure >= 24;
+          } else {
+            signalStrong = sot >= 5 && shots >= 16 && corners >= 6 && pressure >= 30;
+          }
+        }
+        if (!signalStrong) {
+          rejected.weakGoalSignal++;
+          continue;
+        }
+      }
+
       const marketProbability = Number(item.probability) / 100;
       if (!Number.isFinite(marketProbability) || marketProbability <= 0 || marketProbability >= 1) { rejected.noMarket = true; continue; }
       const edge = modelProbability - marketProbability;
@@ -3423,7 +3461,7 @@ app.get("/api/live-predictions/summary", async (req, res) => {
     period, total: rows.length, pending: rows.filter(x => !x.settled).length, won, lost,
     winRate: settled.length ? Math.round(100 * won / settled.length) : null,
     lossRate: settled.length ? Math.round(100 * lost / settled.length) : null,
-    results: rows.slice(0, 250),
+    results: rows.slice(0, 50),
     persistentStorage: Boolean(databasePool), storageError,
     note: "Canlı tercih kayıtları PostgreSQL'den okunur; varsayılan dönem son 7 gündür. Yalnızca desteklenen pazarlar sonuçlandırılır."
   });
