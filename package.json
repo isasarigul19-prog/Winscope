@@ -9,7 +9,6 @@
   "dependencies": {
     "archiver": "^7.0.1",
     "express": "^4.21.2",
-    "pg": "^8.13.1",
-    "pg-query-stream": "^4.5.5"
+    "pg": "^8.13.1"
   }
 }
