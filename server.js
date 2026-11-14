@@ -318,6 +318,29 @@ if (databasePool) {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         PRIMARY KEY(fixture_id, match_date)
       )`);
+      // Score Shot schema migration: eski kurulumlarda tablo CREATE TABLE IF NOT EXISTS
+      // nedeniyle güncellenmiyordu. Sonuç/performans sorgularının kullandığı alanları
+      // mevcut Score Shot tablosuna güvenli biçimde ekle; diğer WinScope tablolarına dokunma.
+      await databasePool.query(`ALTER TABLE winscope_score_shot_predictions
+        ADD COLUMN IF NOT EXISTS fixture_id BIGINT,
+        ADD COLUMN IF NOT EXISTS match_date DATE,
+        ADD COLUMN IF NOT EXISTS kickoff_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS league TEXT,
+        ADD COLUMN IF NOT EXISTS home_team TEXT,
+        ADD COLUMN IF NOT EXISTS away_team TEXT,
+        ADD COLUMN IF NOT EXISTS predicted_ht TEXT,
+        ADD COLUMN IF NOT EXISTS predicted_ft TEXT,
+        ADD COLUMN IF NOT EXISTS top_scores JSONB DEFAULT '[]'::jsonb,
+        ADD COLUMN IF NOT EXISTS model_data JSONB DEFAULT '{}'::jsonb,
+        ADD COLUMN IF NOT EXISTS selection_score NUMERIC DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS exact_probability NUMERIC,
+        ADD COLUMN IF NOT EXISTS actual_ht TEXT,
+        ADD COLUMN IF NOT EXISTS actual_ft TEXT,
+        ADD COLUMN IF NOT EXISTS ht_hit BOOLEAN,
+        ADD COLUMN IF NOT EXISTS ft_hit BOOLEAN,
+        ADD COLUMN IF NOT EXISTS top3_hit BOOLEAN,
+        ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()`);
       await databasePool.query("CREATE INDEX IF NOT EXISTS winscope_score_shot_date_idx ON winscope_score_shot_predictions(match_date, selection_score DESC, kickoff_at)");
       const [analysisRows, couponRows, sentRows, predictionRows, livePredictionRows, dailyRunRows, goalTrackingRows] = await Promise.all([
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'analysis' ORDER BY id DESC LIMIT 1000"),
