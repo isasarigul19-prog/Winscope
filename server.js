@@ -637,13 +637,14 @@ async function persistGoalTracking(fixtureId, tracked) {
   } catch (error) { console.warn(`[GOOOOL TRACKING SAVE ERROR] fixture=${fixtureId}: ${error.message}`); }
 }
 // API-Football: tüm istekler tek, öncelikli ve hız kontrollü kuyruktan geçer.
-// ULTRA sınırı 450/dk olsa da uygulama güvenlik payıyla yaklaşık 50/dk hedefler.
-// Canlı fikstür/oran/istatistik istekleri, maç önü sayfalı oran taramasının önüne alınır.
+// 450 ms varsayılan aralık süreç başına yaklaşık 133 istek/dk sağlar.
+// Birden fazla Render örneği aynı API anahtarını kullanabileceği için 450/dk sınırına dayanılmaz.
+// Canlı fikstür/oran/istatistik istekleri, maç önü taramasının önüne alınır.
 let providerQueue = [];
 let providerQueueRunning = false;
 let lastProviderRequestAt = 0;
 let providerCooldownUntil = 0;
-const PROVIDER_MIN_INTERVAL_MS = Math.max(1000, Number(process.env.API_FOOTBALL_MIN_INTERVAL_MS) || 1200);
+const PROVIDER_MIN_INTERVAL_MS = Math.max(350, Number(process.env.API_FOOTBALL_MIN_INTERVAL_MS) || 450);
 let providerQueueSequence = 0;
 let lastProviderUsageLogAt = 0;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -3652,16 +3653,68 @@ async function runDailyAnalysisJob(job) {
     }
     job.excludedLeagueBreakdown = Object.entries(excludedLeagueCounts)
       .sort((a,b) => b[1]-a[1]).slice(0,30);
-    const selected = [], rejected = { noOdds:0, outsideRange:0, unbalanced:0, noForm:0, noSupportedPick:0 };
     if (firstSessionCount === 0) {
       job.firstScanCompleted = true;
       job.firstSessionFinishedAt = new Date().toISOString();
       job.phase = "second_session";
       await persistDailyAnalysisRun(job);
     }
-    for (let i=0; i<fixtures.length; i++) {
-      const match = fixtures[i];
-      if (i === firstSessionCount) {
+    // Fetch the full date-level odds feed once and share its cache with coupons/Score Shot.
+    const dailyOddsMap = new Map();
+    let dailyOddsComplete = false;
+    try {
+      job.phase = "odds_prefetch";
+      job.current = 0;
+      job.currentMatch = "Maç önü oran sayfaları hazırlanıyor";
+      job.updatedAt = new Date().toISOString();
+      await persistDailyAnalysisRun(job);
+      const firstOddsPage = await cachedProviderRequest(
+        `odds-date:${date}:page:1`,
+        `/odds?date=${encodeURIComponent(date)}&page=1`,
+        15 * 60 * 1000
+      );
+      const reportedOddsPages = Math.max(1, Number(firstOddsPage.paging?.total || 1));
+      if (!Number.isInteger(reportedOddsPages) || reportedOddsPages > 100) {
+        throw new Error(`Günlük analiz oran sayfalaması güvenlik sınırını aştı: ${reportedOddsPages}`);
+      }
+      for (const row of (firstOddsPage.response || [])) {
+        if (row.fixture?.id) dailyOddsMap.set(Number(row.fixture.id), row);
+      }
+      for (let page = 2; page <= reportedOddsPages; page++) {
+        const pagePayload = await cachedProviderRequest(
+          `odds-date:${date}:page:${page}`,
+          `/odds?date=${encodeURIComponent(date)}&page=${page}`,
+          15 * 60 * 1000
+        );
+        if (!Array.isArray(pagePayload.response)) {
+          throw new Error(`Günlük analiz oran sayfası ${page}/${reportedOddsPages} geçersiz yanıt döndürdü.`);
+        }
+        for (const row of pagePayload.response) {
+          if (row.fixture?.id) dailyOddsMap.set(Number(row.fixture.id), row);
+        }
+        job.oddsPagesDone = page;
+        job.oddsPagesTotal = reportedOddsPages;
+      }
+      dailyOddsComplete = true;
+      console.log(`[Daily analysis odds] ${date}: pages=${reportedOddsPages} fixturesWithOdds=${dailyOddsMap.size}`);
+    } catch (oddsPrefetchError) {
+      console.warn(`[Daily analysis odds] ${date}: toplu oran taraması tamamlanamadı; maç-bazlı güvenli yola dönülüyor: ${oddsPrefetchError.message}`);
+    }
+
+    const selected = [], rejected = { noOdds:0, outsideRange:0, unbalanced:0, noForm:0, noSupportedPick:0 };
+    const workerCount = Math.min(4, Math.max(1, Number(process.env.DAILY_ANALYSIS_CONCURRENCY) || 3));
+    let completedFixtures = 0;
+    if (firstSessionCount === 0) {
+      job.firstScanCompleted = true;
+      job.firstSessionFinishedAt = new Date().toISOString();
+      job.phase = "second_session";
+      await persistDailyAnalysisRun(job);
+    }
+
+    const sessions = [firstSession, secondSession];
+    for (let sessionIndex = 0; sessionIndex < sessions.length; sessionIndex++) {
+      const sessionFixtures = sessions[sessionIndex];
+      if (sessionIndex === 1) {
         job.firstScanCompleted = true;
         job.firstSessionFinishedAt = new Date().toISOString();
         job.phase = "second_session";
@@ -3670,25 +3723,22 @@ async function runDailyAnalysisJob(job) {
         await persistDailyAnalysisRun(job);
         console.log(`[Daily analysis] ${date}: 1. tarama tamamlandı (${firstSessionCount} maç); 2. tarama otomatik başlıyor (${secondSession.length} maç).`);
       }
-      job.current = i + 1;
-      job.currentMatch = `${match.home} - ${match.away}`;
-      job.updatedAt = new Date().toISOString();
-      if (i === 0 || (i + 1) % 5 === 0 || i + 1 === fixtures.length) {
-        await persistDailyAnalysisRun(job);
-        console.log(`[Daily analysis progress] ${date}: ${job.current}/${job.total} · ${job.currentMatch} · seçilen=${job.selected||0}`);
-      }
-      try {
-        const oddsRow = await getOddsForFixture(match.id, date).catch(()=>null);
-        if (!oddsRow) { rejected.noOdds++; continue; }
+
+      for (let batchStart = 0; batchStart < sessionFixtures.length; batchStart += workerCount) {
+        const batch = sessionFixtures.slice(batchStart, batchStart + workerCount);
+        await Promise.all(batch.map(async (match) => {
+          try {
+        const oddsRow = dailyOddsComplete ? (dailyOddsMap.get(Number(match.id)) || null) : await getOddsForFixture(match.id, date).catch(()=>null);
+        if (!oddsRow) { rejected.noOdds++; return; }
         const market = dailyMarketCandidate(oddsRow);
-        if (!market) { rejected.outsideRange++; continue; }
+        if (!market) { rejected.outsideRange++; return; }
         const balance = dailyOpponentBalance(oddsRow);
-        if (!balance.balanced) { rejected.unbalanced++; continue; }
+        if (!balance.balanced) { rejected.unbalanced++; return; }
         const [homeForm, awayForm] = await Promise.all([
           fetchTeamRecentForm(match.homeId, match.id, match.leagueId, match.season, "home"),
           fetchTeamRecentForm(match.awayId, match.id, match.leagueId, match.season, "away")
         ]);
-        if (!homeForm?.available || !awayForm?.available) { rejected.noForm++; continue; }
+        if (!homeForm?.available || !awayForm?.available) { rejected.noForm++; return; }
         const prematchFixture = { ...match, status:"NS", minute:null, homeScore:0, awayScore:0, htHomeScore:null, htAwayScore:null };
         let scores = scorePrediction(prematchFixture, homeForm, awayForm, null, oddsRow);
         const forms = { home:homeForm, away:awayForm };
@@ -3773,7 +3823,21 @@ async function runDailyAnalysisJob(job) {
         ]).slice(0,1000);
         await saveArchiveItem("analysis", archiveRow);
         job.selected = selected.length;
-      } catch (err) { console.warn(`[Daily analysis] fixture=${match.id}: ${err.message}`); rejected.noSupportedPick++; }
+          } catch (err) {
+            console.warn(`[Daily analysis] fixture=${match.id}: ${err.message}`);
+            rejected.noSupportedPick++;
+          }
+        }));
+
+        completedFixtures += batch.length;
+        job.current = completedFixtures;
+        job.currentMatch = batch.map(m => `${m.home} - ${m.away}`).join(" · ");
+        job.updatedAt = new Date().toISOString();
+        if (completedFixtures % 5 < batch.length || completedFixtures === fixtures.length) {
+          await persistDailyAnalysisRun(job);
+          console.log(`[Daily analysis progress] ${date}: ${completedFixtures}/${job.total} · ${job.currentMatch} · seçilen=${selected.length} · workers=${workerCount}`);
+        }
+      }
     }
     await settleDailyMarketPredictions();
     job.firstScanCompleted = true;
@@ -5557,7 +5621,7 @@ async function executeScoreShotJob(date, job) {
     console.log(`[SCORE SHOT] fixtures received=${(fixturePayload.response || []).length} eligible=${fixtures.length}`);
 
     console.log(`[SCORE SHOT] odds page=1 request`);
-    const first = await cachedProviderRequest(`score-shot-odds:${date}:1`, `/odds?date=${date}&page=1`, 90000);
+    const first = await cachedProviderRequest(`odds-date:${date}:page:1`, `/odds?date=${date}&page=1`, 15 * 60 * 1000);
     const totalPages = Number(first.paging?.total);
     if (!Number.isInteger(totalPages) || totalPages < 1) throw new Error(`Score Shot oran sayfalaması geçersiz: paging.total=${String(first.paging?.total)}`);
     const oddsRows = [...(first.response || [])];
@@ -5565,7 +5629,7 @@ async function executeScoreShotJob(date, job) {
     await persistScoreShotJob(job);
     console.log(`[SCORE SHOT] odds page=1/${totalPages} rows=${(first.response || []).length}`);
     for (let page = 2; page <= totalPages; page++) {
-      const next = await cachedProviderRequest(`score-shot-odds:${date}:${page}`, `/odds?date=${date}&page=${page}`, 90000);
+      const next = await cachedProviderRequest(`odds-date:${date}:page:${page}`, `/odds?date=${date}&page=${page}`, 15 * 60 * 1000);
       if (!Array.isArray(next.response)) throw new Error(`Score Shot oran sayfası ${page}/${totalPages} geçersiz yanıt döndürdü.`);
       oddsRows.push(...next.response);
       job.oddsPagesDone = page; job.oddsRows = oddsRows.length; job.updatedAt = new Date().toISOString();
