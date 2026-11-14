@@ -3545,8 +3545,24 @@ async function runDailyAnalysisJob(job) {
       if (!scheduledFixtureMap.has(Number(match.id))) scheduledFixtureMap.set(Number(match.id), match);
     }
     const scheduledFixtures = [...scheduledFixtureMap.values()];
-    const fixtures = scheduledFixtures.filter(isDailyMajorLeague)
-      .sort((a,b) => dailyAnalysisLeaguePriority(a)-dailyAnalysisLeaguePriority(b));
+    const eligibleFixtures = scheduledFixtures.filter(isDailyMajorLeague);
+    const kickoffMinuteTR = (match) => {
+      const raw = match.fixtureDate || match.date || "";
+      const parsed = new Date(raw);
+      if (!Number.isFinite(parsed.getTime())) return null;
+      const parts = new Intl.DateTimeFormat("en-GB", { timeZone:"Europe/Istanbul", hour:"2-digit", minute:"2-digit", hourCycle:"h23" }).formatToParts(parsed);
+      const hour = Number(parts.find(x=>x.type==="hour")?.value);
+      const minute = Number(parts.find(x=>x.type==="minute")?.value);
+      return Number.isFinite(hour) && Number.isFinite(minute) ? hour*60+minute : null;
+    };
+    // Seans 1: 16:00 ve öncesi. Seans 2: 16:00 sonrası.
+    // Her iki seans tek iş akışında ardışık çalışır; ilk seans kayıtları
+    // ikinci seans başlamadan kalıcılaştırılır ve arayüzde hemen görünür.
+    const byPriority = (a,b) => dailyAnalysisLeaguePriority(a)-dailyAnalysisLeaguePriority(b);
+    const firstSession = eligibleFixtures.filter(m => kickoffMinuteTR(m) !== null && kickoffMinuteTR(m) <= 16*60).sort(byPriority);
+    const secondSession = eligibleFixtures.filter(m => kickoffMinuteTR(m) === null || kickoffMinuteTR(m) > 16*60).sort(byPriority);
+    const firstSessionCount = firstSession.length;
+    const fixtures = [...firstSession, ...secondSession];
     const leagueCounts = {};
     const priorityCounts = { major:0, international:0, other:0 };
     for (const m of fixtures) {
@@ -3562,6 +3578,10 @@ async function runDailyAnalysisJob(job) {
     job.majorLeagueCount = fixtures.length;
     job.leagueBreakdown = Object.entries(leagueCounts).sort((a,b)=>b[1]-a[1]).slice(0,30);
     job.total = fixtures.length;
+    job.firstSessionTotal = firstSession.length;
+    job.secondSessionTotal = secondSession.length;
+    job.phase = "first_session";
+    job.firstScanCompleted = false;
     job.excludedOtherLeagues = scheduledFixtures.length - fixtures.length;
     // Dışlanan lig listesi, yalnızca yaş/kadın/rezerv değil, major allowlist dışında kalan tüm ligleri gösterir.
     const excludedLeagueCounts = {};
@@ -3572,8 +3592,23 @@ async function runDailyAnalysisJob(job) {
     job.excludedLeagueBreakdown = Object.entries(excludedLeagueCounts)
       .sort((a,b) => b[1]-a[1]).slice(0,30);
     const selected = [], rejected = { noOdds:0, outsideRange:0, unbalanced:0, noForm:0, noSupportedPick:0 };
+    if (firstSessionCount === 0) {
+      job.firstScanCompleted = true;
+      job.firstSessionFinishedAt = new Date().toISOString();
+      job.phase = "second_session";
+      await persistDailyAnalysisRun(job);
+    }
     for (let i=0; i<fixtures.length; i++) {
       const match = fixtures[i];
+      if (i === firstSessionCount) {
+        job.firstScanCompleted = true;
+        job.firstSessionFinishedAt = new Date().toISOString();
+        job.phase = "second_session";
+        job.currentMatch = "İlk tarama tamamlandı; 16:00 sonrası maçlar başlıyor";
+        job.updatedAt = new Date().toISOString();
+        await persistDailyAnalysisRun(job);
+        console.log(`[Daily analysis] ${date}: 1. tarama tamamlandı (${firstSessionCount} maç); 2. tarama otomatik başlıyor (${secondSession.length} maç).`);
+      }
       job.current = i + 1;
       job.currentMatch = `${match.home} - ${match.away}`;
       job.updatedAt = new Date().toISOString();
@@ -3680,7 +3715,12 @@ async function runDailyAnalysisJob(job) {
       } catch (err) { console.warn(`[Daily analysis] fixture=${match.id}: ${err.message}`); rejected.noSupportedPick++; }
     }
     await settleDailyMarketPredictions();
+    job.firstScanCompleted = true;
+    job.secondScanCompleted = true;
+    job.phase = "completed";
     job.result = { success:true, date, fixtureFeedCount:job.fixtureFeedCount || 0,
+      firstSessionFixtures:firstSessionCount, secondSessionFixtures:secondSession.length,
+      firstScanCompleted:true, secondScanCompleted:true,
       scheduledCount:job.scheduledCount || 0, fixtures:fixtures.length, majorLeagueFixtures:fixtures.length, analysisScope:"Kadın ve U/yaş grubu takımları hariç tüm ligler",
       leagueBreakdown:job.leagueBreakdown || [], excludedLeagueBreakdown:job.excludedLeagueBreakdown || [],
       excludedOtherLeagues:job.excludedOtherLeagues || 0, selected:selected.length, rejected,
