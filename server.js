@@ -5465,13 +5465,8 @@ app.get('/api/score-shot/predictions',async(req,res)=>{
   try{await archiveDatabaseReady;res.json({success:true,date,rows:await scoreShotReadRows(date)});}catch(e){res.status(500).json({error:e.message,rows:[]});}
 });
 // Score Shot otomatik arka plan taraması: her gün Türkiye saatiyle 10:15 ve 16:15.
-// Çalışma durumu PostgreSQL'de tutulur; tarama tarayıcı isteğine bağlı değildir.
+// Günlük kupon zamanlayıcısında tanımlı turkeyClockParts() ortak kullanılır.
 let scoreShotBackgroundBusy = false;
-function turkeyClockParts() {
-  const parts = new Intl.DateTimeFormat('en-GB', {timeZone:'Europe/Istanbul',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date());
-  const get = t => parts.find(p=>p.type===t)?.value;
-  return {hour:Number(get('hour')),minute:Number(get('minute'))};
-}
 async function runAutomaticScoreShot() {
   if (!databasePool || scoreShotBackgroundBusy) return;
   const date=turkeyDateString();
