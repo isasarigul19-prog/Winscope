@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js"
+    "check": "node --check server.js",
+    "test": "node tests/early10-score-shot-regression-check.js"
   },
   "dependencies": {
     "express": "^4.21.2",
