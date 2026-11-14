@@ -3533,11 +3533,22 @@ async function persistDailyAnalysisRun(job) {
   if (!databasePool) return { persisted:false, reason:"DATABASE_URL tanımlı değil" };
   try {
     await archiveDatabaseReady;
+    const progressSnapshot = {
+      current:Number(job.current||0), total:Number(job.total||0), selected:Number(job.selected||0),
+      currentMatch:job.currentMatch||"", phase:job.phase||null,
+      fixtureFeedCount:Number(job.fixtureFeedCount||0), scheduledCount:Number(job.scheduledCount||0),
+      majorLeagueCount:Number(job.majorLeagueCount||0),
+      firstSessionTotal:Number(job.firstSessionTotal||0), secondSessionTotal:Number(job.secondSessionTotal||0),
+      firstScanCompleted:job.firstScanCompleted===true
+    };
+    const persistedResult = job.status === "completed"
+      ? (job.result || {})
+      : { __progress:progressSnapshot };
     await databasePool.query(`INSERT INTO winscope_daily_analysis_runs(match_date,status,result,error,started_at,finished_at,updated_at)
       VALUES($1,$2,$3::jsonb,$4,$5,$6,NOW())
       ON CONFLICT(match_date) DO UPDATE SET status=EXCLUDED.status,result=EXCLUDED.result,error=EXCLUDED.error,
       started_at=EXCLUDED.started_at,finished_at=EXCLUDED.finished_at,updated_at=NOW()`,
-      [job.date,job.status,job.result ? JSON.stringify(job.result) : null,job.error || null,job.startedAt || null,job.finishedAt || null]);
+      [job.date,job.status,JSON.stringify(persistedResult),job.error || null,job.startedAt || null,job.finishedAt || null]);
     return { persisted:true };
   } catch (error) {
     console.error(`[Daily analysis] Günlük çalışma kaydı yazılamadı: ${error.message}`);
@@ -3545,6 +3556,7 @@ async function persistDailyAnalysisRun(job) {
   }
 }
 const DAILY_ANALYSIS_STALE_MS = 20 * 60 * 1000;
+const DAILY_ANALYSIS_PROCESS_STARTED_AT = Date.now();
 const dailyAnalysisStartLocks = new Set();
 async function findDailyAnalysisRun(date) {
   let active = dailyAnalysisJobs.get(date);
@@ -3564,9 +3576,21 @@ async function findDailyAnalysisRun(date) {
       const q = await databasePool.query("SELECT match_date::text,status,result,error,started_at,finished_at,updated_at FROM winscope_daily_analysis_runs WHERE match_date=$1::date", [date]);
       if (q.rows[0]) {
         const r=q.rows[0];
-        const job={date,status:r.status,result:r.result||null,error:r.error||null,startedAt:r.started_at,finishedAt:r.finished_at,updatedAt:r.updated_at};
+        const savedProgress = r.result && typeof r.result === "object" ? r.result.__progress : null;
+        const job={
+          date,status:r.status,result:savedProgress ? null : (r.result||null),error:r.error||null,
+          startedAt:r.started_at,finishedAt:r.finished_at,updatedAt:r.updated_at,
+          ...(savedProgress || {})
+        };
         const started = Date.parse(job.updatedAt || job.startedAt || "");
-        if (["queued","running"].includes(job.status) && Number.isFinite(started) && Date.now()-started>DAILY_ANALYSIS_STALE_MS) {
+        const belongsToPreviousProcess = Number.isFinite(started) && started < DAILY_ANALYSIS_PROCESS_STARTED_AT - 5000;
+        if (["queued","running"].includes(job.status) && belongsToPreviousProcess) {
+          job.status="failed";
+          job.error="Render sunucusu yeniden başladığı için önceki günlük analiz kesildi; güvenli biçimde yeniden başlatılabilir.";
+          job.finishedAt=new Date().toISOString();
+          await persistDailyAnalysisRun(job);
+          console.error(`[Daily analysis recovery] ${date}: önceki süreçte kalan iş kesildi; yeniden başlatma için failed işaretlendi. progress=${job.current||0}/${job.total||0} phase=${job.phase||"unknown"}`);
+        } else if (["queued","running"].includes(job.status) && Number.isFinite(started) && Date.now()-started>DAILY_ANALYSIS_STALE_MS) {
           job.status="failed";
           job.error=`Veritabanındaki analiz ${Math.round((Date.now()-started)/60000)} dakikadır ilerlemedi; yeniden başlatılabilir.`;
           job.finishedAt=new Date().toISOString();
@@ -4327,7 +4351,7 @@ async function ensureAutomaticDailyAnalysis() {
       console.log(`[Daily analysis auto] ${date}: ${existing.status} ${existing.current||0}/${existing.total||0}`);
       return;
     }
-    // İlk kez, başarısız veya watchdog tarafından takılı iş olarak işaretlenmişse yeniden başlat.
+    // İlk kez, başarısız, önceki Render sürecinde kesilmiş veya watchdog tarafından takılı iş olarak işaretlenmişse yeniden başlat.
     const job = await startDailyAnalysisIfNeeded(date, { force:Boolean(existing && existing.status === "failed") });
     dailyAutoScanDate = date;
     console.log(`[Daily analysis auto] ${date}: ${job.status}${job.status === "completed" ? " (önceden taranmış)" : ""}`);
