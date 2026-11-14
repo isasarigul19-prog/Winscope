@@ -1540,9 +1540,11 @@ function chooseFormFallbackMarket(mode, fixture, forms, excludeMarket = null) {
   if (!live) allowed = ["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR", "MS 1.5 ÜST"];
   else if (minute < 33) allowed = total === 0 ? ["İY 0.5 ÜST"] : ["İY 1.5 ÜST", "MS 1.5 ÜST"];
   else if (minute < 45) allowed = total === 0 ? ["MS 1.5 ÜST"] : ["MS 1.5 ÜST", "KG VAR", "MS 2.5 ÜST"];
-  else if (minute < 66) allowed = total === 0 ? ["MS 1.5 ÜST"] : total === 1 ? ["MS 1.5 ÜST", "KG VAR"] : ["MS 2.5 ÜST", "KG VAR"];
+  else if (minute < 66) allowed = total === 0 ? ["MS 1.5 ÜST"] : total === 1 ? ["KG VAR"] : ["KG VAR"];
   else if (minute <= 75) allowed = total <= 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST", "KG VAR"] : ["MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
   else allowed = total <= 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST"] : ["MS 2.5 ÜST", "MS 3.5 ÜST"];
+  // MS 1.5 / MS 2.5 canlı tercihleri 66. dakikadan önce kesinlikle açılmaz.
+  if (live && minute < 66) allowed = allowed.filter(m => !["MS 1.5 ÜST", "MS 2.5 ÜST"].includes(m));
   const thresholds = { "EV 1.5 ÜST": 45, "DEP 1.5 ÜST": 45, "MS 0.5 ÜST": 55, "MS 1.5 ÜST": 50, "MS 2.5 ÜST": 48, "MS 3.5 ÜST": 34, "KG VAR": 48, "İY 0.5 ÜST": 52, "İY 1.5 ÜST": 34 };
   const scoreObj = scorePrediction(fixture, forms.home, forms.away, null, null);
   const candidates = allowed.filter(m => m !== excludeMarket && marketConsistentWithScore(m, scoreObj))
@@ -1600,16 +1602,15 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     if (total === 0) allowed = ["İY 0.5 ÜST"];
     else allowed = ["İY 1.5 ÜST"];
   } else if (minute >= 45 && minute < 60) {
-    // 45–59: 0-0 ise genel MS 0.5 yerine, canlı verisi destekleyen takımın EV/DEP 0.5 pazarı seçilir.
+    // 45–59: MS 1.5 / MS 2.5 henüz önerilmez; yalnızca uygun diğer pazarlar değerlendirilir.
     if (total === 0) allowed = ["EV 0.5 ÜST", "DEP 0.5 ÜST"];
     else if (total === 1) allowed = ["KG VAR"];
-    else if (total === 2) allowed = ["KG VAR", "MS 2.5 ÜST"];
+    else if (total === 2) allowed = ["KG VAR"];
     else allowed = ["MS 3.5 ÜST", "KG VAR"];
   } else if (minute >= 60 && minute <= 65) {
-    // 60–65: 0-0 iken takım bazlı 0.5 üst; 66. dakikadan sonra toplam gol çizgileri.
+    // 60–65: MS 1.5 / MS 2.5 kapalı; 66. dakikadan sonra yeniden değerlendir.
     if (total === 0) allowed = ["EV 0.5 ÜST", "DEP 0.5 ÜST"];
-    else if (total === 1) allowed = ["MS 1.5 ÜST", "KG VAR"];
-    else if (total === 2) allowed = ["MS 2.5 ÜST", "KG VAR"];
+    else if (total === 1 || total === 2) allowed = ["KG VAR"];
     else allowed = ["MS 3.5 ÜST"];
   } else if (minute >= 66 && minute <= 70) {
     // 66–70: 0-0 ise kalan süre ve toplam baskıya göre MS 0.5 değerlendirilebilir.
@@ -1740,7 +1741,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
       // Değer filtresi canlı oran varsa onu, yoksa açıkça etiketlenmiş maç önü oranını kullanır.
       // 1 gol varken MS 1.5 ÜST, 55. dakikadan sonra yeterli oran/form/baskı desteği varsa değerlendirilebilir.
       if (live && choice.market === "MS 1.5 ÜST" && total === 1) {
-        if (minute < 60 || minute > 70) return null;
+        if (minute < 66 || minute > 70) return null;
         if (Number(choice.odd || 0) < 1.50) return null;
         if (Number(formPct || 0) < 55) return null;
         if (Number(choice.probability || 0) < 55 || Number(choice.probability || 0) > 82) return null;
