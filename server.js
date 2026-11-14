@@ -3423,7 +3423,7 @@ app.get("/api/live-predictions/summary", async (req, res) => {
     period, total: rows.length, pending: rows.filter(x => !x.settled).length, won, lost,
     winRate: settled.length ? Math.round(100 * won / settled.length) : null,
     lossRate: settled.length ? Math.round(100 * lost / settled.length) : null,
-    results: rows.slice(0, 50),
+    results: rows.slice(0, 250),
     persistentStorage: Boolean(databasePool), storageError,
     note: "Canlı tercih kayıtları PostgreSQL'den okunur; varsayılan dönem son 7 gündür. Yalnızca desteklenen pazarlar sonuçlandırılır."
   });
