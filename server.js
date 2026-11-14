@@ -2312,7 +2312,9 @@ async function sendCouponAutomatically(coupon, chosen) {
 
 function isExcludedAnalysisCompetition(match) {
   // Kupon havuzu: kadın, yaş grubu/U ve rezerv/ikinci takımlar hariç.
-  const text = `${match.league || ""} ${match.country || ""} ${match.home || ""} ${match.away || ""}`
+  const homeName = match.home || match.home_team || match.teams?.home?.name || "";
+  const awayName = match.away || match.away_team || match.teams?.away?.name || "";
+  const text = `${match.league || match.league_name || ""} ${match.country || ""} ${homeName} ${awayName}`
     .toLocaleLowerCase("en")
     .replace(/[’']/g, " ")
     .replace(/[._-]+/g, " ")
@@ -2321,11 +2323,12 @@ function isExcludedAnalysisCompetition(match) {
   const women = /\b(women|woman|ladies|feminine|femenino|feminin|womens|女子|女性)\b/i.test(text);
   const ageGroup = /\b(?:u\s*\d{1,2}|under\s*\d{1,2}|youth|junior|academy|juvenil|jeugd|sub\s*\d{1,2}|amateur youth)\b/i.test(text);
   const reserveCompetition = /\b(?:reserve|reserves|reserva|ii|b team|team b)\b/i.test(text);
-  const reserveTeam = [match.home, match.away].some(name =>
-    /(?:\s|^)(?:ii|b|reserves?|reserva|u\d{1,2})$/i.test(String(name || "").trim()) ||
-    /\b(?:reserve|reserves|reserva|b team|team b)\b/i.test(String(name || ""))
+  const teamNames = [homeName, awayName];
+  const reserveTeam = teamNames.some(name =>
+    /(?:\s|^)(?:ii|iii|iv|b|reserves?|reserva|u\d{1,2})$/i.test(String(name || "").trim()) ||
+    /\b(?:reserve|reserves|reserva|b team|team b|second team)\b/i.test(String(name || ""))
   );
-  const womenTeamSuffix = [match.home, match.away].some(name =>
+  const womenTeamSuffix = teamNames.some(name =>
     /(?:\s|^)(?:w|women|ladies|fem|femenino)$/i.test(String(name || "").trim())
   );
   // Kadın, yaş grubu ve rezerv/ikinci takım organizasyonları kupon havuzuna alınmaz.
@@ -4458,7 +4461,20 @@ app.get("/api/market-shortlist", async (req, res) => {
 app.get("/api/archives", async (_req, res) => {
   await archiveDatabaseReady;
   const analyses = dedupeAnalysisArchiveRows(archives.analyses || []).slice(0,1000);
-  res.json({ analyses, coupons: archives.coupons, persistentStorage: Boolean(databasePool) });
+  // Eski arşiv kuponlarında 4/5 maç ve rezerv/kadın/genç takımlar kalmış olabilir.
+  // Arşiv ekranına yalnızca güncel kurallara uyan kuponları gönder.
+  const coupons = (archives.coupons || []).map(coupon => {
+    const picks = Array.isArray(coupon?.picks) ? coupon.picks : [];
+    const eligible = picks.filter(p => !isExcludedAnalysisCompetition(p));
+    return { ...coupon, picks: eligible };
+  }).filter(coupon => {
+    const picks = Array.isArray(coupon.picks) ? coupon.picks : [];
+    const type = String(coupon.type || "").toLowerCase();
+    if (type === "live" || type.includes("live")) return picks.length === 1;
+    if (type === "surprise" || type.includes("surprise")) return picks.length === 10;
+    return picks.length === 3;
+  });
+  res.json({ analyses, coupons, persistentStorage: Boolean(databasePool) });
 });
 
 app.get("/api/match/:id/stats", async (req, res) => {
