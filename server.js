@@ -375,6 +375,8 @@ if (databasePool) {
       )`);
       await databasePool.query("CREATE UNIQUE INDEX IF NOT EXISTS winscope_score_shot_jobs_active_date_uidx ON winscope_score_shot_jobs(match_date) WHERE status IN ('queued','running')");
       await databasePool.query("ALTER TABLE winscope_score_shot_jobs ADD COLUMN IF NOT EXISTS schedule_key TEXT");
+      // A lease token fences off a worker that wakes up after another Render instance reclaimed its job.
+      await databasePool.query("ALTER TABLE winscope_score_shot_jobs ADD COLUMN IF NOT EXISTS lease_token TEXT");
       await databasePool.query("CREATE UNIQUE INDEX IF NOT EXISTS winscope_score_shot_jobs_schedule_uidx ON winscope_score_shot_jobs(schedule_key) WHERE schedule_key IS NOT NULL");
       await databasePool.query("CREATE INDEX IF NOT EXISTS winscope_score_shot_jobs_status_created_idx ON winscope_score_shot_jobs(status,created_at)");
       const [analysisRows, couponRows, sentRows, predictionRows, livePredictionRows, dailyRunRows, goalTrackingRows] = await Promise.all([
@@ -5422,22 +5424,24 @@ function isValidScoreShotDate(value) {
 function scoreShotJobFromRow(row) {
   const data = row?.progress && typeof row.progress === 'object' ? row.progress : {};
   return {...data,id:row.job_id,jobId:row.job_id,date:scoreShotDateOnly(row.match_date),source:row.source,
-    status:row.status,phase:row.phase,error:row.error||data.error||null,
+    status:row.status,phase:row.phase,error:row.error||data.error||null,workerToken:row.lease_token||null,
     createdAt:row.created_at,updatedAt:row.updated_at,startedAt:row.started_at,finishedAt:row.finished_at};
 }
 async function persistScoreShotJob(job) {
   if (!databasePool || !job?.id) return;
   const progress = {...job}; delete progress.rows;
-  await databasePool.query(`UPDATE winscope_score_shot_jobs
+  const result = await databasePool.query(`UPDATE winscope_score_shot_jobs
     SET status=$2,phase=$3,progress=$4::jsonb,error=$5,updated_at=NOW(),
         started_at=COALESCE(started_at,$6::timestamptz),
         finished_at=CASE WHEN $2 IN ('completed','failed') THEN COALESCE(finished_at,NOW()) ELSE NULL END
-    WHERE job_id=$1`,
-    [job.id,job.status,job.phase,JSON.stringify(progress),job.error||null,job.startedAt||null]);
+    WHERE job_id=$1 AND lease_token=$7`,
+    [job.id,job.status,job.phase,JSON.stringify(progress),job.error||null,job.startedAt||null,job.workerToken||null]);
+  if (!result.rowCount) throw new Error(`SCORE_SHOT_LEASE_LOST:${job.id}`);
 }
 async function executeScoreShotJob(date, job) {
   date = scoreShotDateOnly(date);
   if (!isValidScoreShotDate(date)) throw new Error(`Score Shot geçersiz maç tarihi: ${String(date)}`);
+  if (!job?.workerToken) throw new Error(`Score Shot worker lease eksik: ${job?.id || 'unknown'}`);
   const startedAt = Date.now();
   const heartbeat = setInterval(() => { void persistScoreShotJob(job).catch(e=>console.error(`[SCORE SHOT] heartbeat persist error job=${job.id}: ${e.message}`)); }, 15000);
   try {
@@ -5477,6 +5481,8 @@ async function executeScoreShotJob(date, job) {
     job.phase = 'form_and_model'; job.matchesTotal = fixtures.length; job.matchesDone = 0; job.updatedAt=new Date().toISOString();
     await persistScoreShotJob(job);
     for (const m of fixtures) {
+      // Re-check the lease every ten fixtures; the heartbeat covers the intervals between checks.
+      if (job.matchesDone % 10 === 0) await persistScoreShotJob(job);
       const odds = oddsMap.get(Number(m.id));
       if (!odds) { missingOdds++; job.matchesDone++; continue; }
       oddsMatched++;
@@ -5518,6 +5524,7 @@ async function executeScoreShotJob(date, job) {
     job.phase = 'saving'; job.selected = selected.length; job.updatedAt=new Date().toISOString();
     await persistScoreShotJob(job);
     for (const x of selected) {
+      await persistScoreShotJob(job); // lease/fencing check before any prediction write
       const r = await databasePool.query(`INSERT INTO winscope_score_shot_predictions
         (fixture_id,match_date,kickoff_at,league,home_team,away_team,predicted_ht,predicted_ft,top_scores,model_data,selection_score,exact_probability)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12)
@@ -5533,10 +5540,14 @@ async function executeScoreShotJob(date, job) {
     await persistScoreShotJob(job);
     console.log(`[SCORE SHOT] DONE date=${date} diagnostics=${JSON.stringify(diagnostics)}`);
   } catch (e) {
-    job.status = 'failed'; job.phase = 'failed'; job.error = e.message;
-    job.updatedAt = new Date().toISOString(); job.finishedAt = job.updatedAt;
-    await persistScoreShotJob(job).catch(dbErr=>console.error(`[SCORE SHOT] failed-state persist error: ${dbErr.message}`));
-    console.error(`[SCORE SHOT] FAILED date=${date} afterMs=${Date.now()-startedAt}: ${e.stack || e.message}`);
+    if (String(e.message || '').startsWith('SCORE_SHOT_LEASE_LOST:')) {
+      console.warn(`[SCORE SHOT] OLD WORKER STOPPED date=${date} job=${job.id}; another Render instance owns the lease`);
+    } else {
+      job.status = 'failed'; job.phase = 'failed'; job.error = e.message;
+      job.updatedAt = new Date().toISOString(); job.finishedAt = job.updatedAt;
+      await persistScoreShotJob(job).catch(dbErr=>console.error(`[SCORE SHOT] failed-state persist error: ${dbErr.message}`));
+      console.error(`[SCORE SHOT] FAILED date=${date} afterMs=${Date.now()-startedAt}: ${e.stack || e.message}`);
+    }
   } finally {
     clearInterval(heartbeat);
     scoreShotActiveDates.delete(date);
@@ -5575,19 +5586,22 @@ async function claimAndRunScoreShotJob() {
   scoreShotWorkerBusy=true;
   try {
     await archiveDatabaseReady;
-    // Recover work abandoned by a crashed Render instance; heartbeat prevents stealing a live job.
-    await databasePool.query(`UPDATE winscope_score_shot_jobs SET status='queued',phase='queued',updated_at=NOW()
-      WHERE status='running' AND updated_at < NOW() - INTERVAL '3 minutes'`);
+    // Recover only genuinely abandoned work. Three minutes was too short for slow API-Football
+    // pages and caused a second Render instance to restart a still-running Score Shot job.
+    // A 15-minute lease plus fencing token prevents a resumed old worker from writing results.
+    await databasePool.query(`UPDATE winscope_score_shot_jobs SET status='queued',phase='queued',lease_token=NULL,updated_at=NOW()
+      WHERE status='running' AND updated_at < NOW() - INTERVAL '15 minutes'`);
+    const workerToken = `ssw-${Date.now()}-${Math.random().toString(36).slice(2,12)}`;
     const claimed=await databasePool.query(`WITH candidate AS (
         SELECT job_id FROM winscope_score_shot_jobs WHERE status='queued'
         ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED
       )
       UPDATE winscope_score_shot_jobs j SET status='running',phase=CASE WHEN j.phase='queued' THEN 'starting' ELSE j.phase END,
-        started_at=COALESCE(j.started_at,NOW()),updated_at=NOW()
-      FROM candidate WHERE j.job_id=candidate.job_id RETURNING j.*`);
+        lease_token=$1,started_at=COALESCE(started_at,NOW()),updated_at=NOW()
+      FROM candidate WHERE j.job_id=candidate.job_id RETURNING j.*`, [workerToken]);
     if (!claimed.rowCount) return;
     const job=scoreShotJobFromRow(claimed.rows[0]);
-    job.status='running'; job.startedAt=job.startedAt||new Date().toISOString();
+    job.status='running'; job.workerToken=workerToken; job.startedAt=job.startedAt||new Date().toISOString();
     scoreShotJobs.set(job.id,job); scoreShotActiveDates.set(job.date,job.id);
     await executeScoreShotJob(job.date,job);
   } catch(e) {
@@ -5624,7 +5638,7 @@ app.post('/api/score-shot/analyze', async (req,res) => {
   try {
     const before=await databasePool.query("SELECT 1 FROM winscope_score_shot_jobs WHERE match_date=$1 AND status IN ('queued','running')",[date]);
     const job = await queueScoreShotJob(date,'manual');
-    return res.status(202).json({success:true,accepted:true,alreadyRunning:Boolean(before.rowCount),jobId:job.id,date,job});
+    return res.status(202).json({success:true,accepted:true,alreadyRunning:Boolean(before.rowCount),reusedExisting:Boolean(before.rowCount),jobId:job.id,date,job});
   } catch(e) { return res.status(500).json({success:false,error:e.message}); }
 });
 
