@@ -5628,6 +5628,23 @@ app.post('/api/score-shot/analyze', async (req,res) => {
   } catch(e) { return res.status(500).json({success:false,error:e.message}); }
 });
 
+// Current embedded index.html calls this endpoint when Score Shot opens.
+// Keep this read-only route separate from /status (job progress) so saved
+// predictions can be displayed without starting a new analysis.
+app.get('/api/score-shot/predictions', async (req,res) => {
+  const date = String(req.query.date || '');
+  if (!isValidScoreShotDate(date)) return res.status(400).json({success:false,error:'Tarih YYYY-MM-DD olmalı.'});
+  if (!databasePool) return res.status(503).json({success:false,error:'Score Shot kayıtları için DATABASE_URL gerekli.',rows:[]});
+  try {
+    await archiveDatabaseReady;
+    const rows = await scoreShotReadRows(date);
+    return res.json({success:true,date,rows});
+  } catch (e) {
+    console.error(`[SCORE SHOT] predictions read error date=${date}: ${e.stack || e.message}`);
+    return res.status(500).json({success:false,error:e.message,rows:[]});
+  }
+});
+
 app.get('/api/score-shot/status', async (req,res) => {
   const date = String(req.query.date || '');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({error:'Tarih YYYY-MM-DD olmalı.'});
