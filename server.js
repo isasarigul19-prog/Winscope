@@ -5391,9 +5391,37 @@ const scoreShotJobs = new Map();
 const scoreShotActiveDates = new Map();
 let scoreShotWorkerBusy = false;
 
+function scoreShotDateOnly(value) {
+  // node-postgres may parse a PostgreSQL DATE column as a JavaScript Date.
+  // String(Date).slice(0,10) produces values such as "Sat Nov 14", which
+  // API-Football rejects. Preserve the calendar date returned by PostgreSQL.
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    const y = value.getFullYear();
+    const m = String(value.getMonth() + 1).padStart(2, '0');
+    const d = String(value.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  const raw = String(value ?? '').trim();
+  const iso = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (iso) return iso[1];
+  const parsed = new Date(raw);
+  if (Number.isFinite(parsed.getTime())) {
+    const y = parsed.getFullYear();
+    const m = String(parsed.getMonth() + 1).padStart(2, '0');
+    const d = String(parsed.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return raw;
+}
+function isValidScoreShotDate(value) {
+  const date = scoreShotDateOnly(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+  const parsed = new Date(`${date}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0,10) === date;
+}
 function scoreShotJobFromRow(row) {
   const data = row?.progress && typeof row.progress === 'object' ? row.progress : {};
-  return {...data,id:row.job_id,jobId:row.job_id,date:String(row.match_date).slice(0,10),source:row.source,
+  return {...data,id:row.job_id,jobId:row.job_id,date:scoreShotDateOnly(row.match_date),source:row.source,
     status:row.status,phase:row.phase,error:row.error||data.error||null,
     createdAt:row.created_at,updatedAt:row.updated_at,startedAt:row.started_at,finishedAt:row.finished_at};
 }
@@ -5408,6 +5436,8 @@ async function persistScoreShotJob(job) {
     [job.id,job.status,job.phase,JSON.stringify(progress),job.error||null,job.startedAt||null]);
 }
 async function executeScoreShotJob(date, job) {
+  date = scoreShotDateOnly(date);
+  if (!isValidScoreShotDate(date)) throw new Error(`Score Shot geçersiz maç tarihi: ${String(date)}`);
   const startedAt = Date.now();
   const heartbeat = setInterval(() => { void persistScoreShotJob(job).catch(e=>console.error(`[SCORE SHOT] heartbeat persist error job=${job.id}: ${e.message}`)); }, 15000);
   try {
@@ -5514,6 +5544,8 @@ async function executeScoreShotJob(date, job) {
 }
 
 async function queueScoreShotJob(date, source='manual') {
+  date = scoreShotDateOnly(date);
+  if (!isValidScoreShotDate(date)) throw new Error(`Score Shot geçersiz maç tarihi: ${String(date)}`);
   await archiveDatabaseReady;
   const id = `ss-${date}-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
   const scheduleKey = String(source).startsWith('background-') ? `${date}:${source}` : null;
