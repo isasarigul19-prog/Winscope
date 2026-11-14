@@ -2311,8 +2311,7 @@ async function sendCouponAutomatically(coupon, chosen) {
 
 
 function isExcludedAnalysisCompetition(match) {
-  // Kullanıcının kapsamı: yalnızca kadın organizasyonları ve yaş grubu/U takımları hariç.
-  // B takımları, rezerv olmayan diğer erkek senior takımlar ve milli takımlar dahildir.
+  // Kupon havuzu: kadın, yaş grubu/U ve rezerv/ikinci takımlar hariç.
   const text = `${match.league || ""} ${match.country || ""} ${match.home || ""} ${match.away || ""}`
     .toLocaleLowerCase("en")
     .replace(/[’']/g, " ")
@@ -2321,9 +2320,13 @@ function isExcludedAnalysisCompetition(match) {
     .trim();
   const women = /\b(women|woman|ladies|feminine|femenino|feminin|womens|女子|女性)\b/i.test(text);
   const ageGroup = /\b(?:u\s*\d{1,2}|under\s*\d{1,2}|youth|junior|academy|juvenil|jeugd|sub\s*\d{1,2}|amateur youth)\b/i.test(text);
-  // Kapsam yalnızca kadın organizasyonları ve yaş grubu/U takımları hariçtir.
-  // Erkek senior ligleri, rezerv etiketi taşımayan ligler ve hazırlık maçları dahildir.
-  return women || ageGroup;
+  const reserveCompetition = /\b(?:reserve|reserves|reserva|ii|b team|team b)\b/i.test(text);
+  const reserveTeam = [match.home, match.away].some(name =>
+    /(?:\s|^)(?:ii|b|reserves?|reserva|u\d{1,2})$/i.test(String(name || "").trim()) ||
+    /\b(?:reserve|reserves|reserva|b team|team b)\b/i.test(String(name || ""))
+  );
+  // Kadın, yaş grubu ve rezerv/ikinci takım organizasyonları kupon havuzuna alınmaz.
+  return women || ageGroup || reserveCompetition || reserveTeam;
 }
 
 function automaticLeaguePriority(match) {
@@ -2380,20 +2383,14 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   if (!isLiveMode) {
     const withBulkOdds = fixtures.filter(f => dateOdds.has(f.id));
     const withoutBulkOdds = fixtures.filter(f => !dateOdds.has(f.id));
-    // Önce bütün fikstürlerin oran sayfalarını tara; takım formu API kotasını korumak için
-    // en fazla 50 oranlı ve 10 oran-yedek fikstürde çekilir. Canlı istatistik çağrısı yoktur.
+    // Oran sayfaları tüm fikstürler için eşleştirilir; form API kotası için
+    // en fazla 50 oranlı ve otomatik olmayan aramada 2 oran-yedek fikstür analiz edilir.
     fixturesToAnalyze = [...withBulkOdds.slice(0, 50), ...withoutBulkOdds.slice(0, (options.automatic ? 0 : 2))];
   }
   let analyzedFixtures = 0;
-  // Maç önü kuponunda ilk 2 adayı bulunca durma: daha geniş örneklemden
-  // en iyi 2 tercihi sıralayabilmek için 10 aday hedefle. Nihai kupon boyutu 2 kalır.
-  const targetPicks = mode === "surprise" ? 10 : mode === "prematch" ? 10 : 1;
+  // Maç önü kuponunda erken durma: kapalı. Uygun oranlı analiz havuzunun tamamı
+  // değerlendirilir; en iyi üç aday ancak tarama bittikten sonra sıralanır.
   for (const fixture of fixturesToAnalyze) {
-    // Yeterli sayıda yeni, doğrulanmış aday oluştuğunda gereksiz API çağrılarını kes.
-    const uniqueCandidateCount = options.automatic
-      ? candidates.filter(p => !autoSentFixtureKeys.has(autoLivePickKey(mode, date, p))).length
-      : candidates.length;
-    if (!isLiveMode && uniqueCandidateCount >= targetPicks) break;
     analyzedFixtures++;
     try {
       let marketOddsRow = null, prematchOddsRow = null, oddsBasis = "";
@@ -2497,12 +2494,12 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
     ? candidates.filter(p => !autoSentFixtureKeys.has(autoLivePickKey(mode, date, p)))
     : candidates;
   rejected.duplicate = candidates.length - availableCandidates.length;
-  console.log(`[COUPON SCAN ${mode.toUpperCase()}] date=${date} live=${isLiveMode} fixtures=${allFixtures.length} prioritized=${fixtures.length} analyzed=${analyzedFixtures} candidates=${candidates.length} available=${availableCandidates.length} rejected=${JSON.stringify(rejected)} seasonStats=home-away-blend youthReserveWomen=excluded oddsPagesMax=50 errors=${errors.length}`);
+  console.log(`[COUPON SCAN ${mode.toUpperCase()}] date=${date} live=${isLiveMode} fixtures=${allFixtures.length} prioritized=${fixtures.length} analyzed=${analyzedFixtures} candidates=${candidates.length} available=${availableCandidates.length} rejected=${JSON.stringify(rejected)} reserveYouthWomen=excluded oddsPagesMax=50 errors=${errors.length}`);
   availableCandidates.sort((a,b)=>b.score-a.score || b.formSupport-a.formSupport || a.internalOdd-b.internalOdd);
-  const count = mode === "surprise" ? 10 : mode === "prematch" ? 2 : 1;
+  const count = mode === "surprise" ? 10 : mode === "prematch" ? 3 : 1;
   const chosen = availableCandidates.slice(0,count);
-  if (!chosen.length || (mode === "prematch" && chosen.length < 2)) {
-    const needed = mode === "prematch" ? 2 : 1;
+  if (!chosen.length || (mode === "prematch" && chosen.length < 3)) {
+    const needed = mode === "prematch" ? 3 : 1;
     return {draftId:`coupon-${Date.now()}`,date,type:mode,status:"NO_MATCHES",picks:[],
       message:`Maç önü oranı + son 5 maç formu${isLiveMode ? " + canlı istatistik" : ""} eşiklerini geçen yeterli maç yok (gereken: ${needed}). Kupon zorlanmadı.`,
       detail:`Fikstür: ${allFixtures.length}; oran sayfasından eşleşen: ${dateOdds.size}; form/statistik için incelenen: ${fixturesToAnalyze.length}; aday: ${candidates.length}; elenme: oran=${rejected.noOdds}, form=${rejected.noForm}, canlı-istatistik=${rejected.noStats}, piyasa-sinyali=${rejected.noSignal}, API-hatası=${rejected.apiErrors}, tekrar=${rejected.duplicate}. ${errors.slice(0,2).join(" | ")}`};
@@ -2513,7 +2510,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
   const coupon = {draftId,date,type:mode,isLive:isLiveMode,status:"READY",picks:publicPicks,autoGenerated:Boolean(options.automatic),
     message:mode==="live" ? "Tek canlı tercih: yalnızca maç önü oranı kullanıldı; dakika/skor + son 5 maç formu + canlı şut/korner baskısı değerlendirildi." :
       mode==="surprise" ? `Sürpriz kupon: ${publicPicks.length} maç (en fazla 10); yalnızca oran ve son 5 maç formu eşiğini geçen adaylar eklendi.` :
-      "Maç önü kuponu: en az iki maç, maç önü son mevcut oran ve son 5 gerçek skor formu birlikte değerlendirildi."};
+      "Güvenli maç önü kuponu: üç farklı maç; maç önü oranı ve son 5 gerçek skor formu birlikte değerlendirildi. Yeterli aday yoksa kupon oluşturulmaz."};
   const archiveCoupon = {date,type:mode,picks:publicPicks,createdAt:new Date().toISOString()};
   archives.coupons.unshift(archiveCoupon);
   archives.coupons=archives.coupons.slice(0,50);
