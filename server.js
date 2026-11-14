@@ -5267,11 +5267,14 @@ function scoreShotMarketInputs(oddsRow) {
   };
   const one=best('MS 1'), over=best('MS 2.5 ÜST');
   const outcome=one?.outcomeProbabilities;
+  // Score Shot yalnızca gerçek maç önü 1X2 ve 2.5 Üst pazarı birlikte varsa çalışır.
+  // Eksik 2.5 pazarı varsayımla doldurulmaz; maç aday havuzuna alınmaz.
   if(!outcome || ![outcome.home,outcome.draw,outcome.away].every(v=>Number.isFinite(Number(v)))) return null;
+  if(!over || !Number.isFinite(Number(over.probability))) return null;
   return {home:Number(outcome.home)/100,draw:Number(outcome.draw)/100,away:Number(outcome.away)/100,
-    over25:over&&Number.isFinite(Number(over.probability))?Number(over.probability)/100:null,
-    bookmaker:one.bookmaker||'API-Football',overBookmaker:over?.bookmaker||null,
-    hasOver25:Boolean(over)};
+    over25:Number(over.probability)/100,
+    bookmaker:one.bookmaker||'API-Football',overBookmaker:over.bookmaker||null,
+    hasOver25:true};
 }
 async function scoreShotTeamForm(teamId, beforeDate) {
   if(!databasePool||!teamId)return null;
@@ -5341,11 +5344,11 @@ app.post('/api/score-shot/analyze',async(req,res)=>{
       oddsRows.push(...(next.response||[]));
     }
     const oddsMap=new Map(oddsRows.filter(x=>x.fixture?.id).map(x=>[Number(x.fixture.id),x]));
-    let missingOdds=0,missingForm=0,notEligible=0,modeled=0;
+    let missingOdds=0,missingForm=0,missingMarkets=0,notEligible=0,modeled=0;
     const candidates=[];
     for(const m of fixtures){
       const odds=oddsMap.get(Number(m.id)); if(!odds){missingOdds++;continue;}
-      const market=scoreShotMarketInputs(odds);if(!market){missingOdds++;continue;}
+      const market=scoreShotMarketInputs(odds);if(!market){missingMarkets++;continue;}
       if(!m.homeId||!m.awayId){missingForm++;continue;}
       const [hf,af]=await Promise.all([scoreShotTeamForm(m.homeId,date),scoreShotTeamForm(m.awayId,date)]);
       if(!hf||!af){missingForm++;continue;}
@@ -5374,7 +5377,7 @@ app.post('/api/score-shot/analyze',async(req,res)=>{
       saved+=r.rowCount||0;
     }
     const rows=await scoreShotReadRows(date);
-    res.json({success:true,date,diagnostics:{fixtures:fixtures.length,withOdds:fixtures.length-missingOdds,missingOdds,missingForm,modeled,candidates:candidates.length,selected:selected.length,newlySaved:saved},rows});
+    res.json({success:true,date,diagnostics:{fixtures:fixtures.length,withOdds:fixtures.length-missingOdds,missingOdds,missingMarkets,missingForm,modeled,candidates:candidates.length,selected:selected.length,newlySaved:saved},rows});
   }catch(e){console.error('[Score Shot analyze]',e);res.status(500).json({error:e.message,rows:[]});}
 });
 app.get('/api/score-shot/predictions',async(req,res)=>{
