@@ -312,7 +312,7 @@ if (databasePool) {
         league TEXT, home_team TEXT NOT NULL, away_team TEXT NOT NULL,
         predicted_ht TEXT NOT NULL, predicted_ft TEXT NOT NULL,
         top_scores JSONB NOT NULL DEFAULT '[]'::jsonb, model_data JSONB NOT NULL DEFAULT '{}'::jsonb,
-        selection_score NUMERIC NOT NULL DEFAULT 0, exact_probability NUMERIC, confidence NUMERIC,
+        selection_score NUMERIC NOT NULL DEFAULT 0, exact_probability NUMERIC,
         actual_ht TEXT, actual_ft TEXT, ht_hit BOOLEAN, ft_hit BOOLEAN,
         top3_hit BOOLEAN, settled_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -334,7 +334,6 @@ if (databasePool) {
         ADD COLUMN IF NOT EXISTS model_data JSONB DEFAULT '{}'::jsonb,
         ADD COLUMN IF NOT EXISTS selection_score NUMERIC DEFAULT 0,
         ADD COLUMN IF NOT EXISTS exact_probability NUMERIC,
-        ADD COLUMN IF NOT EXISTS confidence NUMERIC,
         ADD COLUMN IF NOT EXISTS actual_ht TEXT,
         ADD COLUMN IF NOT EXISTS actual_ft TEXT,
         ADD COLUMN IF NOT EXISTS ht_hit BOOLEAN,
@@ -342,13 +341,22 @@ if (databasePool) {
         ADD COLUMN IF NOT EXISTS top3_hit BOOLEAN,
         ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ,
         ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()`);
-      // Eski Score Shot tablolarında confidence NOT NULL kalmış olabilir.
-      // Model bu alana gerçek bir değer üretmiyorsa NULL yazılabilmeli; uydurma puan atama.
-      await databasePool.query(`ALTER TABLE winscope_score_shot_predictions
-        ALTER COLUMN confidence DROP NOT NULL`);
-      // Eski tablolarda farklı PK/UNIQUE tanımları bulunabilir. Bu nedenle
-      // aşağıdaki INSERT hedefli ON CONFLICT yerine hedef belirtmeyen DO NOTHING kullanır;
-      // eski veride yinelenen satırlar varsa uygulama açılışı unique-index yüzünden durmaz.
+      // Legacy installations may have a required confidence column that the current
+      // Score Shot INSERT does not populate. Make it nullable only when it exists.
+      await databasePool.query(`DO $$ BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()
+          AND table_name='winscope_score_shot_predictions' AND column_name='confidence') THEN
+          ALTER TABLE winscope_score_shot_predictions ALTER COLUMN confidence DROP NOT NULL;
+        END IF;
+      END $$`);
+      // The write path uses ON CONFLICT(fixture_id, match_date). Normalize duplicate
+      // legacy rows first, then guarantee that exact conflict target exists.
+      await databasePool.query(`WITH ranked AS (
+        SELECT ctid, ROW_NUMBER() OVER (PARTITION BY fixture_id, match_date
+          ORDER BY created_at DESC NULLS LAST, ctid DESC) AS rn
+        FROM winscope_score_shot_predictions WHERE fixture_id IS NOT NULL AND match_date IS NOT NULL
+      ) DELETE FROM winscope_score_shot_predictions t USING ranked r WHERE t.ctid=r.ctid AND r.rn>1`);
+      await databasePool.query("CREATE UNIQUE INDEX IF NOT EXISTS winscope_score_shot_fixture_date_uidx ON winscope_score_shot_predictions(fixture_id, match_date)");
       await databasePool.query("CREATE INDEX IF NOT EXISTS winscope_score_shot_date_idx ON winscope_score_shot_predictions(match_date, selection_score DESC, kickoff_at)");
       const [analysisRows, couponRows, sentRows, predictionRows, livePredictionRows, dailyRunRows, goalTrackingRows] = await Promise.all([
         databasePool.query("SELECT payload FROM winscope_archive WHERE category = 'analysis' ORDER BY id DESC LIMIT 1000"),
@@ -5284,46 +5292,51 @@ function scoreShotMarketInputs(oddsRow) {
     bookmaker:one.bookmaker||'API-Football',overBookmaker:over.bookmaker||null,
     hasOver25:true};
 }
+function scoreShotFormFromPayloads(payloads, teamId, beforeDate) {
+  const cutoff = String(beforeDate || '');
+  const rows = (payloads || []).filter(p => {
+    const status = String(p.fixture?.status?.short || p.status || '').toUpperCase();
+    const kickoff = String(p.fixture?.date || p.fixtureDate || p.date || '');
+    const localDate = kickoff ? new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Istanbul', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date(kickoff)) : '';
+    return ['FT','AET','PEN'].includes(status) && localDate && localDate < cutoff &&
+      p.goals?.home != null && p.goals?.away != null &&
+      (String(p.teams?.home?.id) === String(teamId) || String(p.teams?.away?.id) === String(teamId));
+  }).sort((a,b) => new Date(b.fixture?.date || b.fixtureDate || 0) - new Date(a.fixture?.date || a.fixtureDate || 0)).slice(0,5);
+  if (rows.length < 5) return null;
+  const values = rows.map(p => {
+    const isHome = String(p.teams?.home?.id) === String(teamId);
+    const gf = Number(isHome ? p.goals?.home : p.goals?.away);
+    const ga = Number(isHome ? p.goals?.away : p.goals?.home);
+    const hh = p.score?.halftime?.home, ha = p.score?.halftime?.away;
+    return { gf, ga, htFor: hh == null || ha == null ? null : Number(isHome ? hh : ha),
+      htAgainst: hh == null || ha == null ? null : Number(isHome ? ha : hh) };
+  }).filter(x => Number.isFinite(x.gf) && Number.isFinite(x.ga));
+  if (values.length < 5) return null;
+  const ht = values.filter(x => x.htFor != null && x.htAgainst != null);
+  if (ht.length < 4) return null;
+  const avg = k => values.reduce((a,x) => a + x[k], 0) / values.length;
+  return { sample: values.length, htSample: ht.length, avgFor: avg('gf'), avgAgainst: avg('ga'),
+    htAvgFor: ht.reduce((a,x) => a + x.htFor, 0) / ht.length,
+    htAvgAgainst: ht.reduce((a,x) => a + x.htAgainst, 0) / ht.length,
+    scores: values.map(x => `${x.gf}-${x.ga}`), source: 'archive-or-api-last20' };
+}
 async function scoreShotTeamForm(teamId, beforeDate) {
   if (!databasePool || !teamId) return null;
-  const teamKey=String(teamId);
-  const buildProfile=(rows)=>{
-    const finished=(rows||[]).filter(p=>{
-      const status=String(p?.fixture?.status?.short||p?.status||'').toUpperCase();
-      const matchDate=String(p?.fixture?.date||p?.date||'').slice(0,10);
-      return ['FT','AET','PEN'].includes(status) && (!matchDate || matchDate<beforeDate) &&
-        p?.goals?.home!=null && p?.goals?.away!=null && p?.teams?.home?.id!=null && p?.teams?.away?.id!=null;
-    }).sort((a,b)=>Date.parse(b.fixture?.date||b.date||0)-Date.parse(a.fixture?.date||a.date||0)).slice(0,5);
-    if(finished.length<5)return null;
-    const values=finished.map(p=>{
-      const isHome=String(p.teams?.home?.id)===teamKey;
-      const hh=p.score?.halftime?.home,ha=p.score?.halftime?.away;
-      return {gf:Number(isHome?p.goals.home:p.goals.away),ga:Number(isHome?p.goals.away:p.goals.home),
-        htFor:hh==null||ha==null?null:Number(isHome?hh:ha),htAgainst:hh==null||ha==null?null:Number(isHome?ha:hh)};
-    }).filter(x=>Number.isFinite(x.gf)&&Number.isFinite(x.ga));
-    if(values.length<5)return null;
-    const ht=values.filter(x=>x.htFor!=null&&x.htAgainst!=null);
-    if(ht.length<4)return null;
-    const avg=k=>values.reduce((a,x)=>a+x[k],0)/values.length;
-    return {sample:values.length,htSample:ht.length,avgFor:avg('gf'),avgAgainst:avg('ga'),
-      htAvgFor:ht.reduce((a,x)=>a+x.htFor,0)/ht.length,htAvgAgainst:ht.reduce((a,x)=>a+x.htAgainst,0)/ht.length,
-      scores:values.map(x=>`${x.gf}-${x.ga}`)};
-  };
-  // Önce kalıcı arşiv: son 5 tamamlanmış maç. 5 satırla sınırlamak yerine
-  // daha geniş örnek çekip JSON içindeki geçerli sonuçları ayıkla.
-  const q=await databasePool.query(`SELECT payload FROM winscope_fixture_archive
+  const q = await databasePool.query(`SELECT payload FROM winscope_fixture_archive
     WHERE match_date < $2::date AND status IN ('FT','AET','PEN')
       AND (payload->'teams'->'home'->>'id'=$1 OR payload->'teams'->'away'->>'id'=$1)
-    ORDER BY kickoff_at DESC NULLS LAST LIMIT 30`,[teamKey,beforeDate]);
-  const archived=buildProfile(q.rows.map(x=>x.payload));
-  if(archived)return archived;
-  // Arşivde takımın 5 geçerli maç/4 devre arası skoru yoksa API'den son 20 maçı
-  // al. cachedProviderRequest yanıtı aynı zamanda fixture arşivine kaydeder.
-  const payload=await cachedProviderRequest(`score-shot-team-form:${teamKey}:${beforeDate}`,
-    `/fixtures?team=${encodeURIComponent(teamKey)}&last=20`,6*60*60*1000);
-  const fromApi=buildProfile(payload.response||[]);
-  if(fromApi)console.log(`[Score Shot form fallback] team=${teamKey} kaynak=API son 5 tamamlanmış maç`);
-  return fromApi;
+      AND payload->'goals'->>'home' IS NOT NULL AND payload->'goals'->>'away' IS NOT NULL
+    ORDER BY kickoff_at DESC NULLS LAST LIMIT 5`, [String(teamId), beforeDate]);
+  const archived = scoreShotFormFromPayloads(q.rows.map(x => x.payload), teamId, beforeDate);
+  if (archived) return { ...archived, source: 'archive' };
+
+  // Archive can be incomplete on a newly added team. Fetch its latest 20 fixtures
+  // from the provider, then select exactly the latest five completed matches before kickoff date.
+  const payload = await cachedProviderRequest(`score-shot-team-form:${teamId}:${beforeDate}:last20`,
+    `/fixtures?team=${encodeURIComponent(teamId)}&last=20&timezone=Europe/Istanbul`, 6 * 60 * 60 * 1000);
+  const fallback = scoreShotFormFromPayloads(payload.response || [], teamId, beforeDate);
+  if (!fallback) return null;
+  return { ...fallback, source: 'api-last20' };
 }
 function scoreShotFit(market,homeForm,awayForm) {
   const priorH=Math.max(.15,Math.min(3.8,(homeForm.avgFor*.58+awayForm.avgAgainst*.42)));
@@ -5357,33 +5370,54 @@ app.post('/api/score-shot/analyze',async(req,res)=>{
   const date=String(req.body?.date||'');
   if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return res.status(400).json({error:'Tarih YYYY-MM-DD olmalı.'});
   if(!databasePool)return res.status(503).json({error:'Score Shot kayıtları için DATABASE_URL gerekli.'});
+  const startedAt = Date.now();
+  console.log(`[SCORE SHOT] START date=${date}`);
   try{
     await archiveDatabaseReady;
+    console.log(`[SCORE SHOT] fixtures request date=${date}`);
     const fixturePayload=await cachedProviderRequest(`score-shot-fixtures:${date}`,`/fixtures?date=${date}&timezone=Europe/Istanbul`,60000);
     const fixtures=(fixturePayload.response||[]).map(normalizeProviderMatch)
       .filter(m=>m.id&&m.status==='NS'&&!isExcludedAnalysisCompetition(m));
-    let oddsRows=[];
+    console.log(`[SCORE SHOT] fixtures received=${(fixturePayload.response||[]).length} eligible=${fixtures.length}`);
+
+    // API-Football odds are paginated at 10 rows/page. Never cap this at an
+    // arbitrary page count: read every page reported by paging.total.
+    console.log(`[SCORE SHOT] odds page=1 request`);
     const first=await cachedProviderRequest(`score-shot-odds:${date}:1`,`/odds?date=${date}&page=1`,90000);
-    oddsRows.push(...(first.response||[]));
-    const pages=Math.min(100,Math.max(1,Number(first.paging?.total||1)));
-    for(let page=2;page<=pages;page++){
+    const totalPages=Number(first.paging?.total);
+    if(!Number.isInteger(totalPages)||totalPages<1) throw new Error(`Score Shot oran sayfalaması geçersiz: paging.total=${String(first.paging?.total)}`);
+    const oddsRows=[...(first.response||[])];
+    console.log(`[SCORE SHOT] odds page=1/${totalPages} rows=${(first.response||[]).length}`);
+    for(let page=2;page<=totalPages;page++){
       const next=await cachedProviderRequest(`score-shot-odds:${date}:${page}`,`/odds?date=${date}&page=${page}`,90000);
-      oddsRows.push(...(next.response||[]));
+      if(!Array.isArray(next.response)) throw new Error(`Score Shot oran sayfası ${page}/${totalPages} geçersiz yanıt döndürdü.`);
+      oddsRows.push(...next.response);
+      console.log(`[SCORE SHOT] odds page=${page}/${totalPages} rows=${next.response.length} totalRows=${oddsRows.length}`);
     }
     const oddsMap=new Map(oddsRows.filter(x=>x.fixture?.id).map(x=>[Number(x.fixture.id),x]));
-    let missingOdds=0,missingForm=0,missingMarkets=0,notEligible=0,modeled=0;
-    const diagnostics={fixturePages:1,oddsPages:pages,oddsRows:oddsRows.length,fixturesBeforeFilter:(fixturePayload.response||[]).length,eligibleFixtures:fixtures.length};
+    console.log(`[SCORE SHOT] odds complete pages=${totalPages} rows=${oddsRows.length} uniqueFixtures=${oddsMap.size}`);
+
+    let oddsMatched=0,missingOdds=0,missingMarkets=0,missingForm=0,formFallbacks=0,notEligible=0,modeled=0;
     const candidates=[];
     for(const m of fixtures){
-      const odds=oddsMap.get(Number(m.id)); if(!odds){missingOdds++;continue;}
+      const odds=oddsMap.get(Number(m.id));
+      if(!odds){missingOdds++;continue;}
+      oddsMatched++;
       const market=scoreShotMarketInputs(odds);if(!market){missingMarkets++;continue;}
       if(!m.homeId||!m.awayId){missingForm++;continue;}
-      const [hf,af]=await Promise.all([scoreShotTeamForm(m.homeId,date),scoreShotTeamForm(m.awayId,date)]);
+      let hf,af;
+      try {
+        [hf,af]=await Promise.all([scoreShotTeamForm(m.homeId,date),scoreShotTeamForm(m.awayId,date)]);
+      } catch(formError) {
+        console.warn(`[SCORE SHOT] form error fixture=${m.id} teams=${m.homeId}/${m.awayId}: ${formError.message}`);
+        missingForm++;continue;
+      }
       if(!hf||!af){missingForm++;continue;}
+      if(hf.source!=='archive')formFallbacks++;
+      if(af.source!=='archive')formFallbacks++;
       const model=scoreShotFit(market,hf,af);if(!model){notEligible++;continue;}
       modeled++;
       const top=model.top3[0];
-      // Yalnızca en olası skor dağılımı yeterince belirginse aday havuzuna al.
       if(!top||top.probability<7){notEligible++;continue;}
       const sampleQuality=(hf.sample+af.sample+hf.htSample+af.htSample)/24;
       const marketQuality=market.hasOver25?1:.78;
@@ -5395,18 +5429,24 @@ app.post('/api/score-shot/analyze',async(req,res)=>{
     candidates.sort((a,b)=>b.selectionScore-a.selectionScore||b.exactProbability-a.exactProbability);
     const selected=candidates.slice(0,5);
     let saved=0;
+    console.log(`[SCORE SHOT] model complete oddsMatched=${oddsMatched} missingOdds=${missingOdds} missingMarkets=${missingMarkets} missingForm=${missingForm} formFallbacks=${formFallbacks} modeled=${modeled} candidates=${candidates.length} selected=${selected.length}`);
     for(const x of selected){
       const r=await databasePool.query(`INSERT INTO winscope_score_shot_predictions
         (fixture_id,match_date,kickoff_at,league,home_team,away_team,predicted_ht,predicted_ft,top_scores,model_data,selection_score,exact_probability)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12)
-        ON CONFLICT DO NOTHING`,
+        ON CONFLICT(fixture_id,match_date) DO NOTHING`,
         [x.fixture.id,date,x.fixture.fixtureDate,x.fixture.league,x.fixture.home,x.fixture.away,x.predictedHt,x.predictedFt,
           JSON.stringify(x.model.top3),JSON.stringify({homeForm:x.homeForm,awayForm:x.awayForm,market:{home:x.market.home,draw:x.market.draw,away:x.market.away,over25:x.market.over25,bookmaker:x.market.bookmaker,overBookmaker:x.market.overBookmaker},lambdaHome:x.model.lambdaHome,lambdaAway:x.model.lambdaAway,fitLoss:x.model.fitLoss}),x.selectionScore,x.exactProbability]);
       saved+=r.rowCount||0;
     }
     const rows=await scoreShotReadRows(date);
-    res.json({success:true,date,diagnostics:{...diagnostics,fixtures:fixtures.length,withOdds:fixtures.length-missingOdds,missingOdds,missingMarkets,missingForm,notEligible,modeled,candidates:candidates.length,selected:selected.length,newlySaved:saved},rows});
-  }catch(e){console.error('[Score Shot analyze]',e);res.status(500).json({error:e.message,rows:[]});}
+    const diagnostics={fixtures:fixtures.length,oddsPages:totalPages,oddsRows:oddsRows.length,oddsMatched,withOdds:oddsMatched,missingOdds,missingMarkets,missingForm,formFallbacks,notEligible,modeled,candidates:candidates.length,selected:selected.length,newlySaved:saved,totalSaved:rows.length,durationMs:Date.now()-startedAt};
+    console.log(`[SCORE SHOT] DONE date=${date} diagnostics=${JSON.stringify(diagnostics)}`);
+    res.json({success:true,date,diagnostics,rows});
+  }catch(e){
+    console.error(`[SCORE SHOT] FAILED date=${date} afterMs=${Date.now()-startedAt}: ${e.stack||e.message}`);
+    res.status(500).json({success:false,date,error:e.message,rows:[]});
+  }
 });
 app.get('/api/score-shot/predictions',async(req,res)=>{
   const date=String(req.query.date||'');if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return res.status(400).json({error:'Tarih YYYY-MM-DD olmalı.'});
