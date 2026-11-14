@@ -335,6 +335,7 @@ if (databasePool) {
         league TEXT, home_team TEXT NOT NULL, away_team TEXT NOT NULL,
         predicted_ht TEXT NOT NULL, predicted_ft TEXT NOT NULL,
         top_scores JSONB NOT NULL DEFAULT '[]'::jsonb, model_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        features JSONB NOT NULL DEFAULT '{}'::jsonb,
         selection_score NUMERIC NOT NULL DEFAULT 0, exact_probability NUMERIC,
         actual_ht TEXT, actual_ft TEXT, ht_hit BOOLEAN, ft_hit BOOLEAN,
         top3_hit BOOLEAN, settled_at TIMESTAMPTZ,
@@ -355,6 +356,7 @@ if (databasePool) {
         ADD COLUMN IF NOT EXISTS predicted_ft TEXT,
         ADD COLUMN IF NOT EXISTS top_scores JSONB DEFAULT '[]'::jsonb,
         ADD COLUMN IF NOT EXISTS model_data JSONB DEFAULT '{}'::jsonb,
+        ADD COLUMN IF NOT EXISTS features JSONB DEFAULT '{}'::jsonb,
         ADD COLUMN IF NOT EXISTS selection_score NUMERIC DEFAULT 0,
         ADD COLUMN IF NOT EXISTS exact_probability NUMERIC,
         ADD COLUMN IF NOT EXISTS actual_ht TEXT,
@@ -364,6 +366,12 @@ if (databasePool) {
         ADD COLUMN IF NOT EXISTS top3_hit BOOLEAN,
         ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ,
         ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()`);
+      // Older Score Shot tables already had a NOT NULL features column but no default.
+      // Supply a safe default and repair legacy NULLs before enforcing the constraint.
+      await databasePool.query(`ALTER TABLE winscope_score_shot_predictions
+        ALTER COLUMN features SET DEFAULT '{}'::jsonb`);
+      await databasePool.query(`UPDATE winscope_score_shot_predictions SET features='{}'::jsonb WHERE features IS NULL`);
+      await databasePool.query(`ALTER TABLE winscope_score_shot_predictions ALTER COLUMN features SET NOT NULL`);
       // Legacy installations may have a required confidence column that the current
       // Score Shot INSERT does not populate. Make it nullable only when it exists.
       await databasePool.query(`DO $$ BEGIN
@@ -4481,7 +4489,9 @@ async function runEarlyFirstHalfPick() {
       const minute = Number(f.minute);
       const total = Number(f.homeScore) + Number(f.awayScore);
       return f.id && f.status === 'LIVE' && f.periodStatus === '1H' &&
-        Number.isFinite(minute) && minute >= 1 && minute <= 10 && isFreshLiveFixture(f) &&
+        // 10. dakikadan itibaren, yalnızca hâlâ 0-0 olan ilk yarı maçlarını tara.
+        // İlk 10 dakikada gol olmuşsa toplam skor filtresi maçı otomatik dışarıda bırakır.
+        Number.isFinite(minute) && minute >= 10 && minute <= 45 && isFreshLiveFixture(f) &&
         Number.isFinite(total) && total === 0 && !isExcludedAnalysisCompetition(f);
     });
     let sent = 0;
@@ -4611,7 +4621,7 @@ async function runEarlyFirstHalfPick() {
         }
       } catch (e) { console.warn(`[EARLY HT ERROR] fixture=${fixture.id}: ${e.message}`); }
     }
-    console.log(`[EARLY HT SCAN] prep=${prep.length} live1to10=${fixtures.length} sent=${sent}`);
+    console.log(`[EARLY HT SCAN] prep=${prep.length} live10plus0-0=${fixtures.length} sent=${sent}`);
   } catch (e) {
     console.error(`[EARLY HT SCAN ERROR] ${e.message}`);
   } finally {
@@ -5792,11 +5802,14 @@ async function executeScoreShotJob(date, job) {
     for (const x of selected) {
       await persistScoreShotJob(job); // lease/fencing check before any prediction write
       const r = await databasePool.query(`INSERT INTO winscope_score_shot_predictions
-        (fixture_id,match_date,kickoff_at,league,home_team,away_team,predicted_ht,predicted_ft,top_scores,model_data,selection_score,exact_probability)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12)
+        (fixture_id,match_date,kickoff_at,league,home_team,away_team,predicted_ht,predicted_ft,top_scores,model_data,features,selection_score,exact_probability)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb,$12,$13)
         ON CONFLICT(fixture_id,match_date) DO NOTHING`,
         [x.fixture.id,date,x.fixture.fixtureDate,x.fixture.league,x.fixture.home,x.fixture.away,x.predictedHt,x.predictedFt,
-          JSON.stringify(x.model.top3),JSON.stringify({homeForm:x.homeForm,awayForm:x.awayForm,market:{home:x.market.home,draw:x.market.draw,away:x.market.away,over25:x.market.over25,bookmaker:x.market.bookmaker,overBookmaker:x.market.overBookmaker},lambdaHome:x.model.lambdaHome,lambdaAway:x.model.lambdaAway,fitLoss:x.model.fitLoss}),x.selectionScore,x.exactProbability]);
+          JSON.stringify(x.model.top3),
+          JSON.stringify({homeForm:x.homeForm,awayForm:x.awayForm,market:{home:x.market.home,draw:x.market.draw,away:x.market.away,over25:x.market.over25,bookmaker:x.market.bookmaker,overBookmaker:x.market.overBookmaker},lambdaHome:x.model.lambdaHome,lambdaAway:x.model.lambdaAway,fitLoss:x.model.fitLoss}),
+          JSON.stringify({homeForm:x.homeForm,awayForm:x.awayForm,market:{home:x.market.home,draw:x.market.draw,away:x.market.away,over25:x.market.over25,bookmaker:x.market.bookmaker,overBookmaker:x.market.overBookmaker},lambdaHome:x.model.lambdaHome,lambdaAway:x.model.lambdaAway,fitLoss:x.model.fitLoss}),
+          x.selectionScore,x.exactProbability]);
       saved += r.rowCount || 0;
     }
     const rows = await scoreShotReadRows(date);
