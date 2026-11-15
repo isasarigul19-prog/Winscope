@@ -652,14 +652,15 @@ let providerQueue = [];
 let providerQueueRunning = false;
 let lastProviderRequestAt = 0;
 let providerCooldownUntil = 0;
-const PROVIDER_MIN_INTERVAL_MS = Math.max(1000, Number(process.env.API_FOOTBALL_MIN_INTERVAL_MS) || 1500);
+const PROVIDER_MIN_INTERVAL_MS = Math.max(350, Number(process.env.API_FOOTBALL_MIN_INTERVAL_MS) || 450);
 let providerQueueSequence = 0;
 let lastProviderUsageLogAt = 0;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function providerRequestPriority(pathname) {
   const path = String(pathname || "");
-  if (/\/fixtures\?live=all|\/odds\/live|\/fixtures\/statistics\?fixture=/.test(path)) return 0;
+  // Canlı fikstür, maç önü oranı ve canlı istatistik aynı yüksek öncelik grubunda.
+  if (/\/fixtures\?live=all|\/odds\/live|\/fixtures\/statistics\?fixture=|\/odds\?fixture=/.test(path)) return 0;
   if (/\/fixtures\?id=/.test(path)) return 0;
   if (/\/odds\?date=.*page=/.test(path)) return 2;
   return 1;
@@ -743,11 +744,7 @@ async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
         const retryBody = Number((errorText.match(/retry after\s+(\d+)/i) || [])[1]) || 0;
         const waitMs = Math.max(90_000, (Math.max(retryHeader, retryBody) + 5) * 1000);
         providerCooldownUntil = Math.max(providerCooldownUntil, Date.now() + waitMs);
-        const minuteLimit = response.headers.get("x-ratelimit-limit") || "?";
-        const minuteRemaining = response.headers.get("x-ratelimit-remaining") || "?";
-        const dailyLimit = response.headers.get("x-ratelimit-requests-limit") || "?";
-        const dailyRemaining = response.headers.get("x-ratelimit-requests-remaining") || "?";
-        console.error(`[API 429] ${Math.ceil(waitMs / 1000)} sn bekleme; dakika=${minuteRemaining}/${minuteLimit}, günlük=${dailyRemaining}/${dailyLimit}, istek önceliği=${priority}, kuyruk=${providerQueue.length}. Aynı API anahtarını kullanan başka süreç varsa ortak kotayı tüketiyor olabilir.`);
+        console.error(`[API 429] ${Math.ceil(waitMs / 1000)} sn bekleme; istek önceliği=${priority}, kuyruk=${providerQueue.length}. Aynı API anahtarını kullanan başka süreç olup olmadığını kontrol edin.`);
         throw new Error(`API-Football hız sınırı; ${Math.ceil(waitMs / 1000)} saniye bekleme uygulandı. ${errorText}`);
       }
       throw new Error(`API-Football hatası: ${errors ? errorText : `HTTP ${response.status}`}`);
@@ -3146,10 +3143,15 @@ app.get("/api/coupon/surprise", async (req, res) => {
   try { res.json(await createCouponByMode(String(req.query.date || ""), "surprise")); }
   catch (e) { res.status(502).json({ status: "ERROR", type: "surprise", picks: [], error: "10 maçlık sürpriz kupon oluşturulamadı.", detail: e.message }); }
 });
-async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
+async function buildNextGoalAnalysisInternal({ sendTelegramMessage = false } = {}) {
   const payload = await cachedProviderRequest("next-goal-live-fixtures", "/fixtures?live=all", 20000);
-  const fixtures = (payload.response || []).map(normalizeProviderMatch)
+  // Bu motor yalnızca 65-90. dakika canlı gol pazarlarını değerlendirir.
+  // 10-64. dakikadaki maçlar zaten tercih alamayacağı için oran/istatistik/form
+  // çağrısı yapmadan elenir; API kotası ve tarama süresi korunur.
+  const allLiveFixtures = (payload.response || []).map(normalizeProviderMatch)
     .filter(f => f.id && isFreshLiveFixture(f) && Number(f.minute || 0) >= 10 && Number(f.minute || 0) <= 95 && !isExcludedAnalysisCompetition(f));
+  const fixtures = allLiveFixtures.filter(f => Number(f.minute || 0) >= 65 && Number(f.minute || 0) <= 90);
+  console.log(`[LIVE SCAN START] liveEligible=${allLiveFixtures.length} goalWindow65to90=${fixtures.length} skippedBefore65=${allLiveFixtures.length-fixtures.length}`);
   const results = [];
   let formEnrichedFixtures = 0;
   let statsFetchedFixtures = 0;
@@ -3168,7 +3170,7 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
       let statsRows = [];
       if (prematchMarkets.length) {
         statsFetchedFixtures++;
-        const statsPayload = await cachedProviderRequest(`next-goal-stats:${fixture.id}`, `/fixtures/statistics?fixture=${fixture.id}`, 12000)
+        const statsPayload = await cachedProviderRequest(`next-goal-stats:${fixture.id}`, `/fixtures/statistics?fixture=${fixture.id}`, 30000)
           .catch(e => { console.warn(`[LIVE STATS ERROR] fixture=${fixture.id}: ${e.message}`); return { response: [] }; });
         statsRows = statsPayload.response || [];
       }
@@ -3386,6 +3388,23 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
   return { status: "READY", type: "live", scanned: results.length, valueCandidates: valueCandidates.length,
     message: telegram?.sent ? "Canlı aday taze fikstür, oran ve değer kontrolünden geçti; Telegram bildirimi gönderildi." : (top ? "Canlı aday bulundu ve taze kontrolden geçti; Telegram gönderimi tamamlanmadı." : "Canlı maçlar tarandı; taze oran ve değer kontrolünü geçen gönderilebilir tercih bulunmadı."),
     reasonSummary, matches: results, topPick: top, picks: top ? [{ fixtureId: top.fixtureId, league: top.league, home: top.home, away: top.away, minute: top.minute, currentScore: top.score, market: top.mainPick, source: top.valuePick?.bookmaker, oddsBasis: "Maç önü oranı + canlı skor/istatistik" }] : [], telegram };
+}
+
+// Otomatik tarama ve panelden gelen manuel istekler aynı pahalı canlı taramayı
+// eşzamanlı başlatmasın. Devam eden tarama varsa yeni çağrı aynı sonucu bekler.
+let liveGoalAnalysisInFlight = null;
+async function buildNextGoalAnalysis(options = {}) {
+  if (liveGoalAnalysisInFlight) {
+    console.log("[LIVE SCAN JOIN] Devam eden canlı taramaya bağlanıldı; ikinci API taraması açılmadı.");
+    return liveGoalAnalysisInFlight;
+  }
+  const task = buildNextGoalAnalysisInternal(options);
+  liveGoalAnalysisInFlight = task;
+  try {
+    return await task;
+  } finally {
+    if (liveGoalAnalysisInFlight === task) liveGoalAnalysisInFlight = null;
+  }
 }
 
 async function liveCouponHandler(_req, res) {
