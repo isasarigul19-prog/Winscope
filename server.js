@@ -1540,11 +1540,11 @@ function chooseFormFallbackMarket(mode, fixture, forms, excludeMarket = null) {
   if (!live) allowed = ["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR", "MS 1.5 ÜST"];
   else if (minute < 33) allowed = total === 0 ? ["İY 0.5 ÜST"] : ["İY 1.5 ÜST", "MS 1.5 ÜST"];
   else if (minute < 45) allowed = total === 0 ? ["MS 1.5 ÜST"] : ["MS 1.5 ÜST", "KG VAR", "MS 2.5 ÜST"];
-  else if (minute < 65) allowed = total === 0 ? ["MS 1.5 ÜST"] : total === 1 ? ["KG VAR"] : ["KG VAR"];
+  else if (minute < 66) allowed = total === 0 ? ["MS 1.5 ÜST"] : total === 1 ? ["KG VAR"] : ["KG VAR"];
   else if (minute <= 75) allowed = total <= 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST", "KG VAR"] : ["MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"];
   else allowed = total <= 1 ? ["MS 1.5 ÜST", "MS 2.5 ÜST"] : ["MS 2.5 ÜST", "MS 3.5 ÜST"];
-  // MS toplam gol üst marketleri 65. dakikadan önce kesinlikle açılmaz.
-  if (live && minute < 65) allowed = allowed.filter(m => !["MS 1.5 ÜST", "MS 2.5 ÜST"].includes(m));
+  // MS 1.5 / MS 2.5 canlı tercihleri 66. dakikadan önce kesinlikle açılmaz.
+  if (live && minute < 66) allowed = allowed.filter(m => !["MS 1.5 ÜST", "MS 2.5 ÜST"].includes(m));
   const thresholds = { "EV 1.5 ÜST": 45, "DEP 1.5 ÜST": 45, "MS 0.5 ÜST": 55, "MS 1.5 ÜST": 50, "MS 2.5 ÜST": 48, "MS 3.5 ÜST": 34, "KG VAR": 48, "İY 0.5 ÜST": 52, "İY 1.5 ÜST": 34 };
   const scoreObj = scorePrediction(fixture, forms.home, forms.away, null, null);
   const candidates = allowed.filter(m => m !== excludeMarket && marketConsistentWithScore(m, scoreObj))
@@ -1607,13 +1607,13 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     else if (total === 1) allowed = ["KG VAR"];
     else if (total === 2) allowed = ["KG VAR"];
     else allowed = ["MS 3.5 ÜST", "KG VAR"];
-  } else if (minute >= 60 && minute < 65) {
-    // 60–64: MS toplam gol üst marketleri kapalı; 65. dakikadan sonra yeniden değerlendir.
+  } else if (minute >= 60 && minute <= 65) {
+    // 60–65: MS 1.5 / MS 2.5 kapalı; 66. dakikadan sonra yeniden değerlendir.
     if (total === 0) allowed = ["EV 0.5 ÜST", "DEP 0.5 ÜST"];
     else if (total === 1 || total === 2) allowed = ["KG VAR"];
     else allowed = ["MS 3.5 ÜST"];
-  } else if (minute >= 65 && minute <= 70) {
-    // 65–70: 0-0 ise kalan süre ve toplam baskıya göre MS 0.5 değerlendirilebilir.
+  } else if (minute >= 66 && minute <= 70) {
+    // 66–70: 0-0 ise kalan süre ve toplam baskıya göre MS 0.5 değerlendirilebilir.
     if (total === 0) allowed = ["MS 0.5 ÜST"];
     else if (total === 1) allowed = ["MS 1.5 ÜST", "KG VAR"];
     else if (total === 2) allowed = ["MS 2.5 ÜST", "KG VAR"];
@@ -1741,7 +1741,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
       // Değer filtresi canlı oran varsa onu, yoksa açıkça etiketlenmiş maç önü oranını kullanır.
       // 1 gol varken MS 1.5 ÜST, 55. dakikadan sonra yeterli oran/form/baskı desteği varsa değerlendirilebilir.
       if (live && choice.market === "MS 1.5 ÜST" && total === 1) {
-        if (minute < 65 || minute > 70) return null;
+        if (minute < 66 || minute > 70) return null;
         if (Number(choice.odd || 0) < 1.50) return null;
         if (Number(formPct || 0) < 55) return null;
         if (Number(choice.probability || 0) < 55 || Number(choice.probability || 0) > 82) return null;
@@ -2672,9 +2672,6 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
       if (liveMarketAlreadySettled(item.market, fixture)) { rejected.settled++; continue; }
       const ms = item.market.match(/^MS ([0-9]+(?:[.,][0-9]+)?) ÜST$/);
       const ht = item.market.match(/^İY ([0-9]+(?:[.,][0-9]+)?) ÜST$/);
-      // MS toplam gol üst marketleri yalnızca 65. dakikadan itibaren açılır.
-      // Bu kontrol ana analiz motorundadır; API/Telegram hangi yolu kullanırsa kullansın geçerlidir.
-      if (ms && minute < 65) { rejected.wrongPeriod++; continue; }
       const isHomeMarket = item.market.startsWith("EV ");
       const isAwayMarket = item.market.startsWith("DEP ");
       if ((isFirstHalf && (!ht || isHomeMarket || isAwayMarket)) ||
@@ -3331,8 +3328,12 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
               chosenEvaluation?.edge >= 0.06 && chosenEvaluation?.ev >= 0.06 &&
               chosenEvaluation?.modelProbability >= 0.47 && freshAnalysis.stats?.available
             ) ? "Orta" : "Düşük";
+            const analysisScore = Number.isFinite(Number(freshAnalysis.valueScore))
+              ? Number(freshAnalysis.valueScore).toFixed(1)
+              : null;
             telegram = await sendTelegram(
-              `⚡ WINSCOPE CANLI TERCİH\n🏟️ ${top.home} VS ${top.away}\n⏱️ Dakika: ${top.minute}'\n⚽ Anlık skor: ${top.score}\n🎯 ANA TERCİH: ${top.mainPick}\n🛡️ Güven: ${confidenceLabel}\nWinScope · Canlı maç analizi`
+              `🟢 WINSCOPE CANLI TERCİH\n🏟️ ${top.home} VS ${top.away}\n⏱️ Dakika: ${top.minute}'\n⚽ Anlık skor: ${top.score}\n🎯 ANA TERCİH: ${top.mainPick}` +
+              `${analysisScore !== null ? `\n📊 Analiz puanı: ${analysisScore}` : ""}\n🛡️ Güven: ${confidenceLabel}\nWinScope · Canlı maç analizi`
             );
           } catch (sendError) {
             telegram = { sent: false, reason: sendError.message };
