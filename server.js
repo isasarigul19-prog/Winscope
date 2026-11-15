@@ -1829,13 +1829,25 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
 
     if (choice.probability < minMarketPct[choice.market]) return null;
     if (formPct != null && formPct < minFormPct[choice.market]) return null;
-    const estimatedPct = formPct == null ? Number(choice.probability) : Number(choice.probability) * 0.55 + Number(formPct) * 0.45;
+    // Maç önü seçiminde skor matrisinden gelen pazar olasılığı zorunludur.
+    const matrixPctRaw = Number(predictedScores?.matrixMarketProbabilities?.[choice.market]);
+    const matrixPct = Number.isFinite(matrixPctRaw) ? matrixPctRaw * 100 : null;
+    if (!live && matrixPct == null) return null;
+    if (!live && matrixPct < minMarketPct[choice.market]) return null;
+    const marketMatrixGap = matrixPct == null ? null : Math.abs(Number(choice.probability) - matrixPct);
+    if (!live && marketMatrixGap != null && marketMatrixGap > 15) return null;
+    // Model matrisi ana sinyal; son-5 form destekleyici; oran olasılığı sınırlı ağırlıkta.
+    const estimatedPct = matrixPct == null
+      ? (formPct == null ? Number(choice.probability) : Number(choice.probability) * 0.55 + Number(formPct) * 0.45)
+      : matrixPct * 0.65 + (formPct == null ? matrixPct : Number(formPct) * 0.25 + Number(choice.probability) * 0.10);
     const impliedPct = Number(choice.odd) > 1.01 ? 100 / Number(choice.odd) : null;
     const valueEdge = impliedPct == null ? null : estimatedPct - impliedPct;
-    // Prefer probability supported by both market and form, while rewarding genuine price value;
-    // never choose a long price merely because the odds are high.
-    const valueBonus = valueEdge == null ? 0 : Math.max(-8, Math.min(8, valueEdge * 0.45));
-    const score = choice.probability * 0.62 + (formPct == null ? 0 : formPct * 0.20) + liveBonus + valueBonus
+    const valueBonus = valueEdge == null ? 0 : Math.max(-12, Math.min(12, valueEdge * 0.85));
+    const matrixAgreementBonus = marketMatrixGap == null ? 0 : Math.max(-12, 7 - marketMatrixGap * 0.65);
+    const score = (matrixPct == null ? Number(choice.probability) * 0.25 : matrixPct * 0.42)
+      + (formPct == null ? 0 : Number(formPct) * 0.18)
+      + Number(choice.probability) * 0.12
+      + valueBonus + matrixAgreementBonus + liveBonus
       - (live && choice.market === "MS 3.5 ÜST" ? Math.max(0, minute - 65) * 0.4 : 0);
     return {
       ...choice,
@@ -4044,6 +4056,8 @@ async function runDailyAnalysisJob(job) {
           mainPick, alternative:altRow ? other : "Aralıkta doğrulanmış alternatif yok",
           selectionScore: Number.isFinite(Number(supported.score)) ? Number(supported.score) : null,
           marketProbability: Number.isFinite(Number(supported.probability)) ? Number(supported.probability) / 100 : null,
+          modelMarketProbability: Number.isFinite(Number(scores.matrixMarketProbabilities?.[mainPick]))
+            ? Number(scores.matrixMarketProbabilities[mainPick]) : null,
           marketPercentages:analysisPercentages(oddsRow, homeForm, awayForm),
           formSupport: supported?.teamFormAvailable === true ? 1 : 0,
           selectionBookmaker: supported?.bookmaker || null,
