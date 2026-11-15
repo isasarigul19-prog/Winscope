@@ -5972,34 +5972,40 @@ async function executeScoreShotJob(date, job) {
     await persistScoreShotJob(job);
     console.log(`[SCORE SHOT] WORKER START date=${date} job=${job.id}`);
     await archiveDatabaseReady;
-    console.log(`[SCORE SHOT] fixtures request date=${date}`);
-    const fixturePayload = await cachedProviderRequest(`score-shot-fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 60000);
-    const receivedFixtures = (fixturePayload.response || []).map(normalizeProviderMatch)
-      .filter(m => m.id && m.status === 'NS');
-    const fixtures = receivedFixtures.filter(isScoreShotEligibleCompetition);
-    const outsideScope = receivedFixtures.length - fixtures.length;
+    const rangeAnchor = new Date(`${date}T12:00:00+03:00`);
+    rangeAnchor.setDate(rangeAnchor.getDate() + 1);
+    const tomorrow = new Intl.DateTimeFormat('en-CA', { timeZone:'Europe/Istanbul', year:'numeric', month:'2-digit', day:'2-digit' }).format(rangeAnchor);
+    const windowStart = Date.now();
+    const windowEnd = windowStart + 24 * 60 * 60 * 1000;
+    console.log(`[SCORE SHOT] fixtures request from=${date} to=${tomorrow} window=next24h timezone=Europe/Istanbul`);
+    const fixturePayload = await cachedProviderRequest(`score-shot-fixtures-24h:${date}`, `/fixtures?from=${date}&to=${tomorrow}&timezone=Europe/Istanbul`, 60000);
+    const allFixtures = (fixturePayload.response || []).map(normalizeProviderMatch).filter(m => m.id);
+    const upcomingInWindow = allFixtures.filter(m => {
+      if (m.status !== 'NS' || !m.fixtureDate) return false;
+      const kickoff = new Date(m.fixtureDate).getTime();
+      return Number.isFinite(kickoff) && kickoff >= windowStart && kickoff <= windowEnd;
+    });
+    const fixtures = upcomingInWindow.filter(isScoreShotEligibleCompetition);
+    const outsideScope = upcomingInWindow.length - fixtures.length;
+    const outsideWindow = allFixtures.length - upcomingInWindow.length;
     job.fixtures = fixtures.length; job.outsideScope = outsideScope; job.phase = 'odds'; job.updatedAt = new Date().toISOString();
     await persistScoreShotJob(job);
-    console.log(`[SCORE SHOT] fixtures received=${(fixturePayload.response || []).length} eligible=${fixtures.length} outsideMajorOrNational=${outsideScope}`);
+    console.log(`[SCORE SHOT] fixtures received=${allFixtures.length} upcoming24h=${upcomingInWindow.length} eligible=${fixtures.length} outsideMajorOrNational=${outsideScope} outsideWindowOrStarted=${outsideWindow}`);
 
-    console.log(`[SCORE SHOT] odds page=1 request`);
-    const first = await cachedProviderRequest(`odds-date:${date}:page:1`, `/odds?date=${date}&page=1`, 15 * 60 * 1000);
-    const totalPages = Number(first.paging?.total);
-    if (!Number.isInteger(totalPages) || totalPages < 1) throw new Error(`Score Shot oran sayfalaması geçersiz: paging.total=${String(first.paging?.total)}`);
-    const oddsRows = [...(first.response || [])];
-    job.oddsPagesTotal = totalPages; job.oddsPagesDone = 1; job.oddsRows = oddsRows.length;
-    await persistScoreShotJob(job);
-    console.log(`[SCORE SHOT] odds page=1/${totalPages} rows=${(first.response || []).length}`);
-    for (let page = 2; page <= totalPages; page++) {
-      const next = await cachedProviderRequest(`odds-date:${date}:page:${page}`, `/odds?date=${date}&page=${page}`, 15 * 60 * 1000);
-      if (!Array.isArray(next.response)) throw new Error(`Score Shot oran sayfası ${page}/${totalPages} geçersiz yanıt döndürdü.`);
-      oddsRows.push(...next.response);
-      job.oddsPagesDone = page; job.oddsRows = oddsRows.length; job.updatedAt = new Date().toISOString();
-      await persistScoreShotJob(job);
-      console.log(`[SCORE SHOT] odds page=${page}/${totalPages} rows=${next.response.length} totalRows=${oddsRows.length}`);
+    // Do not download every paginated odds row when the competition/time filters
+    // found no fixtures. Fetch odds only for eligible fixtures, avoiding dozens
+    // of irrelevant pages and keeping the shared API queue available to live scans.
+    const oddsMap = new Map();
+    let oddsRowsCount = 0;
+    for (const fixture of fixtures) {
+      const payload = await cachedProviderRequest(`score-shot-odds-fixture:${fixture.id}`, `/odds?fixture=${fixture.id}`, 15 * 60 * 1000);
+      const row = (payload.response || []).find(x => Number(x.fixture?.id ?? x.fixtureId ?? x.id) === Number(fixture.id));
+      if (row) { oddsMap.set(Number(fixture.id), row); oddsRowsCount++; }
+      job.oddsPagesDone = oddsMap.size; job.oddsPagesTotal = fixtures.length; job.oddsRows = oddsRowsCount;
+      if (oddsMap.size % 5 === 0 || oddsMap.size === fixtures.length) await persistScoreShotJob(job);
+      console.log(`[SCORE SHOT] fixture odds ${oddsMap.size}/${fixtures.length} fixture=${fixture.id} found=${Boolean(row)}`);
     }
-    const oddsMap = new Map(oddsRows.filter(x => x.fixture?.id).map(x => [Number(x.fixture.id), x]));
-    console.log(`[SCORE SHOT] odds complete pages=${totalPages} rows=${oddsRows.length} uniqueFixtures=${oddsMap.size}`);
+    console.log(`[SCORE SHOT] odds complete fixtureRequests=${fixtures.length} rows=${oddsRowsCount} uniqueFixtures=${oddsMap.size}`);
 
     let oddsMatched=0, missingOdds=0, missingMarkets=0, notEligible=0, modeled=0;
     const candidates = [];
@@ -6053,7 +6059,7 @@ async function executeScoreShotJob(date, job) {
       saved += r.rowCount || 0;
     }
     const rows = await scoreShotReadRows(date);
-    const diagnostics = {fixtures:fixtures.length,outsideMajorOrNational:outsideScope,oddsPages:totalPages,oddsRows:oddsRows.length,oddsMatched,withOdds:oddsMatched,missingOdds,missingMarkets,notEligible,modeled,candidates:candidates.length,selected:selected.length,newlySaved:saved,totalSaved:rows.length,durationMs:Date.now()-startedAt};
+    const diagnostics = {fixtures:fixtures.length,outsideMajorOrNational:outsideScope,outsideWindowOrStarted:outsideWindow,windowHours:24,oddsFixtureRequests:fixtures.length,oddsRows:oddsRowsCount,oddsMatched,withOdds:oddsMatched,missingOdds,missingMarkets,notEligible,modeled,candidates:candidates.length,selected:selected.length,newlySaved:saved,totalSaved:rows.length,durationMs:Date.now()-startedAt};
     job.status = 'completed'; job.phase = 'completed'; job.diagnostics = diagnostics;
     job.updatedAt = new Date().toISOString(); job.finishedAt = job.updatedAt;
     await persistScoreShotJob(job);
