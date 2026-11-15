@@ -4622,6 +4622,40 @@ async function runEarlyFirstHalfPick() {
         }
         const chosen = sides[0];
 
+        // Güven eşiği: zayıf sinyaller (ör. 56.3) erken gol tahmini olarak kaydedilmez.
+        const EARLY_HT_MIN_SCORE = 65;
+        if (!Number.isFinite(Number(chosen.score)) || Number(chosen.score) < EARLY_HT_MIN_SCORE) {
+          console.log(`[EARLY HT REJECT] fixture=${fixture.id} reason=score_below_min score=${Number(chosen.score || 0).toFixed(1)} min=${EARLY_HT_MIN_SCORE}`);
+          continue;
+        }
+
+        // Bildirimden hemen önce fixture ID ile taze skor doğrulaması yap.
+        // Genel canlı liste/cache gecikmişse eski 0-0 skoruyla tahmin açılmasını önler.
+        try {
+          const verifyPayload = await cachedProviderRequest(
+            `early-ht-verify:${fixture.id}:${Date.now()}`,
+            `/fixtures?id=${encodeURIComponent(fixture.id)}`,
+            0
+          );
+          const verifiedRow = verifyPayload.response?.[0];
+          if (!verifiedRow) {
+            console.log(`[EARLY HT REJECT] fixture=${fixture.id} reason=fresh_fixture_missing`);
+            continue;
+          }
+          const verified = normalizeProviderMatch(verifiedRow);
+          const verifiedTotal = Number(verified.homeScore) + Number(verified.awayScore);
+          if (verified.status !== 'LIVE' || verified.periodStatus !== '1H' ||
+              !Number.isFinite(Number(verified.minute)) || Number(verified.minute) < 10 || Number(verified.minute) > 45 ||
+              !Number.isFinite(verifiedTotal) || verifiedTotal !== 0) {
+            console.log(`[EARLY HT REJECT] fixture=${fixture.id} reason=score_or_period_changed live=${verified.status}/${verified.periodStatus} minute=${verified.minute} score=${verified.homeScore}-${verified.awayScore}`);
+            continue;
+          }
+          Object.assign(fixture, verified);
+        } catch (verifyError) {
+          console.warn(`[EARLY HT VERIFY ERROR] fixture=${fixture.id}: ${verifyError.message}`);
+          continue; // doğrulanamayan skorla tahmin açma
+        }
+
         const deliveryKey = telegramDeliveryKey(fixture.id, 'early_ht', chosen.market);
         if (telegramSentKeys.has(deliveryKey)) { earlyHalfSent.add(key); continue; }
         if (databasePool) {
@@ -5004,6 +5038,24 @@ setInterval(async () => {
 
     for (const [fixtureId, tracked] of goalTrackedFixtures.entries()) {
       let match = liveById.get(fixtureId);
+      const isEarlyHalfPick = /İY erken gol tahmini \| (EV 0\.5 ÜST|DEP 0\.5 ÜST|İY 0\.5 ÜST)/i.test(String(tracked.sourceLabel || ''));
+
+      // Erken İY tahminlerinde genel canlı liste eski skor döndürebilir.
+      // Bu kayıtları her turda fixture ID ile tazeleyerek 0-0/0-1 uyuşmazlığını önle.
+      if (isEarlyHalfPick) {
+        try {
+          const direct = await cachedProviderRequest(
+            `early-ht-track:${fixtureId}:${Math.floor(Date.now() / 30000)}`,
+            `/fixtures?id=${encodeURIComponent(fixtureId)}`,
+            0
+          );
+          const row = direct.response?.[0];
+          if (row) match = normalizeProviderMatch(row);
+        } catch (lookupError) {
+          console.warn(`[EARLY HT FRESH SCORE ERROR] ${fixtureId}: ${lookupError.message}`);
+          continue;
+        }
+      }
 
       // API'nin genel canlı listesinden düşen takipli maçı fixture ID ile tekrar kontrol et.
       if (!match) {
@@ -5038,8 +5090,13 @@ setInterval(async () => {
         const firstHalfClosed = ["HT","2H","2ND HALF","FT","AET","PEN","CANC","ABD","AWD","WO"].includes(earlyStatus);
         const htHome = match.htHomeScore == null ? null : Number(match.htHomeScore);
         const htAway = match.htAwayScore == null ? null : Number(match.htAwayScore);
-        const checkHome = firstHalfClosed && htHome != null ? htHome : nowHome;
-        const checkAway = firstHalfClosed && htAway != null ? htAway : nowAway;
+        // HT/FT durumunda ilk yarı skoru API'den gelmeden kayıp kararı verme.
+        if (firstHalfClosed && (htHome == null || htAway == null)) {
+          console.warn(`[EARLY HT SETTLEMENT WAIT] fixture=${fixtureId} reason=halftime_score_missing status=${earlyStatus}`);
+          continue;
+        }
+        const checkHome = firstHalfClosed ? htHome : nowHome;
+        const checkAway = firstHalfClosed ? htAway : nowAway;
         const targetScored = earlyPickMatch[1].toUpperCase().startsWith("EV") ? checkHome > 0
           : earlyPickMatch[1].toUpperCase().startsWith("DEP") ? checkAway > 0 : (checkHome + checkAway) > 0;
         if (targetScored && (firstHalfActive || firstHalfClosed)) {
