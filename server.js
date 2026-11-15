@@ -2663,7 +2663,10 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
   // Late-match probability naturally falls with remaining time. Do not require
   // a fixed 62% chance of ANY goal before even evaluating priced markets.
   // Pre-match odds + usable current live stats + market-specific EV/edge remain mandatory.
-  if ((!stats.available && !strongGoalProfile) || !liveSignalAvailable || minute < 10 || minute > 90 || isHalftime) {
+  // WinScope canlı gol tercihleri 65. dakikadan önce üretilmez.
+  // Bu kapı analiz motorunda olduğu için API yanıtı, aday taraması ve Telegram
+  // bildirimi aynı şekilde korunur; 65'ten sonra mevcut kalite kontrolleri sürer.
+  if ((!stats.available && !strongGoalProfile) || !liveSignalAvailable || minute < 65 || minute > 90 || isHalftime) {
     rejected.weakGoalSignal = 1;
   } else {
     for (const item of markets) {
