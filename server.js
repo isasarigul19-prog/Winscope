@@ -4637,10 +4637,17 @@ async function runEarlyFirstHalfPick() {
         }
         const chosen = sides[0];
 
-        // Güven eşiği: zayıf sinyaller (ör. 56.3) erken gol tahmini olarak kaydedilmez.
-        const EARLY_HT_MIN_SCORE = 65;
-        if (!Number.isFinite(Number(chosen.score)) || Number(chosen.score) < EARLY_HT_MIN_SCORE) {
-          console.log(`[EARLY HT REJECT] fixture=${fixture.id} reason=score_below_min score=${Number(chosen.score || 0).toFixed(1)} min=${EARLY_HT_MIN_SCORE}`);
+        // Yalnızca YÜKSEK güvenli erken gol adayları gönderilir.
+        // Skor tek başına güven kanıtı değildir: son 5 İY formu, maç önü oranı
+        // ve canlı baskı verisinin tamamı mevcut olmalı.
+        const EARLY_HT_HIGH_MIN_SCORE = 75;
+        const hasStrongPressure = Number(chosen.pressure) >= 20;
+        const earlyHighConfidence =
+          Number.isFinite(Number(chosen.score)) && Number(chosen.score) >= EARLY_HT_HIGH_MIN_SCORE &&
+          Number(chosen.h5) >= 60 && Number(chosen.sample5) >= 5 &&
+          chosen.hasOdds === true && chosen.hasPressure === true && hasStrongPressure;
+        if (!earlyHighConfidence) {
+          console.log(`[EARLY HT REJECT] fixture=${fixture.id} reason=not_high_confidence score=${Number(chosen.score || 0).toFixed(1)} min=${EARLY_HT_HIGH_MIN_SCORE} h5=${chosen.h5 ?? 'NA'} sample5=${chosen.sample5 ?? 0} odds=${Boolean(chosen.hasOdds)} stats=${Boolean(chosen.hasPressure)} pressure=${Number(chosen.pressure || 0).toFixed(1)}`);
           continue;
         }
 
@@ -4694,7 +4701,8 @@ async function runEarlyFirstHalfPick() {
           `⏱️ Dakika: ${fixture.minute}' | Skor: ${fixture.homeScore || 0}-${fixture.awayScore || 0}`,
           `🎯 TERCİH: ${chosen.market}`,
           `🔥 Analizin öne çıkardığı: ${chosen.side}${chosen.team ? ` (${chosen.team})` : ''}`,
-          `📊 Analiz puanı: ${Number(chosen.score || 0).toFixed(1)}`,
+          `📊 Analiz puanı: ${Number(chosen.score || 0).toFixed(1)}/100`,
+          `🛡️ Güven: YÜKSEK`,
           `🧾 Veriler: ${dataNotes || 'Mevcut maç verileri değerlendirildi'}`,
           '📡 Tahmin canlı takip listesine eklendi.',
           'WinScope · Erken gol analizi'
