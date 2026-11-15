@@ -1428,9 +1428,25 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     htShare=0.65*formShare+0.35*ftShare;
   }
   const htHome=htTotal*htShare, htAway=htTotal*(1-htShare);
-  const htScores=dcGrid(htHome,htAway,6)
-    .filter(x=>x.home<=5&&x.away<=5)
-    .map(x=>({home:x.home,away:x.away,p:x.probability}));
+  // İY skoru artık bağımsız bir Poisson tablosundan seçilmez.
+  // Önce en olası MS skoru belirlenir; ardından o MS skoruna ulaşabilecek
+  // İY skorları, gollerin devre öncesi gerçekleşme olasılığıyla sıralanır.
+  // Böylece İY ev/deplasman golleri hiçbir zaman MS skorunu aşamaz.
+  const binomialPmf=(n,k,p)=>{
+    if(k<0||k>n) return 0;
+    let choose=1;
+    for(let i=1;i<=k;i++) choose=choose*(n-i+1)/i;
+    return choose*Math.pow(p,k)*Math.pow(1-p,n-k);
+  };
+  const htShareHome=Math.max(0.01,Math.min(0.95,htHome/Math.max(0.01,lambdaHome)));
+  const htShareAway=Math.max(0.01,Math.min(0.95,htAway/Math.max(0.01,lambdaAway)));
+  const htScores=[];
+  for(let h=0;h<=best.home;h++) for(let a=0;a<=best.away;a++){
+    htScores.push({
+      home:h,away:a,
+      p:binomialPmf(best.home,h,htShareHome)*binomialPmf(best.away,a,htShareAway)
+    });
+  }
   htScores.sort((a,b)=>b.p-a.p||(a.home+a.away)-(b.home+b.away)||b.home-a.home);
   if(htTeamFormAvailable) halfTimeBasis += " + takım bazında son 5 İY golü";
 
@@ -1473,8 +1489,10 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     scoreCondition:preferredMarket || "UNCONDITIONAL",
     scoreProbabilityType:preferredMarket ? "MARKET_CONDITIONAL_FOR_PREDICTED_SCORE" : "UNCONDITIONAL",
     unconditionalScoreProbability:Number(best.probability.toFixed(4)),
-    modelVersion:"V7_UNCONDITIONAL_SCORE_MARKET_SCENARIO_SPLIT",
-    scoreModelMethod:"DIXON_COLES_LOW_SCORE_CORRECTION",
+    modelVersion:"V8_HT_CONDITIONAL_ON_FT_SCORE",
+    scoreModelMethod:"DIXON_COLES_WITH_CONDITIONAL_HT_FT",
+    htFtConsistency:true,
+    halfTimeScoreProbability:Number((htScores[0]?.p||0).toFixed(4)),
     dixonColesRho:Number(dcRho(lambdaHome,lambdaAway).toFixed(4)),
     htTeamFormUsed:Boolean(htTeamFormAvailable),
     htFormSampleSize:{home:Number(homeForm?.htSampleSize||0),away:Number(awayForm?.htSampleSize||0)},
