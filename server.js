@@ -3127,15 +3127,27 @@ app.get("/api/coupon/daily-ai", async (req, res) => {
       Number(b._couponEvidence?.tier || 0) - Number(a._couponEvidence?.tier || 0) ||
       expected(b) - expected(a) || score(b) - score(a));
 
-    // Every qualified fixture is assigned to exactly one coupon. No fixture can repeat
-    // between reliable / alternative / surprise, and no arbitrary 3-pick cap remains.
+    // En güçlü adaylar güvenilir kupona, sonraki güçlüler alternatife gider.
+    // Sürpriz kupon yalnızca modelin açık 6+ sinyali verdiği maçlardan oluşur.
+    // Kuponlar zayıf maçlarla doldurulmaz ve maçlar kuponlar arasında tekrarlanmaz.
     const buckets = [[],[],[]];
-    ranked.forEach((a, i) => buckets[i % 3].push(a));
-    const assigned = new Set(buckets.flat().map(a => Number(a.fixtureId)));
-    if (assigned.size !== unique.length) throw new Error("AI kupon dağıtımında maç benzersizliği doğrulanamadı.");
+    const assigned = new Set();
+    const takeUnique = (target, candidates, limit) => {
+      for (const candidate of candidates) {
+        if (target.length >= limit) break;
+        const id = Number(candidate.fixtureId);
+        if (assigned.has(id)) continue;
+        target.push(candidate);
+        assigned.add(id);
+      }
+    };
+    takeUnique(buckets[0], ranked, 3);
+    takeUnique(buckets[1], ranked.slice(3), 3);
+    const surpriseCandidates = surpriseRanked.filter(a => a.sixPlusCandidate === true && Number(a.sixPlusProbability || 0) >= 0.20);
+    takeUnique(buckets[2], surpriseCandidates, 10);
     const sortBucket = (list, comparator) => [...list].sort(comparator);
     buckets[0] = sortBucket(buckets[0], (a,b) => score(b)-score(a) || Number(b.marketProbability||0)-Number(a.marketProbability||0));
-    buckets[1] = sortBucket(buckets[1], (a,b) => score(a)-score(b) || Number(b.marketProbability||0)-Number(a.marketProbability||0));
+    buckets[1] = sortBucket(buckets[1], (a,b) => score(b)-score(a) || Number(b.marketProbability||0)-Number(a.marketProbability||0));
     buckets[2] = sortBucket(buckets[2], (a,b) => expected(b)-expected(a) || score(b)-score(a));
     const toPick = a => ({
       fixtureId:Number(a.fixtureId),home:a.home,away:a.away,league:a.league,market:marketName(a),
@@ -4008,7 +4020,10 @@ async function runDailyAnalysisJob(job) {
         const supported = chooseSupportedMarket(oddsRow, "prematch", prematchFixture, forms, null, oddsRow);
         const mainPick = supported && ["KG VAR","MS 2.5 ÜST"].includes(supported.market) &&
           Number(supported.odd) >= DAILY_MARKET_ODDS_MIN && Number(supported.odd) <= DAILY_MARKET_ODDS_MAX
-          ? supported.market : market.market;
+          ? supported.market : null;
+        // Oran bandında aday bulunması tek başına tercih üretmez. Modelin
+        // desteklemediği maç günlük analize/kupona alınmaz.
+        if (!mainPick) { rejected.noSupportedMarket = (rejected.noSupportedMarket || 0) + 1; return; }
         // Ana tercih yalnızca ayrı market senaryosunu etkiler; kesin skor koşulsuz kalır.
         scores = scorePrediction(prematchFixture, homeForm, awayForm, null, oddsRow, mainPick);
         console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | unconditional=${JSON.stringify(scores.topScoreCandidates)} | marketScenario=${JSON.stringify(scores.marketScenarioCandidates)} | selectedScenario=${scores.marketScenarioScore} | model=${scores.modelVersion} fit=${scores.modelFitError} markets=${JSON.stringify(scores.marketTargetsUsed)} | pick=${mainPick} | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} | basis=${scores.scoreBasis} | HTbasis=${scores.halfTimeBasis}`);
@@ -4024,8 +4039,8 @@ async function runDailyAnalysisJob(job) {
           sixPlusProbability:scores.sixPlusProbability ?? null,
           sixPlusCandidate:scores.sixPlusCandidate === true,
           mainPick, alternative:altRow ? other : "Aralıkta doğrulanmış alternatif yok",
-          selectionScore: supported && Number.isFinite(Number(supported.selectionScore)) ? Number(supported.selectionScore) : null,
-          marketProbability: supported && Number.isFinite(Number(supported.marketProbability)) ? Number(supported.marketProbability) : null,
+          selectionScore: Number.isFinite(Number(supported.score)) ? Number(supported.score) : null,
+          marketProbability: Number.isFinite(Number(supported.probability)) ? Number(supported.probability) / 100 : null,
           marketPercentages:analysisPercentages(oddsRow, homeForm, awayForm),
           formSupport: supported?.teamFormAvailable === true ? 1 : 0,
           selectionBookmaker: supported?.bookmaker || null,
