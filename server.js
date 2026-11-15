@@ -3997,7 +3997,8 @@ async function runDailyAnalysisJob(job) {
       console.warn(`[Daily analysis odds] ${date}: toplu oran taraması tamamlanamadı; maç-bazlı güvenli yola dönülüyor: ${oddsPrefetchError.message}`);
     }
 
-    const selected = [], rejected = { noOdds:0, outsideRange:0, unbalanced:0, noForm:0, noSupportedPick:0 };
+    const selected = [], rejected = { noOdds:0, outsideRange:0, unbalanced:0, noForm:0, noSupportedPick:0, processingError:0 };
+    const dailyDiag = { scored:0, matrixLogged:0 };
     const workerCount = Math.min(4, Math.max(1, Number(process.env.DAILY_ANALYSIS_CONCURRENCY) || 3));
     let completedFixtures = 0;
     if (firstSessionCount === 0) {
@@ -4025,26 +4026,29 @@ async function runDailyAnalysisJob(job) {
         await Promise.all(batch.map(async (match) => {
           try {
         const oddsRow = dailyOddsComplete ? (dailyOddsMap.get(Number(match.id)) || null) : await getOddsForFixture(match.id, date).catch(()=>null);
-        if (!oddsRow) { rejected.noOdds++; return; }
+        if (!oddsRow) { rejected.noOdds++; console.log(`[Daily reject] fixture=${match.id} ${match.home} vs ${match.away} reason=NO_PREMATCH_ODDS`); return; }
         const market = dailyMarketCandidate(oddsRow);
-        if (!market) { rejected.outsideRange++; return; }
+        if (!market) { rejected.outsideRange++; console.log(`[Daily reject] fixture=${match.id} ${match.home} vs ${match.away} reason=NO_MARKET_IN_ODDS_RANGE_${DAILY_MARKET_ODDS_MIN}_${DAILY_MARKET_ODDS_MAX}`); return; }
         const balance = dailyOpponentBalance(oddsRow);
-        if (!balance.balanced) { rejected.unbalanced++; return; }
+        if (!balance.balanced) { rejected.unbalanced++; console.log(`[Daily reject] fixture=${match.id} ${match.home} vs ${match.away} reason=UNBALANCED_PREMATCH_ODDS details=${JSON.stringify(balance)}`); return; }
         const [homeForm, awayForm] = await Promise.all([
           fetchTeamRecentForm(match.homeId, match.id, match.leagueId, match.season, "home"),
           fetchTeamRecentForm(match.awayId, match.id, match.leagueId, match.season, "away")
         ]);
-        if (!homeForm?.available || !awayForm?.available) { rejected.noForm++; return; }
+        if (!homeForm?.available || !awayForm?.available) { rejected.noForm++; console.log(`[Daily reject] fixture=${match.id} ${match.home} vs ${match.away} reason=RECENT_FORM_UNAVAILABLE home=${Boolean(homeForm?.available)} away=${Boolean(awayForm?.available)}`); return; }
         const prematchFixture = { ...match, status:"NS", minute:null, homeScore:0, awayScore:0, htHomeScore:null, htAwayScore:null };
         let scores = scorePrediction(prematchFixture, homeForm, awayForm, null, oddsRow);
         const forms = { home:homeForm, away:awayForm };
+        dailyDiag.scored++;
         const supported = chooseSupportedMarket(oddsRow, "prematch", prematchFixture, forms, null, oddsRow);
+        console.log(`[Daily matrix diagnostic] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | candidate=${JSON.stringify(market)} | balance=${JSON.stringify(balance)} | matrixMarkets=${JSON.stringify(scores.matrixMarketProbabilities)} | supported=${JSON.stringify(supported)}`);
+        dailyDiag.matrixLogged++;
         const mainPick = supported && ["KG VAR","MS 2.5 ÜST"].includes(supported.market) &&
           Number(supported.odd) >= DAILY_MARKET_ODDS_MIN && Number(supported.odd) <= DAILY_MARKET_ODDS_MAX
           ? supported.market : null;
         // Oran bandında aday bulunması tek başına tercih üretmez. Modelin
         // desteklemediği maç günlük analize/kupona alınmaz.
-        if (!mainPick) { rejected.noSupportedMarket = (rejected.noSupportedMarket || 0) + 1; return; }
+        if (!mainPick) { rejected.noSupportedPick++; console.log(`[Daily reject] fixture=${match.id} ${match.home} vs ${match.away} reason=MODEL_DID_NOT_SUPPORT_KGVAR_OR_OVER25 supported=${JSON.stringify(supported)} matrixMarkets=${JSON.stringify(scores.matrixMarketProbabilities)}`); return; }
         // Ana tercih yalnızca ayrı market senaryosunu etkiler; kesin skor koşulsuz kalır.
         scores = scorePrediction(prematchFixture, homeForm, awayForm, null, oddsRow, mainPick);
         console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | unconditional=${JSON.stringify(scores.topScoreCandidates)} | marketScenario=${JSON.stringify(scores.marketScenarioCandidates)} | selectedScenario=${scores.marketScenarioScore} | model=${scores.modelVersion} fit=${scores.modelFitError} markets=${JSON.stringify(scores.marketTargetsUsed)} | matrixMarkets=${JSON.stringify(scores.matrixMarketProbabilities)} | pick=${mainPick} | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} | basis=${scores.scoreBasis} | HTbasis=${scores.halfTimeBasis}`);
@@ -4129,7 +4133,8 @@ async function runDailyAnalysisJob(job) {
         job.selected = selected.length;
           } catch (err) {
             console.warn(`[Daily analysis] fixture=${match.id}: ${err.message}`);
-            rejected.noSupportedPick++;
+            rejected.processingError++;
+            console.warn(`[Daily analysis fixture error] fixture=${match.id} ${match.home} vs ${match.away}: ${err.stack || err.message}`);
           }
         }));
 
@@ -4139,7 +4144,7 @@ async function runDailyAnalysisJob(job) {
         job.updatedAt = new Date().toISOString();
         if (completedFixtures % 5 < batch.length || completedFixtures === fixtures.length) {
           await persistDailyAnalysisRun(job);
-          console.log(`[Daily analysis progress] ${date}: ${completedFixtures}/${job.total} · ${job.currentMatch} · seçilen=${selected.length} · workers=${workerCount}`);
+          console.log(`[Daily analysis progress] ${date}: ${completedFixtures}/${job.total} · ${job.currentMatch} · seçilen=${selected.length} · workers=${workerCount} · rejected=${JSON.stringify(rejected)} · matrixLogged=${dailyDiag.matrixLogged}`);
         }
       }
     }
@@ -4156,6 +4161,7 @@ async function runDailyAnalysisJob(job) {
       filters:{ leagues:"Kadın ve U/yaş grubu takımları hariç tüm ligler", oddsMin:DAILY_MARKET_ODDS_MIN, oddsMax:DAILY_MARKET_ODDS_MAX, balancedOpponents:true },
       persistentStorage:Boolean(databasePool) };
     job.status = "completed";
+    console.log(`[Daily analysis summary] ${date} | fixtures=${fixtures.length} | selected=${selected.length} | rejected=${JSON.stringify(rejected)} | diagnostics=${JSON.stringify(dailyDiag)} | oddsPages=${reportedOddsPages} oddsRows=${dailyOddsMap.size}`);
     await persistDailyAnalysisRun(job);
   } catch (error) {
     job.status = "failed";
