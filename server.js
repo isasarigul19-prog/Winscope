@@ -1673,7 +1673,10 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     // Maç önü ilk yarı oranı, canlı dakikaya uygun fiyat değildir; canlı HT marketlerinde kullanma.
     !(live && x.oddsTiming !== "live" && x.market.startsWith("İY ")) &&
     (!live || !liveMarketAlreadySettled(x.market, fixture)) &&
-    (live || marketConsistentWithScore(x.market, predictedScores)));
+    // Maç önü marketini tek bir en olası skorla eleme: 1-1 en yüksek skor
+    // olsa bile bu, KG VAR/MS 2.5 olasılığını tek başına geçersiz kılmaz.
+    // Pazar desteği aşağıda tüm piyasa olasılığı + form ile puanlanır.
+    true);
   const statsM = stats || { available: false, pressure: 0, home: {}, away: {} };
   const favorite = (() => {
     const winners = preMarkets.filter(x => x.market === "MS 1");
