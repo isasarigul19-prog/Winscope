@@ -5827,10 +5827,51 @@ function scoreShotFit(market) {
     predictedFt:`${pickedFt.home}-${pickedFt.away}`,exactProbability:Number((pickedFt.p*100).toFixed(2)),
     predictedHt:`${pickedHt.home}-${pickedHt.away}`};
 }
+// Score Shot kapsamı: yalnızca A milli takım karşılaşmaları ve seçilmiş majör
+// kulüp ligleri. Bu filtre yalnızca skor tahmini modülüne uygulanır; canlı maç,
+// kupon ve diğer analiz havuzlarının kapsamını değiştirmez.
+const SCORE_SHOT_MAJOR_LEAGUE_IDS = new Set([
+  2, 3, 848,                         // UEFA Champions / Europa / Conference League
+  39, 40, 140, 78, 135, 61, 203,     // Big 5 + Championship + Süper Lig
+  88, 94, 144, 179, 207, 218, 119,   // Netherlands, Portugal, Belgium, Scotland, Switzerland, Austria, Denmark
+  197, 106, 128, 71, 253, 307,       // Greece, Poland, Argentina, Brazil, MLS, Saudi Pro League
+  98, 292, 262                       // Japan, Korea, Mexico
+]);
+const SCORE_SHOT_MAJOR_LEAGUE_NAMES = new Set([
+  "premier league", "championship", "la liga", "bundesliga", "serie a", "ligue 1",
+  "super lig", "süper lig", "eredivisie", "primeira liga", "jupiler pro league",
+  "scottish premiership", "bundesliga austria", "ekstraklasa", "liga profesional argentina",
+  "brasileirão série a", "major league soccer", "mls", "saudi pro league",
+  "j1 league", "k league 1", "liga mx", "uefa champions league", "uefa europa league",
+  "uefa conference league"
+]);
+// API-Football A milli takım organizasyonları: Dünya Kupası, kıta turnuvaları,
+// Milletler Ligi, Gold Cup, elemeler ve A milli takım dostluk maçları.
+const SCORE_SHOT_NATIONAL_LEAGUE_IDS = new Set([1, 4, 5, 6, 7, 9, 10, 22, 29, 30, 31, 32, 33, 34]);
+const SCORE_SHOT_NATIONAL_LEAGUE_NAMES = new Set([
+  "fifa world cup", "world cup", "uefa european championship", "european championship",
+  "uefa nations league", "nations league", "africa cup of nations", "asian cup",
+  "copa america", "concacaf gold cup", "world cup - qualification", "world cup qualification",
+  "friendlies"
+]);
+function isScoreShotEligibleCompetition(match) {
+  if (!match || isExcludedAnalysisCompetition(match)) return false;
+  const leagueId = Number(match.leagueId || match.league_id || 0);
+  const leagueName = String(match.league || match.league_name || "")
+    .toLocaleLowerCase("en").replace(/[’']/g, " ").replace(/[._-]+/g, " ")
+    .replace(/\s+/g, " ").trim();
+  return SCORE_SHOT_MAJOR_LEAGUE_IDS.has(leagueId) ||
+    SCORE_SHOT_MAJOR_LEAGUE_NAMES.has(leagueName) ||
+    SCORE_SHOT_NATIONAL_LEAGUE_IDS.has(leagueId) ||
+    SCORE_SHOT_NATIONAL_LEAGUE_NAMES.has(leagueName);
+}
 async function scoreShotReadRows(date) {
   const q=await databasePool.query(`SELECT fixture_id,kickoff_at,league,home_team,away_team,predicted_ht,predicted_ft,top_scores,model_data,selection_score,exact_probability,actual_ht,actual_ft,ht_hit,ft_hit,top3_hit,settled_at,created_at
     FROM winscope_score_shot_predictions WHERE match_date=$1 ORDER BY selection_score DESC,kickoff_at NULLS LAST`,[date]);
-  return q.rows;
+  // Daha önce geniş kapsamla kaydedilmiş alt lig tahminleri de ekranda gösterilmez.
+  return q.rows.filter(row => isScoreShotEligibleCompetition({
+    league:row.league, home:row.home_team, away:row.away_team
+  }));
 }
 
 // Score Shot jobs are stored in PostgreSQL, not process memory. Any Render instance can claim work.
@@ -5895,11 +5936,13 @@ async function executeScoreShotJob(date, job) {
     await archiveDatabaseReady;
     console.log(`[SCORE SHOT] fixtures request date=${date}`);
     const fixturePayload = await cachedProviderRequest(`score-shot-fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 60000);
-    const fixtures = (fixturePayload.response || []).map(normalizeProviderMatch)
-      .filter(m => m.id && m.status === 'NS' && !isExcludedAnalysisCompetition(m));
-    job.fixtures = fixtures.length; job.phase = 'odds'; job.updatedAt = new Date().toISOString();
+    const receivedFixtures = (fixturePayload.response || []).map(normalizeProviderMatch)
+      .filter(m => m.id && m.status === 'NS');
+    const fixtures = receivedFixtures.filter(isScoreShotEligibleCompetition);
+    const outsideScope = receivedFixtures.length - fixtures.length;
+    job.fixtures = fixtures.length; job.outsideScope = outsideScope; job.phase = 'odds'; job.updatedAt = new Date().toISOString();
     await persistScoreShotJob(job);
-    console.log(`[SCORE SHOT] fixtures received=${(fixturePayload.response || []).length} eligible=${fixtures.length}`);
+    console.log(`[SCORE SHOT] fixtures received=${(fixturePayload.response || []).length} eligible=${fixtures.length} outsideMajorOrNational=${outsideScope}`);
 
     console.log(`[SCORE SHOT] odds page=1 request`);
     const first = await cachedProviderRequest(`odds-date:${date}:page:1`, `/odds?date=${date}&page=1`, 15 * 60 * 1000);
@@ -5968,7 +6011,7 @@ async function executeScoreShotJob(date, job) {
       saved += r.rowCount || 0;
     }
     const rows = await scoreShotReadRows(date);
-    const diagnostics = {fixtures:fixtures.length,oddsPages:totalPages,oddsRows:oddsRows.length,oddsMatched,withOdds:oddsMatched,missingOdds,missingMarkets,notEligible,modeled,candidates:candidates.length,selected:selected.length,newlySaved:saved,totalSaved:rows.length,durationMs:Date.now()-startedAt};
+    const diagnostics = {fixtures:fixtures.length,outsideMajorOrNational:outsideScope,oddsPages:totalPages,oddsRows:oddsRows.length,oddsMatched,withOdds:oddsMatched,missingOdds,missingMarkets,notEligible,modeled,candidates:candidates.length,selected:selected.length,newlySaved:saved,totalSaved:rows.length,durationMs:Date.now()-startedAt};
     job.status = 'completed'; job.phase = 'completed'; job.diagnostics = diagnostics;
     job.updatedAt = new Date().toISOString(); job.finishedAt = job.updatedAt;
     await persistScoreShotJob(job);
