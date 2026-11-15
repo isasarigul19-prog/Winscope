@@ -1611,7 +1611,7 @@ function liveMarketAlreadySettled(market, fixture) {
   return false;
 }
 
-function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOddsRow, excludeMarket = null, preferredMarket = null) {
+function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOddsRow, excludeMarket = null, preferredMarket = null, dailyStrictMarket = false) {
   const live = mode === "live";
   const total = Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0);
   const minute = Number(fixture.minute || 0);
@@ -1677,6 +1677,10 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
      (Number(x.awayOdd) < 1.30 && Number(x.homeOdd) > 7.00))
   );
   const choices = mergedMarketRows.filter(x => allowed.includes(x.market) && x.market !== excludeMarket &&
+    // Günlük analizde yalnızca ön elemeden geçen aynı pazar ve gerçek 1.50–1.73 fiyatı değerlendirilir.
+    // Böylece başka bookmaker'daki 1.45 gibi bant dışı bir satır, uygun adayın yerine seçilip
+    // daha sonra mainPick kontrolünde bütün maçı yanlışlıkla reddettirmez.
+    (!dailyStrictMarket || (x.market === preferredMarket && Number(x.odd) >= DAILY_MARKET_ODDS_MIN && Number(x.odd) <= DAILY_MARKET_ODDS_MAX)) &&
     // KG VAR için gerçek maç önü fiyatı 1.50–1.73 bandında olmalı.
     !(x.market === "KG VAR" && !prematchBttsInRange) &&
     // Favori <1.30 ve rakip >7.00 ise takımlar arası güç farkı aşırı: KG VAR'ı ele.
@@ -4043,7 +4047,7 @@ async function runDailyAnalysisJob(job) {
         let scores = scorePrediction(prematchFixture, homeForm, awayForm, null, oddsRow);
         const forms = { home:homeForm, away:awayForm };
         dailyDiag.scored++;
-        const supported = chooseSupportedMarket(oddsRow, "prematch", prematchFixture, forms, null, oddsRow);
+        const supported = chooseSupportedMarket(oddsRow, "prematch", prematchFixture, forms, null, oddsRow, null, market.market, true);
         console.log(`[Daily matrix diagnostic] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | candidate=${JSON.stringify(market)} | balance=${JSON.stringify(balance)} | matrixMarkets=${JSON.stringify(scores.matrixMarketProbabilities)} | supported=${JSON.stringify(supported)}`);
         dailyDiag.matrixLogged++;
         const mainPick = supported && ["KG VAR","MS 2.5 ÜST"].includes(supported.market) &&
