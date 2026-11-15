@@ -868,7 +868,7 @@ function oddsForFixture(oddsRow, { includeFirstHalfBtts = false } = {}) {
         if (isHomeTeam && [0.5, 1.5].includes(Number(line))) key = `EV ${line} ÜST`;
         else if (isAwayTeam && [0.5, 1.5].includes(Number(line))) key = `DEP ${line} ÜST`;
         else if (isHalf && [0.5, 1.5, 2.5].includes(Number(line))) key = `İY ${line} ÜST`;
-        else if (isTotal && [0.5, 1.5, 2.5, 3.5, 4.5, 5.5].includes(Number(line))) key = `MS ${line} ÜST`;
+        else if (isTotal && [0.5, 1.5, 2.5, 3.5, 5.5].includes(Number(line))) key = `MS ${line} ÜST`;
         if (key) add(book, key, side, odd);
       }
     }
@@ -1633,11 +1633,17 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
   }
 
   const h = forms.home, a = forms.away;
-  // WinScope politikası: canlı analizde de yalnızca maç önü oranı fiyat/dayanak olur.
-  // Canlı skor, dakika ve istatistikler olasılığı günceller; /odds/live hiçbir seçimde kullanılmaz.
+  // Canlı maçta gerçek canlı oran önceliklidir. İlk yarıda takım bağımsız İY gol marketleri değerlendirilir.
+  // Kaynak oddsTiming ile etiketlenir; ham oranlar kullanıcıya gösterilmez.
+  const liveMarketRows = live ? oddsForFixture(oddsRow || null) : [];
   const preMarkets = oddsForFixture(prematchOddsRow || (!live ? oddsRow : null) || null);
-  const predictedScores = scorePrediction(fixture, h, a, null, prematchOddsRow || (!live ? oddsRow : null) || null);
-  const mergedMarketRows = preMarkets.map(x => ({ ...x, oddsTiming: "prematch" }));
+  // Initialize before scorePrediction reads it; otherwise live analysis throws a TDZ error.
+  const useLiveOdds = live && liveMarketRows.length > 0;
+  const predictedScores = scorePrediction(fixture, h, a, useLiveOdds ? oddsRow : null, prematchOddsRow || (!live ? oddsRow : null) || null);
+  const liveAllowedRows = liveMarketRows.filter(x => allowed.includes(x.market));
+  const mergedMarketRows = live
+    ? liveAllowedRows.map(x => ({ ...x, oddsTiming: "live" }))
+    : preMarkets.map(x => ({ ...x, oddsTiming: "prematch" }));
   // Maç önü KG VAR fiyatını hem maç önü hem canlı KG VAR kararında kontrol et.
   // Aynı bookmaker'dan gelen MS 1X2 oranlarında aşırı favori farkını da tespit et.
   const prematchBttsInRange = preMarkets.some(x =>
@@ -1653,6 +1659,8 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
     !(x.market === "KG VAR" && !prematchBttsInRange) &&
     // Favori <1.30 ve rakip >7.00 ise takımlar arası güç farkı aşırı: KG VAR'ı ele.
     !(x.market === "KG VAR" && hasExtremeFavoriteGap) &&
+    // Maç önü ilk yarı oranı, canlı dakikaya uygun fiyat değildir; canlı HT marketlerinde kullanma.
+    !(live && x.oddsTiming !== "live" && x.market.startsWith("İY ")) &&
     (!live || !liveMarketAlreadySettled(x.market, fixture)) &&
     (live || marketConsistentWithScore(x.market, predictedScores)));
   const statsM = stats || { available: false, pressure: 0, home: {}, away: {} };
@@ -1701,7 +1709,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
         liveBonus += Math.min(14, sidePressure * 0.55);
       }
 
-      // Seçim puanında kullanılan piyasa olasılığı maç önü oranından gelir.
+      // Canlı piyasa olasılığı seçim puanında kullanılır; maç önü oranı scorePrediction içinde referans olarak kalır.
 
       // 40. dakikadan sonra HT üst tercihlerini kapat; kalan süre çok kısa.
       if (choice.market.startsWith("İY ") && minute >= 40) return null;
@@ -1730,7 +1738,7 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
       if (choice.market === "MS 2.5 ÜST" && total >= 3) return null;
       if (choice.market === "MS 3.5 ÜST" && total >= 4) return null;
 
-      // Değer filtresi yalnızca maç önü oranını kullanır.
+      // Değer filtresi canlı oran varsa onu, yoksa açıkça etiketlenmiş maç önü oranını kullanır.
       // 1 gol varken MS 1.5 ÜST, 55. dakikadan sonra yeterli oran/form/baskı desteği varsa değerlendirilebilir.
       if (live && choice.market === "MS 1.5 ÜST" && total === 1) {
         if (minute < 66 || minute > 70) return null;
@@ -2394,27 +2402,42 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
     try {
       let marketOddsRow = null, prematchOddsRow = null, oddsBasis = "";
       if (isLiveMode) {
-        const [prePayload, statsPayload, homeForm, awayForm] = await Promise.all([
+        const [prePayload, liveOddsPayload, statsPayload, homeForm, awayForm] = await Promise.all([
           cachedProviderRequest(`odds-fixture:${fixture.id}`, `/odds?fixture=${fixture.id}`, 90000).catch(()=>({response:[]})),
+          cachedProviderRequest(`odds-live-fixture:${fixture.id}`, `/odds/live?fixture=${fixture.id}`, 8000).catch(()=>({response:[]})),
           cachedProviderRequest(`stats:${fixture.id}`, `/fixtures/statistics?fixture=${fixture.id}`, 10000),
           fetchTeamRecentForm(fixture.homeId, fixture.id, fixture.leagueId, fixture.season, "home"),
           fetchTeamRecentForm(fixture.awayId, fixture.id, fixture.leagueId, fixture.season, "away")
         ]);
-        prematchOddsRow = (prePayload.response || []).find(row=>Number(row.fixture?.id ?? row.fixture?.fixture?.id ?? row.fixtureId ?? row.id)===fixture.id) || null;
-        marketOddsRow = prematchOddsRow; // Kullanıcı tercihi: yalnızca maç önü oranı.
+        prematchOddsRow = (prePayload.response || []).find(row=>Number(row.fixture?.id)===fixture.id) || null;
+        // Live odds providers may return a fixture in the bulk live feed even when
+        // the fixture-specific query is empty. Check both shapes, without substituting
+        // pre-match odds for a live price in the live selection logic.
+        let liveOddsRow = (liveOddsPayload.response || []).find(row=>Number(row.fixture?.fixture?.id ?? row.fixture?.id ?? row.fixtureId ?? row.id)===fixture.id) || null;
+        if (!liveOddsRow) {
+          try {
+            const allLiveOddsPayload = await cachedProviderRequest("odds-live-all", "/odds/live", 10000);
+            liveOddsRow = (allLiveOddsPayload.response || []).find(row=>Number(row.fixture?.fixture?.id ?? row.fixture?.id ?? row.fixtureId ?? row.id)===fixture.id) || null;
+            console.log(`[LIVE ODDS BULK CHECK] ${JSON.stringify({match:`${fixture.home} - ${fixture.away}`,fixtureId:fixture.id,fixtureQueryResults:(liveOddsPayload.response||[]).length,bulkResults:(allLiveOddsPayload.response||[]).length,bulkMatchFound:Boolean(liveOddsRow)})}`);
+          } catch (e) {
+            console.warn(`[LIVE ODDS BULK ERROR] fixture=${fixture.id}: ${e.message}`);
+          }
+        }
+        marketOddsRow = liveOddsRow; // Canlı tercih için maç önü oranı kesinlikle yedek olamaz.
         const statsRows = statsPayload.response || [];
         const stats = liveStatsMetrics(statsRows, fixture);
         if (!marketOddsRow) {
           rejected.noOdds++;
-          console.warn(`[LIVE ODDS MISSING] ${JSON.stringify({match:`${fixture.home} - ${fixture.away}`,fixtureId:fixture.id,prematchOddsResults:(prePayload.response||[]).length,prematchOddsFound:Boolean(prematchOddsRow),statsRows:statsRows.length,statsAvailable:stats.available})}`);
+          console.warn(`[LIVE ODDS MISSING] ${JSON.stringify({match:`${fixture.home} - ${fixture.away}`,fixtureId:fixture.id,liveOddsResults:(liveOddsPayload.response||[]).length,prematchOddsFound:Boolean(prematchOddsRow),statsRows:statsRows.length,statsAvailable:stats.available})}`);
           continue;
         }
         if (!homeForm.available || !awayForm.available) { rejected.noForm++; continue; }
-        // Canlı istatistikler yardımcı sinyaldir; oran kaynağı yalnızca maç önüdür. İstatistik değerleri hiçbir zaman tahmin edilmez.
-        const chosen = chooseSupportedMarket(prematchOddsRow, mode, fixture, {home:homeForm,away:awayForm}, stats, prematchOddsRow);
+        // Canlı istatistikler yardımcı sinyaldir; eksik olduklarında takım formu + gerçek canlı oranla
+        // daha yüksek eşik kullanılır. İstatistik değerleri hiçbir zaman tahmin edilmez.
+        const chosen = chooseSupportedMarket(liveOddsRow, mode, fixture, {home:homeForm,away:awayForm}, stats, prematchOddsRow);
         if (!chosen) { rejected.noSignal++; continue; }
-        oddsBasis = `Maç önü oranı · ${chosen.bookmaker}`;
-        const alternative = teamGoalAlternative(fixture, {home:homeForm, away:awayForm}, stats, null, prematchOddsRow);
+        oddsBasis = `Gerçek canlı oran · ${chosen.bookmaker}`;
+        const alternative = teamGoalAlternative(fixture, {home:homeForm, away:awayForm}, stats, liveOddsRow, prematchOddsRow);
         candidates.push({
           fixtureId: fixture.id, league: fixture.league, country: fixture.country,
           home: fixture.home, away: fixture.away, fixtureDate: fixture.fixtureDate,
@@ -2550,7 +2573,7 @@ app.get("/api/health", (_req, res) => res.json({
   ok: true, apiKeyConfigured: Boolean(API_KEY),
   telegramConfigured: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
   databaseConfigured: Boolean(databasePool),
-  provider: "API-Football", oddsPolicy: "pre-match odds only for all selections; live score/statistics update probabilities; live odds are never requested or used", livePolicy: "period-aware; settled markets excluded; fresh fixture/odds recheck before Telegram", teamFormPolicy: "last five completed matches plus cached league-season home/away goal averages", oddsValuesHidden: true
+  provider: "API-Football", oddsPolicy: "pre-match odds for pre-match analysis; live analysis uses pre-match odds plus current live score/statistics; live odds are never used", livePolicy: "period-aware; settled markets excluded; fresh fixture/odds recheck before Telegram", teamFormPolicy: "last five completed matches plus cached league-season home/away goal averages", oddsValuesHidden: true
 }));
 
 // Compatibility route used by the current index.html live-goal button.
@@ -2808,6 +2831,12 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
         stats.available && activeStats &&
         edge >= 0.06 && ev >= 0.06 && modelProbability >= minProbability + 0.05
       ) ? "MEDIUM" : "LOW";
+      // WinScope yalnızca tüm yüksek güven koşullarını karşılayan adayları yayınlar.
+      // Düşük/orta güvenli adaylar Telegram'a ve otomatik tercih listesine alınmaz.
+      if (confidence !== "HIGH") {
+        rejected.lowConfidence = (rejected.lowConfidence || 0) + 1;
+        continue;
+      }
       candidates.push({ market: item.market, bookmaker: item.bookmaker, modelProbability, marketProbability, edge, ev,
         odd, confidence, statsAvailable: stats.available, teamFormAvailable: formsAvailable, strongGoalProfile,
         minEdgeRequired: minEdge, minEVRequired: minEv, scenarioSide, selectionScore: score });
@@ -2857,6 +2886,8 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
     fixtureId: fixture.id, currentScore: `${homeGoals}-${awayGoals}`, minute, periodStatus: phase,
     mainPick: chosen?.market || null, alternative: candidates[1]?.market || null,
     source: chosen?.bookmaker || null, valueScore: chosen?.ev ?? null, edge: chosen?.edge ?? null,
+    modelProbability: chosen?.modelProbability ?? null,
+    analysisScore: chosen ? Math.round(chosen.modelProbability * 100) : null,
     oddsTiming: (prematchOddsRow || liveOddsRow) ? "prematch" : "unavailable",
     stats: { available: stats.available, totalShots: stats.totalShots, shotsOnTarget: stats.shotsOnTarget, corners: stats.corners,
       pressure: Number((stats.pressure || 0).toFixed(1)), home: stats.home, away: stats.away },
@@ -3305,12 +3336,15 @@ async function buildNextGoalAnalysis({ sendTelegramMessage = false } = {}) {
               chosenEvaluation?.edge >= 0.06 && chosenEvaluation?.ev >= 0.06 &&
               chosenEvaluation?.modelProbability >= 0.47 && freshAnalysis.stats?.available
             ) ? "Orta" : "Düşük";
-            const analysisScore = Number.isFinite(Number(freshAnalysis.valueScore))
-              ? Number(freshAnalysis.valueScore).toFixed(1)
-              : null;
+            const goalProbability = Number.isFinite(Number(freshAnalysis.modelProbability))
+              ? `${(Number(freshAnalysis.modelProbability) * 100).toFixed(1)}%`
+              : "Hesaplanamadı";
+            const valueAdvantage = Number.isFinite(Number(freshAnalysis.edge))
+              ? `${(Number(freshAnalysis.edge) * 100).toFixed(1)}%`
+              : "Hesaplanamadı";
             telegram = await sendTelegram(
               `🟢 WINSCOPE CANLI TERCİH\n🏟️ ${top.home} VS ${top.away}\n⏱️ Dakika: ${top.minute}'\n⚽ Anlık skor: ${top.score}\n🎯 ANA TERCİH: ${top.mainPick}` +
-              `${analysisScore !== null ? `\n📊 Analiz puanı: ${analysisScore}` : ""}\n🛡️ Güven: ${confidenceLabel}\nWinScope · Canlı maç analizi`
+              `\n📊 Model gol olasılığı: ${goalProbability}\n📈 Piyasa avantajı: +${valueAdvantage}\n🛡️ Güven: ${confidenceLabel}\nWinScope · Canlı maç analizi`
             );
           } catch (sendError) {
             telegram = { sent: false, reason: sendError.message };
@@ -4573,22 +4607,14 @@ async function runEarlyFirstHalfPick() {
           const h10 = Number(form?.htTeamScoredPct);
           const h5 = Number(form?.recent?.htTeamScoredPct);
           const sample5 = Number(form?.recent?.htSampleSize || 0);
-          const sample10 = Number(form?.htSampleSize || 0);
-          const has10 = Number.isFinite(h10) && sample10 >= 8;
+          const has10 = Number.isFinite(h10);
           const has5 = Number.isFinite(h5) && sample5 >= 5;
-          // Önceki sonuçlarda %50 eşiği fazla gevşek kaldı; son 5 İY gol oranı en az %60 olmalı.
-          if (!has5 || h5 < 60 || (has10 && h10 < 55)) return null;
-          const oddsProb = Number(market?.probability);
-          const hasOdds = Number.isFinite(oddsProb) && Number(market?.odd) >= 1.50;
-          const shotsOnTarget = Number(live?.shotsOnTarget || 0);
-          const totalShots = Number(live?.totalShots || 0);
-          const corners = Number(live?.corners || 0);
-          const pressure = shotsOnTarget * 12 + totalShots * 3 + corners * 5;
-          const hasPressure = Boolean(stats.available) &&
-            (shotsOnTarget >= 1 || totalShots >= 4 || corners >= 2) && pressure >= 17;
-          // Oran veya seçilen takımın gerçek baskısı yoksa erken gol bildirimi üretme.
-          if (!hasOdds || !hasPressure) return null;
+          if (!has5 || h5 <= 50) return null;
           const profile = has10 ? h10 * 0.35 + h5 * 0.65 : h5;
+          const oddsProb = Number(market?.probability);
+          const hasOdds = Number.isFinite(oddsProb);
+          const pressure = Number(live?.shotsOnTarget || 0) * 12 + Number(live?.totalShots || 0) * 3 + Number(live?.corners || 0) * 5;
+          const hasPressure = Boolean(stats.available);
           const parts = [{ value: profile, weight: 0.65 }];
           if (hasOdds) parts.push({ value: oddsProb, weight: 0.20 });
           if (hasPressure) parts.push({ value: Math.min(100, pressure), weight: 0.15 });
@@ -4606,7 +4632,7 @@ async function runEarlyFirstHalfPick() {
 
         // Son 5 İY filtresini geçen takım yoksa (veya örneklem eksikse) alarm YOK.
         if (!sides.length) {
-          console.log(`[EARLY HT REJECT] fixture=${fixture.id} reason=last5_ht_goal_pct_missing_or_below_60 home5=${homeForm?.recent?.htTeamScoredPct ?? 'NA'} away5=${awayForm?.recent?.htTeamScoredPct ?? 'NA'} homeN=${homeForm?.recent?.htSampleSize ?? 0} awayN=${awayForm?.recent?.htSampleSize ?? 0}`);
+          console.log(`[EARLY HT REJECT] fixture=${fixture.id} reason=last5_ht_goal_pct_missing_or_le_50 home5=${homeForm?.recent?.htTeamScoredPct ?? 'NA'} away5=${awayForm?.recent?.htTeamScoredPct ?? 'NA'} homeN=${homeForm?.recent?.htSampleSize ?? 0} awayN=${awayForm?.recent?.htSampleSize ?? 0}`);
           continue;
         }
         const chosen = sides[0];
