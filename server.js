@@ -1842,13 +1842,20 @@ function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOdd
       }
     }
 
-    if (choice.probability < minMarketPct[choice.market]) return null;
+    // Daily prematch: matrix is the primary probability gate. Market probability
+    // remains a cross-check, but may sit up to 5 percentage points below the
+    // threshold when the score matrix independently clears the full threshold.
+    // Live selection keeps its original, stricter market-probability gate.
+    const marketThreshold = minMarketPct[choice.market];
+    if (dailyStrictMarket) {
+      if (Number(choice.probability) < marketThreshold - 5) return null;
+    } else if (choice.probability < marketThreshold) return null;
     if (formPct != null && formPct < minFormPct[choice.market]) return null;
     // Maç önü seçiminde gerçek skor matrisinden hesaplanan market olasılığı zorunlu.
     const matrixProbability = Number(predictedScores?.matrixMarketProbabilities?.[choice.market]);
     const matrixPct = Number.isFinite(matrixProbability) ? matrixProbability * 100 : null;
     if (!live && matrixPct == null) return null;
-    if (!live && matrixPct < minMarketPct[choice.market]) return null;
+    if (!live && matrixPct < marketThreshold) return null;
     const marketMatrixGap = matrixPct == null ? null : Math.abs(matrixPct - Number(choice.probability));
     if (!live && marketMatrixGap != null && marketMatrixGap > 15) return null;
     const estimatedPct = matrixPct == null
