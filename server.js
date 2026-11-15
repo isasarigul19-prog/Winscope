@@ -3958,6 +3958,9 @@ async function runDailyAnalysisJob(job) {
     // Fetch the full date-level odds feed once and share its cache with coupons/Score Shot.
     const dailyOddsMap = new Map();
     let dailyOddsComplete = false;
+    // Keep this value in the outer job scope: the final summary logs it
+    // after the odds-prefetch try/catch has completed.
+    let reportedOddsPages = 1;
     try {
       job.phase = "odds_prefetch";
       job.current = 0;
@@ -3969,7 +3972,7 @@ async function runDailyAnalysisJob(job) {
         `/odds?date=${encodeURIComponent(date)}&page=1`,
         15 * 60 * 1000
       );
-      const reportedOddsPages = Math.max(1, Number(firstOddsPage.paging?.total || 1));
+      reportedOddsPages = Math.max(1, Number(firstOddsPage.paging?.total || 1));
       if (!Number.isInteger(reportedOddsPages) || reportedOddsPages > 100) {
         throw new Error(`Günlük analiz oran sayfalaması güvenlik sınırını aştı: ${reportedOddsPages}`);
       }
