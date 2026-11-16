@@ -1336,12 +1336,20 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     const total=x.home+x.away;
     if(market==="KG VAR") return x.home>0&&x.away>0;
     if(market==="KG YOK") return x.home===0||x.away===0;
+    if(market==="EV 0.5 ÜST") return x.home>=1;
+    if(market==="DEP 0.5 ÜST") return x.away>=1;
     if(market==="EV 1.5 ÜST") return x.home>=2;
     if(market==="DEP 1.5 ÜST") return x.away>=2;
     if(market==="MS 0.5 ÜST") return total>=1;
     if(market==="MS 1.5 ÜST") return total>=2;
     if(market==="MS 2.5 ÜST") return total>=3;
     if(market==="MS 3.5 ÜST") return total>=4;
+    if(market==="MS 4.5 ÜST") return total>=5;
+    if(market==="MS 5.5 ÜST") return total>=6;
+    if(market==="MS 1.5 ALT") return total<=1;
+    if(market==="MS 2.5 ALT") return total<=2;
+    if(market==="MS 3.5 ALT") return total<=3;
+    if(market==="MS 4.5 ALT") return total<=4;
     return true;
   };
   // İki ayrı skor sıralaması tutulur:
@@ -1511,8 +1519,8 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     scoreCondition:preferredMarket || "UNCONDITIONAL",
     scoreProbabilityType:preferredMarket ? "MARKET_CONDITIONAL_FOR_PREDICTED_SCORE" : "UNCONDITIONAL",
     unconditionalScoreProbability:Number(best.probability.toFixed(4)),
-    modelVersion:"V9_FIXED_OVER45_MATRIX_HT_FT",
-    scoreModelMethod:"DIXON_COLES_MARKET_FIT_WITH_FIXED_OVER45_AND_CONDITIONAL_HT_FT",
+    modelVersion:"V10_MARKET_RANKING_AND_CONDITIONAL_SCORE",
+    scoreModelMethod:"DIXON_COLES_MARKET_FIT_WITH_VALUE_RANKING_AND_CONDITIONAL_SCORE",
     htFtConsistency:true,
     halfTimeScoreProbability:Number((htScores[0]?.p||0).toFixed(4)),
     dixonColesRho:Number(dcRho(lambdaHome,lambdaAway).toFixed(4)),
@@ -1645,12 +1653,17 @@ function choosePrematchOddsMarket(oddsRow, fixture, excludeMarket = null, prefer
     // User's retained price band applies to KG VAR and MS 2.5 ÜST only.
     if (["KG VAR", "MS 2.5 ÜST"].includes(market) && (odd < 1.50 || odd > 1.73)) return;
     const impliedPct = 100 / odd;
-    const edge = matrixPct - impliedPct;
+    // Model edge is measured against the de-vigged market probability;
+    // expected return uses the actual available price. Raw hit probability
+    // is deliberately not allowed to dominate the ranking.
+    const edge = matrixPct - marketPct;
+    const expectedReturnPct = (matrixPct / 100) * odd * 100 - 100;
     const agreement = Math.abs(matrixPct - marketPct);
-    const score = matrixPct * 0.62 + marketPct * 0.18
-      + Math.max(-8, Math.min(8, edge * 0.85))
-      + Math.max(-6, 5 - agreement * 0.35)
-      + (/bet365/i.test(String(bookmaker || "")) ? 1.5 : 0);
+    const score = Math.max(-20, Math.min(20, expectedReturnPct)) * 1.35
+      + Math.max(-8, Math.min(8, edge * 0.9))
+      + Math.max(-5, 4 - agreement * 0.25)
+      + Math.min(4, Math.max(0, (matrixPct - 45) * 0.08))
+      + (/bet365/i.test(String(bookmaker || "")) ? 1.0 : 0);
     candidates.push({
       market, selection, odd, probability: marketPct, matrixPct,
       estimatedPct: Number(matrixPct.toFixed(1)),
@@ -1737,11 +1750,13 @@ function choosePrematchOddsMarket(oddsRow, fixture, excludeMarket = null, prefer
     if (row.underOdd) addCandidate(market.replace("ÜST", "ALT"), "Alt", row.underOdd, 100-p, 100-matrixP, "TOTAL", row.bookmaker);
   }
 
-  // MS 4.5 ALT is retained in the parsed odds/data archive for evaluation,
-  // but it is not eligible to become the primary recommendation. The previous
-  // zeroed over45 matrix made this under look virtually certain and dominate
-  // coupons. Keep the requested goal markets and compare them normally.
-  const ranked = candidates.filter(x => x.market !== excludeMarket && x.market !== "MS 4.5 ALT")
+  // Main recommendation is restricted to the user's goal markets.
+  // All ALT sides (including 3.5 ALT) remain parsed in the source data but
+  // cannot become the primary pick. This prevents the selector merely
+  // replacing 4.5 ALT with another under line.
+  const primaryMarkets = new Set(["EV 1.5 ÜST", "DEP 1.5 ÜST", "MS 2.5 ÜST", "MS 3.5 ÜST", "KG VAR"]);
+  const ranked = candidates
+    .filter(x => x.market !== excludeMarket && primaryMarkets.has(x.market))
     .sort((a,b) => b.score-a.score || b.estimatedPct-a.estimatedPct);
   if (preferredMarket) {
     const preferred = ranked.find(x => x.market === preferredMarket);
@@ -3128,7 +3143,7 @@ app.get("/api/match/:id/analyze", async (req, res) => {
     const chosen = prematchRow
       ? chooseSupportedMarket(prematchRow, "prematch", prematchFixture, forms, null, prematchRow)
       : null;
-    if (chosen?.market) scores = scorePrediction(prematchFixture, homeForm, awayForm, null, prematchRow, chosen.market);
+    if (chosen?.market) scores = scorePrediction(prematchFixture, forms.home, forms.away, null, prematchRow, chosen.market);
     const ftMatch = String(scores.fullTimeScore || "").match(/(\d+)\s*[-:]\s*(\d+)/);
     const scoreSuggestsBtts = Boolean(ftMatch && Number(ftMatch[1]) > 0 && Number(ftMatch[2]) > 0);
     const alternative = chosen
@@ -4166,9 +4181,12 @@ async function runDailyAnalysisJob(job) {
         if (!oddsRow) { rejected.noOdds++; return; }
         const prematchFixture = { ...match, status:"NS", minute:null, homeScore:0, awayScore:0, htHomeScore:null, htAwayScore:null };
         // Maç önü kararında yalnızca gerçek maç önü oranları ve ortak skor matrisi kullanılır.
-        const scores = scorePrediction(prematchFixture, null, null, null, oddsRow);
+        let scores = scorePrediction(prematchFixture, null, null, null, oddsRow);
         const supported = chooseSupportedMarket(oddsRow, "prematch", prematchFixture, {home:null,away:null}, null, oddsRow);
         if (!supported) { rejected.noOddsMarket = (rejected.noOddsMarket || 0) + 1; return; }
+        // Refit the scenario after the main market is selected. Unconditional
+        // top scores remain available separately for honest score prediction.
+        scores = scorePrediction(prematchFixture, null, null, null, oddsRow, supported.market);
         const mainPick = supported.market;
         const alternativePick = chooseSupportedMarket(oddsRow, "prematch", prematchFixture, {home:null,away:null}, null, oddsRow, mainPick);
         const other = alternativePick?.market || null;
