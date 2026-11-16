@@ -3198,13 +3198,19 @@ app.get("/api/coupon/daily-ai", async (req, res) => {
     const coupons = [];
     const sendChunked = async (title, picks) => {
       const header = `🤖 WINSCOPE ${title.toUpperCase()} · ${picks.length} MAÇ\nTarih: ${date}\n\n`;
-      const blocks = picks.map((p,i) => `${i+1}. ${p.home} VS ${p.away}\nTercih: ${p.market}\nTahmin İY / MS: ${p.predictedHalfTimeScore||"—"} / ${p.predictedFullTimeScore||"—"}\nTercih senaryosu: ${p.predictedMarketScenarioScore||"—"}\nLig: ${p.league||"—"}\n`);
+      // Telegram coupon card: league/order, fixture, selection and odds source only.
+      const blocks = picks.map((p,i) =>
+        `${p.league || "Lig bilgisi yok"} · ${i+1}. maç\n` +
+        `${p.home} VS ${p.away}\n` +
+        `Tercih: ${p.market}\n` +
+        `Oran kaynağı: ${p.source || "Maç önü oran kaydı"}\n`
+      );
       const chunks = []; let current = header;
       for (const block of blocks) {
         if (current.length + block.length > 3500 && current !== header) { chunks.push(current); current = header; }
         current += block + "\n";
       }
-      if (current.trim()) chunks.push(current + "\nNot: Maç önü oranları ve kayıtlı analiz verileri kullanıldı. Sayısal oran gösterilmez; başarı garantisi yoktur.");
+      if (current.trim()) chunks.push(current);
       const messageIds = [];
       for (let i=0;i<chunks.length;i++) {
         const sent = await sendTelegram(chunks[i]);
@@ -5003,14 +5009,13 @@ async function sendDailyAnalysisTopThree(session, date) {
       return;
     }
     const sessionLabel=session==="early"?"GÜVENİLİR KUPON":"ALTERNATİF KUPON";
-    const lines=[`🤖 WINSCOPE ${sessionLabel} · 2 MAÇ`,`Tarih: ${date}`,"","Seçimler Günün Analizleri içindeki en yüksek doğrulanmış seçim puanına göre yapıldı.",""];
+    const lines=[`🤖 WINSCOPE ${sessionLabel} · 2 MAÇ`,`Tarih: ${date}`,""];
     chosen.forEach((a,i)=>{
-      lines.push(`${i+1}. ${a.home} VS ${a.away}`);
-      lines.push(`Ana tercih: ${a.mainPick}`);
-      lines.push(`Tahmin İY / MS: ${a.halfTimeScore || "—"} / ${a.fullTimeScore || "—"}`);
-      lines.push(`Lig: ${a.league || "—"}`,"");
+      lines.push(`${a.league || "Lig bilgisi yok"} · ${i+1}. maç`);
+      lines.push(`${a.home} VS ${a.away}`);
+      lines.push(`Tercih: ${a.mainPick}`);
+      lines.push(`Oran kaynağı: ${a.oddsBookmaker || a.selectionBookmaker || "Maç önü oran kaydı"}`,"");
     });
-    lines.push("Not: Yalnızca başlamamış, oran ve son 5 maç formu desteği bulunan analizler seçildi. Sayısal oran gösterilmez; başarı garantisi yoktur.");
     const picks=chosen.map(a=>({
       fixtureId:Number(a.fixtureId),home:a.home,away:a.away,league:a.league,
       market:a.mainPick,startScore:"0-0",currentScore:"0-0",
