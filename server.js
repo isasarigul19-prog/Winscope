@@ -1655,25 +1655,9 @@ function choosePrematchOddsMarket(oddsRow, fixture, excludeMarket = null, prefer
     if (!Number.isFinite(matrixPct)) matrixPct = marketPct;
     if (!Number.isFinite(marketPct)) marketPct = matrixPct;
     if (!Number.isFinite(matrixPct) || !Number.isFinite(marketPct)) return;
-    // Market/model consistency gate: a market cannot be recommended when the
-    // score matrix itself does not support the required goal event.
-    // These are eligibility floors, not claims of guaranteed probability.
-    const marketFloor = {
-      "EV 1.5 ÜST": { probability: 38, teamLambda: 1.20, side: "home" },
-      "DEP 1.5 ÜST": { probability: 38, teamLambda: 1.20, side: "away" },
-      "MS 2.5 ÜST": { probability: 47, totalLambda: 2.30 },
-      "MS 3.5 ÜST": { probability: 35, totalLambda: 2.80 },
-      "KG VAR": { probability: 48, eachTeamLambda: 0.75 }
-    }[market];
-    if (marketFloor) {
-      if (matrixPct < marketFloor.probability) return;
-      if (marketFloor.side === "home" && (!Number.isFinite(lambdaHome) || lambdaHome < marketFloor.teamLambda)) return;
-      if (marketFloor.side === "away" && (!Number.isFinite(lambdaAway) || lambdaAway < marketFloor.teamLambda)) return;
-      if (marketFloor.totalLambda != null && (!Number.isFinite(totalLambda) || totalLambda < marketFloor.totalLambda)) return;
-      if (marketFloor.eachTeamLambda != null && (!Number.isFinite(lambdaHome) || !Number.isFinite(lambdaAway) || lambdaHome < marketFloor.eachTeamLambda || lambdaAway < marketFloor.eachTeamLambda)) return;
-    }
-    // User's retained price band applies to KG VAR and MS 2.5 ÜST only.
-    if (["KG VAR", "MS 2.5 ÜST"].includes(market) && (odd < 1.50 || odd > 1.73)) return;
+    // Archive audit showed that the previous fixed probability floors were not
+    // calibrated and could admit low-probability team overs. Eligibility is now
+    // based on model-vs-market edge and return at the actual offered price.
     const impliedPct = 100 / odd;
     // Model edge is measured against the de-vigged market probability;
     // expected return uses the actual available price. Raw hit probability
@@ -1681,14 +1665,15 @@ function choosePrematchOddsMarket(oddsRow, fixture, excludeMarket = null, prefer
     const edge = matrixPct - marketPct;
     const expectedReturnPct = (matrixPct / 100) * odd * 100 - 100;
     const agreement = Math.abs(matrixPct - marketPct);
-    // Do not allow a negative model-vs-market edge to win merely because its
-    // raw hit probability is high. Small calibration noise is tolerated.
-    if (edge < -5) return;
-    const score = Math.max(-18, Math.min(18, expectedReturnPct)) * 1.45
-      + Math.max(-10, Math.min(10, edge * 1.15))
-      + Math.max(-5, 4 - agreement * 0.25)
-      + Math.min(3, Math.max(0, (matrixPct - 45) * 0.05))
-      + (/bet365/i.test(String(bookmaker || "")) ? 1.0 : 0);
+    // A pick must beat both the de-vigged market probability and the actual
+    // offered price. Raw hit probability cannot dominate the ranking.
+    const minEdgePct = market === "MS 3.5 ÜST" ? 2.5 : 2.0;
+    const minExpectedReturnPct = 1.5;
+    if (edge < minEdgePct || expectedReturnPct < minExpectedReturnPct) return;
+    const score = Math.max(0, Math.min(15, expectedReturnPct)) * 1.7
+      + Math.max(0, Math.min(10, edge)) * 1.35
+      - Math.min(8, agreement * 0.20)
+      + (/bet365/i.test(String(bookmaker || "")) ? 0.5 : 0);
     candidates.push({
       market, selection, odd, probability: marketPct, matrixPct,
       estimatedPct: Number(matrixPct.toFixed(1)),
@@ -4060,8 +4045,12 @@ async function startDailyAnalysisIfNeeded(date, { force=false } = {}) {
   dailyAnalysisStartLocks.add(date);
   try {
     const existing = await findDailyAnalysisRun(date);
-    if (existing && !force && ["queued","running","completed"].includes(existing.status)) return existing;
-    const job = { date, status:"queued", current:0, total:0, selected:0, currentMatch:"", startedAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+    if (existing && !force && ["queued","running"].includes(existing.status)) return existing;
+    // A completed analysis from another build is stale. The normal Start action
+    // creates a fresh run; GET endpoints remain read-only and spend no API quota.
+    if (existing && !force && existing.status === "completed" &&
+        existing.buildVersion === WINSCOPE_BUILD_VERSION) return existing;
+    const job = { date, buildVersion:WINSCOPE_BUILD_VERSION, status:"queued", current:0, total:0, selected:0, currentMatch:"", startedAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
     dailyAnalysisJobs.set(date, job);
     await persistDailyAnalysisRun(job);
     setImmediate(() => runDailyAnalysisJob(job));
@@ -4071,6 +4060,8 @@ async function startDailyAnalysisIfNeeded(date, { force=false } = {}) {
 async function runDailyAnalysisJob(job) {
   const { date } = job;
   try {
+    job.buildVersion = WINSCOPE_BUILD_VERSION;
+    console.log(`[BUILD VERSION] ${WINSCOPE_BUILD_VERSION} | dailyAnalysis=${date}`);
     job.status = "running";
     await persistDailyAnalysisRun(job);
     const payload = await cachedProviderRequest(`fixtures:${date}`, `/fixtures?date=${date}&timezone=Europe/Istanbul`, 60000);
@@ -4217,6 +4208,7 @@ async function runDailyAnalysisJob(job) {
         const other = alternativePick?.market || null;
         console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | unconditional=${JSON.stringify(scores.topScoreCandidates)} | matrixMarkets=${JSON.stringify(scores.matrixMarketProbabilities)} | pick=${mainPick} | alt=${other} | confidence=${supported.confidencePct}% | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} | basis=PREMATCH_ODDS_ONLY`);
         const analysis = {
+          buildVersion:WINSCOPE_BUILD_VERSION,
           fixtureId:match.id, matchDate:date, home:match.home, away:match.away, league:match.league,
           // Ana skor koşulsuz kalır; tercih senaryosu seçilen pazarın koşuluna bağlı ayrı alandır.
           halfTimeScore:scores.halfTimeScore, fullTimeScore:scores.fullTimeScore,
@@ -4359,8 +4351,8 @@ app.get("/api/analyses/daily", async (req, res) => {
   const date = String(req.query.date || "");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error:"Tarih YYYY-MM-DD biçiminde olmalı." });
   const job = await findDailyAnalysisRun(date);
-  if (!job) return res.json({ success:true, found:false, date, analyses:dedupeAnalysisArchiveRows(archives.analyses.filter(x=>String(x.match_date||x.analysis?.matchDate||"").slice(0,10)===date)) });
-  res.json({ success:true, found:true, job });
+  if (!job) return res.json({ success:true, found:false, date, buildVersion:WINSCOPE_BUILD_VERSION, analyses:dedupeAnalysisArchiveRows(archives.analyses.filter(x=>String(x.match_date||x.analysis?.matchDate||"").slice(0,10)===date)) });
+  res.json({ success:true, found:true, buildVersion:WINSCOPE_BUILD_VERSION, staleBuild:job.buildVersion !== WINSCOPE_BUILD_VERSION, job });
 });
 
 // User-supplied odds/result examples. This isolated reference set is used ONLY by Score & 6+.
@@ -6547,6 +6539,20 @@ app.get('/api/score-shot/performance',async(req,res)=>{
   }catch(e){res.status(500).json({error:e.message});}
 });
 
+const WINSCOPE_BUILD_VERSION = "V12_ARCHIVE_AUDITED_MARKET_SELECTOR";
+app.get("/api/version", (_req, res) => res.json({
+  ok: true,
+  app: "WinScope",
+  buildVersion: WINSCOPE_BUILD_VERSION,
+  analysisPolicy: "PREMATCH_ODDS_ONLY",
+  selectorPolicy: "POSITIVE_EDGE_AND_EXPECTED_RETURN",
+  archiveAudit: {
+    dailyMarketSettled: 955,
+    prematchCouponUniqueFixtureMarkets: 231,
+    scorePredictionsSettled: 147,
+    scoreShotSettled: 0
+  }
+}));
 app.use("/api", (_req, res) => res.status(404).json({ error: "API uç noktası bulunamadı." }));
 
 app.listen(PORT, () => console.log(`WinScope server running on port ${PORT}`));
