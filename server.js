@@ -1634,7 +1634,12 @@ function liveMarketAlreadySettled(market, fixture) {
 function choosePrematchOddsMarket(oddsRow, fixture, excludeMarket = null, preferredMarket = null) {
   const rows = oddsForFixture(oddsRow);
   if (!rows.length) return null;
-  const matrix = scorePrediction(fixture, null, null, null, oddsRow)?.matrixMarketProbabilities || {};
+  const fittedScores = scorePrediction(fixture, null, null, null, oddsRow);
+  const matrix = fittedScores?.matrixMarketProbabilities || {};
+  const expectedGoals = fittedScores?.expectedGoals || {};
+  const lambdaHome = Number(expectedGoals.home);
+  const lambdaAway = Number(expectedGoals.away);
+  const totalLambda = lambdaHome + lambdaAway;
   const chooseBook = values => values.find(x => /bet365/i.test(String(x.bookmaker || ""))) || values[0] || null;
   const grouped = new Map();
   for (const row of rows) {
@@ -1650,6 +1655,23 @@ function choosePrematchOddsMarket(oddsRow, fixture, excludeMarket = null, prefer
     if (!Number.isFinite(matrixPct)) matrixPct = marketPct;
     if (!Number.isFinite(marketPct)) marketPct = matrixPct;
     if (!Number.isFinite(matrixPct) || !Number.isFinite(marketPct)) return;
+    // Market/model consistency gate: a market cannot be recommended when the
+    // score matrix itself does not support the required goal event.
+    // These are eligibility floors, not claims of guaranteed probability.
+    const marketFloor = {
+      "EV 1.5 ÜST": { probability: 38, teamLambda: 1.20, side: "home" },
+      "DEP 1.5 ÜST": { probability: 38, teamLambda: 1.20, side: "away" },
+      "MS 2.5 ÜST": { probability: 47, totalLambda: 2.30 },
+      "MS 3.5 ÜST": { probability: 35, totalLambda: 2.80 },
+      "KG VAR": { probability: 48, eachTeamLambda: 0.75 }
+    }[market];
+    if (marketFloor) {
+      if (matrixPct < marketFloor.probability) return;
+      if (marketFloor.side === "home" && (!Number.isFinite(lambdaHome) || lambdaHome < marketFloor.teamLambda)) return;
+      if (marketFloor.side === "away" && (!Number.isFinite(lambdaAway) || lambdaAway < marketFloor.teamLambda)) return;
+      if (marketFloor.totalLambda != null && (!Number.isFinite(totalLambda) || totalLambda < marketFloor.totalLambda)) return;
+      if (marketFloor.eachTeamLambda != null && (!Number.isFinite(lambdaHome) || !Number.isFinite(lambdaAway) || lambdaHome < marketFloor.eachTeamLambda || lambdaAway < marketFloor.eachTeamLambda)) return;
+    }
     // User's retained price band applies to KG VAR and MS 2.5 ÜST only.
     if (["KG VAR", "MS 2.5 ÜST"].includes(market) && (odd < 1.50 || odd > 1.73)) return;
     const impliedPct = 100 / odd;
@@ -1659,10 +1681,13 @@ function choosePrematchOddsMarket(oddsRow, fixture, excludeMarket = null, prefer
     const edge = matrixPct - marketPct;
     const expectedReturnPct = (matrixPct / 100) * odd * 100 - 100;
     const agreement = Math.abs(matrixPct - marketPct);
-    const score = Math.max(-20, Math.min(20, expectedReturnPct)) * 1.35
-      + Math.max(-8, Math.min(8, edge * 0.9))
+    // Do not allow a negative model-vs-market edge to win merely because its
+    // raw hit probability is high. Small calibration noise is tolerated.
+    if (edge < -5) return;
+    const score = Math.max(-18, Math.min(18, expectedReturnPct)) * 1.45
+      + Math.max(-10, Math.min(10, edge * 1.15))
       + Math.max(-5, 4 - agreement * 0.25)
-      + Math.min(4, Math.max(0, (matrixPct - 45) * 0.08))
+      + Math.min(3, Math.max(0, (matrixPct - 45) * 0.05))
       + (/bet365/i.test(String(bookmaker || "")) ? 1.0 : 0);
     candidates.push({
       market, selection, odd, probability: marketPct, matrixPct,
