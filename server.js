@@ -1260,7 +1260,14 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     for(const cell of dcGrid(lh,la,10)){
       const {home:h,away:a,probability:p}=cell, total=h+a;
       if(h>a) home+=p; else if(h===a) draw+=p; else away+=p;
-      if(total>=2) over15+=p; if(total>=3) over25+=p; if(total>=4) over35+=p; if(total>=6) over55+=p;
+      if(total>=2) over15+=p;
+      if(total>=3) over25+=p;
+      if(total>=4) over35+=p;
+      // Critical V9 fix: the 4.5 line means 5+ total goals.
+      // Previously over45 was initialized but never accumulated, so the
+      // selector interpreted MS 4.5 ALT as a 100% probability every time.
+      if(total>=5) over45+=p;
+      if(total>=6) over55+=p;
       if(h>0&&a>0) btts+=p; if(h>=2) home15+=p; if(a>=2) away15+=p;
     }
     return {home,draw,away,over15,over25,over35,over45,over55,btts,home15,away15};
@@ -1504,8 +1511,8 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     scoreCondition:preferredMarket || "UNCONDITIONAL",
     scoreProbabilityType:preferredMarket ? "MARKET_CONDITIONAL_FOR_PREDICTED_SCORE" : "UNCONDITIONAL",
     unconditionalScoreProbability:Number(best.probability.toFixed(4)),
-    modelVersion:"V8_HT_CONDITIONAL_ON_FT_SCORE",
-    scoreModelMethod:"DIXON_COLES_WITH_CONDITIONAL_HT_FT",
+    modelVersion:"V9_FIXED_OVER45_MATRIX_HT_FT",
+    scoreModelMethod:"DIXON_COLES_MARKET_FIT_WITH_FIXED_OVER45_AND_CONDITIONAL_HT_FT",
     htFtConsistency:true,
     halfTimeScoreProbability:Number((htScores[0]?.p||0).toFixed(4)),
     dixonColesRho:Number(dcRho(lambdaHome,lambdaAway).toFixed(4)),
@@ -1629,7 +1636,9 @@ function choosePrematchOddsMarket(oddsRow, fixture, excludeMarket = null, prefer
   const candidates = [];
   const addCandidate = (market, selection, odd, marketPct, matrixPct, source, bookmaker, extra = {}) => {
     odd = Number(odd); marketPct = Number(marketPct); matrixPct = Number(matrixPct);
-    if (!Number.isFinite(odd) || odd <= 1.01) return;
+    // Prevent short-priced, high-probability unders (especially MS 4.5 ALT)
+    // from dominating every prematch selection. Prices below 1.50 are not picks.
+    if (!Number.isFinite(odd) || odd < 1.50) return;
     if (!Number.isFinite(matrixPct)) matrixPct = marketPct;
     if (!Number.isFinite(marketPct)) marketPct = matrixPct;
     if (!Number.isFinite(matrixPct) || !Number.isFinite(marketPct)) return;
@@ -1728,7 +1737,11 @@ function choosePrematchOddsMarket(oddsRow, fixture, excludeMarket = null, prefer
     if (row.underOdd) addCandidate(market.replace("ÜST", "ALT"), "Alt", row.underOdd, 100-p, 100-matrixP, "TOTAL", row.bookmaker);
   }
 
-  const ranked = candidates.filter(x => x.market !== excludeMarket)
+  // MS 4.5 ALT is retained in the parsed odds/data archive for evaluation,
+  // but it is not eligible to become the primary recommendation. The previous
+  // zeroed over45 matrix made this under look virtually certain and dominate
+  // coupons. Keep the requested goal markets and compare them normally.
+  const ranked = candidates.filter(x => x.market !== excludeMarket && x.market !== "MS 4.5 ALT")
     .sort((a,b) => b.score-a.score || b.estimatedPct-a.estimatedPct);
   if (preferredMarket) {
     const preferred = ranked.find(x => x.market === preferredMarket);
