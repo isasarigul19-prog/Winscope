@@ -3916,6 +3916,18 @@ function dailyCouponBlendedSupport(oddsRow, market, homeForm, awayForm) {
 // Shared evidence resolver for AI and scheduled daily coupons.
 // Prefer genuine model value evidence; otherwise use the explicit odds+last-5-form blend.
 // Never manufacture a model probability when the model did not return one.
+function dailyCouponScenarioScore(analysis) {
+  const market = String(analysis?.mainPick || "").trim().toLocaleUpperCase("tr-TR");
+  const raw = String(analysis?.marketScenarioScore || "");
+  const match = raw.match(/(\d+)\s*[-:]\s*(\d+)/);
+  if (!match) return null;
+  const home = Number(match[1]), away = Number(match[2]);
+  if (!Number.isInteger(home) || !Number.isInteger(away) || home < 0 || away < 0) return null;
+  // Coupon score must satisfy the selected market; never pair KG VAR with 0-0.
+  if (market === "KG VAR" && (home < 1 || away < 1)) return null;
+  if (market === "MS 2.5 ÜST" && home + away < 3) return null;
+  return `${home}-${away}`;
+}
 function dailyCouponEvidence(analysis) {
   const finite = value => value !== null && value !== undefined && Number.isFinite(Number(value));
   if (finite(analysis?.selectionScore)) {
@@ -5125,12 +5137,22 @@ async function sendDailyAnalysisTopThree(session, date) {
         for (const p of dailyAnalysisCouponSentMemory.get(`${date}:early`)||[]) alreadyUsed.add(Number(p.fixtureId));
       }
     }
-    const valid=rows.map(a=>({...a,_couponEvidence:dailyCouponEvidence(a)})).filter(a=>
+    const valid=rows.map(a=>({
+      ...a,
+      _couponEvidence:dailyCouponEvidence(a),
+      _couponScenarioScore:dailyCouponScenarioScore(a)
+    })).filter(a=>
       Number(a.fixtureId)>0 && upcoming.has(Number(a.fixtureId)) &&
       !alreadyUsed.has(Number(a.fixtureId)) &&
       ["KG VAR","MS 2.5 ÜST"].includes(String(a.mainPick||"")) &&
-      Boolean(a._couponEvidence)
+      Boolean(a._couponEvidence) && Boolean(a._couponScenarioScore)
     );
+    const rejectedScenario=rows.filter(a =>
+      Number(a.fixtureId)>0 && upcoming.has(Number(a.fixtureId)) &&
+      ["KG VAR","MS 2.5 ÜST"].includes(String(a.mainPick||"")) &&
+      !dailyCouponScenarioScore(a)
+    ).length;
+    console.log(`[DAILY ANALYSIS COUPON QUALITY] ${key} scenarioRejected=${rejectedScenario} eligible=${valid.length}`);
     const deduped=[...new Map(valid.map(a=>[Number(a.fixtureId),a])).values()];
     deduped.sort((a,b)=>
       Number(b._couponEvidence.tier)-Number(a._couponEvidence.tier) ||
@@ -5149,14 +5171,19 @@ async function sendDailyAnalysisTopThree(session, date) {
     chosen.forEach((a,i)=>{
       lines.push(`${i+1}. ${a.home} VS ${a.away}`);
       lines.push(`Ana tercih: ${a.mainPick}`);
-      lines.push(`Tahmin İY / MS: ${a.halfTimeScore || "—"} / ${a.fullTimeScore || "—"}`);
+      lines.push(`Tahmin İY / MS: ${a.halfTimeScore || "—"} / ${a._couponScenarioScore} (tercih senaryosu)`);
+      if (a.fullTimeScore && String(a.fullTimeScore).replace(/\s*\(.*$/, "") !== a._couponScenarioScore)
+        lines.push(`Koşulsuz MS skor tahmini: ${a.fullTimeScore}`);
       lines.push(`Lig: ${a.league || "—"}`,"");
     });
     lines.push("Not: Yalnızca başlamamış, oran ve son 5 maç formu desteği bulunan analizler seçildi. Sayısal oran gösterilmez; başarı garantisi yoktur.");
     const picks=chosen.map(a=>({
       fixtureId:Number(a.fixtureId),home:a.home,away:a.away,league:a.league,
       market:a.mainPick,startScore:"0-0",currentScore:"0-0",
-      predictedHalfTimeScore:a.halfTimeScore||null,predictedFullTimeScore:a.fullTimeScore||null
+      predictedHalfTimeScore:a.halfTimeScore||null,
+      predictedFullTimeScore:a._couponScenarioScore,
+      predictedUnconditionalFullTimeScore:a.fullTimeScore||null,
+      marketScenarioScore:a._couponScenarioScore
     }));
     const sent=await sendTelegram(lines.join("\n"));
     if (!sent.sent) {
