@@ -6209,18 +6209,22 @@ const SCORE_SHOT_NATIONAL_LEAGUE_NAMES = new Set([
   "copa america", "concacaf gold cup", "world cup - qualification", "world cup qualification"
 ]);
 function isScoreShotEligibleCompetition(match) {
+  // Score Shot: all identified senior competitions are eligible, not only the
+  // former fixed major/national league allowlist. Youth, women's, reserve and
+  // second-team competitions remain excluded by the shared exclusion guard.
   if (!match || isExcludedAnalysisCompetition(match)) return false;
   const leagueId = Number(match.leagueId || match.league_id || 0);
   const leagueName = String(match.league || match.league_name || "")
     .toLocaleLowerCase("en").replace(/[’']/g, " ").replace(/[._-]+/g, " ")
     .replace(/\s+/g, " ").trim();
-  // Provider league IDs are authoritative. Name-only matching is unsafe:
-  // many countries have a league literally named 'Premier League'.
-  // International friendlies (league ID 10 / generic 'Friendlies') are excluded
-  // because no FIFA-ranking feed is present to qualify lower-ranked teams.
-  return leagueId > 0 && (SCORE_SHOT_MAJOR_LEAGUE_IDS.has(leagueId) ||
-    SCORE_SHOT_NATIONAL_LEAGUE_IDS.has(leagueId));
+  const country = String(match.country || match.league_country || "").trim();
+  // Exclude friendly/preseason competitions, while allowing any named league or
+  // competition with a provider ID so an unfamiliar league cannot zero the scan.
+  const friendly = /\b(friendlies?|club friendlies?|preseason|pre season)\b/i.test(leagueName);
+  if (friendly) return false;
+  return leagueId > 0 || Boolean(leagueName && country);
 }
+
 async function scoreShotReadRows(date) {
   const q=await databasePool.query(`SELECT fixture_id,kickoff_at,league_id,league,home_team,away_team,predicted_ht,predicted_ft,top_scores,model_data,selection_score,exact_probability,actual_ht,actual_ft,ht_hit,ft_hit,top3_hit,settled_at,created_at
     FROM winscope_score_shot_predictions WHERE match_date=$1 ORDER BY selection_score DESC,kickoff_at NULLS LAST`,[date]);
