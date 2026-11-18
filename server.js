@@ -6233,7 +6233,7 @@ async function scoreShotReadRows(date) {
   // They must be regenerated before they can appear in the active list.
   return q.rows.filter(row => {
     if (!isScoreShotEligibleCompetition({leagueId:row.league_id,league:row.league,home:row.home_team,away:row.away_team})) return false;
-    if (row.model_data?.method !== 'prematch_odds_joint_ht_ft_deterministic_v2') return false;
+    if (row.model_data?.method !== 'prematch_odds_plus_weak_last5_form_team_ht_share_v3') return false;
     const ht=parseScore(row.predicted_ht), ft=parseScore(row.predicted_ft);
     return Boolean(ht && ft && ht.home<=ft.home && ht.away<=ft.away);
   }).map(row => ({
@@ -6549,7 +6549,7 @@ app.post('/api/score-shot/settle',async(req,res)=>{
   if(!databasePool)return res.status(503).json({error:'DATABASE_URL gerekli.'});
   try{
     await archiveDatabaseReady;
-    const pending=await databasePool.query("SELECT fixture_id,predicted_ht,predicted_ft,top_scores FROM winscope_score_shot_predictions WHERE match_date=$1 AND settled_at IS NULL AND model_data->>'method'='prematch_odds_joint_ht_ft_deterministic_v2'",[date]);
+    const pending=await databasePool.query("SELECT fixture_id,predicted_ht,predicted_ft,top_scores FROM winscope_score_shot_predictions WHERE match_date=$1 AND settled_at IS NULL AND model_data->>'method'='prematch_odds_plus_weak_last5_form_team_ht_share_v3'",[date]);
     let checked=0;
     for(const row of pending.rows){
       const payload=await cachedProviderRequest(`score-shot-settle:${row.fixture_id}`,`/fixtures?id=${row.fixture_id}`,300000);
@@ -6570,7 +6570,7 @@ app.get('/api/score-shot/performance',async(req,res)=>{
     COUNT(*) FILTER(WHERE settled_at IS NULL)::int pending,COUNT(*) FILTER(WHERE ht_hit)::int ht_hits,
     COUNT(*) FILTER(WHERE ft_hit)::int ft_hits,COUNT(*) FILTER(WHERE top3_hit)::int top3_hits,
     AVG(ABS(split_part(actual_ft,'-',1)::int-split_part(predicted_ft,'-',1)::int)+ABS(split_part(actual_ft,'-',2)::int-split_part(predicted_ft,'-',2)::int)) FILTER(WHERE settled_at IS NOT NULL) AS avg_goal_error
-    FROM winscope_score_shot_predictions WHERE match_date=$1 AND model_data->>'method'='prematch_odds_joint_ht_ft_deterministic_v2'`,[date]);
+    FROM winscope_score_shot_predictions WHERE match_date=$1 AND model_data->>'method'='prematch_odds_plus_weak_last5_form_team_ht_share_v3'`,[date]);
     const x=q.rows[0]||{};res.json({success:true,date,summary:{total:x.total||0,settled:x.settled||0,pending:x.pending||0,htHits:x.ht_hits||0,ftHits:x.ft_hits||0,top3Hits:x.top3_hits||0,htHitRate:x.settled?Math.round(x.ht_hits*100/x.settled):null,ftHitRate:x.settled?Math.round(x.ft_hits*100/x.settled):null,top3Rate:x.settled?Math.round(x.top3_hits*100/x.settled):null,avgGoalError:x.avg_goal_error==null?null:Number(Number(x.avg_goal_error).toFixed(2))}});
   }catch(e){res.status(500).json({error:e.message});}
 });
