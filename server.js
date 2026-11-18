@@ -6026,43 +6026,35 @@ function scoreShotGrid(lh,la,max=7) {
   return cells.map(x=>({...x,p:x.p/(mass||1)}));
 }
 function scoreShotMarketInputs(oddsRow) {
+  // Score Shot must compare a coherent set of prematch prices from ONE bookmaker.
+  // Mixing Bet365 1X2 with another bookmaker's goal line can create a false low-goal fit.
   const rows=oddsForFixture(oddsRow);
-  const best=(market)=>{
-    const found=rows.filter(x=>x.market===market);
-    return found.find(x=>/bet365/i.test(String(x.bookmaker||'')))||found[0]||null;
-  };
-  const one=best('MS 1');
-  const outcome=one?.outcomeProbabilities;
-  if(!outcome || ![outcome.home,outcome.draw,outcome.away].every(v=>Number.isFinite(Number(v)))) return null;
-  const read = market => {
-    const row=best(market);
+  const books=[...new Set(rows.map(x=>String(x.bookmaker||'Kaynak belirtilmedi')))];
+  const candidates=books.map(book=>{
+    const byMarket=new Map();
+    for(const market of ['MS 1','MS 1.5 ÜST','MS 2.5 ÜST','MS 3.5 ÜST','MS 4.5 ÜST','KG VAR','EV 1.5 ÜST','DEP 1.5 ÜST']) {
+      const item=rows.find(x=>x.bookmaker===book && x.market===market);
+      if(item) byMarket.set(market,item);
+    }
+    const one=byMarket.get('MS 1'), twoFive=byMarket.get('MS 2.5 ÜST');
+    if(!one?.outcomeProbabilities || !twoFive) return null;
+    const coverage=byMarket.size;
+    return {book,byMarket,coverage,bet365:/bet365/i.test(book)};
+  }).filter(Boolean).sort((a,b)=>(Number(b.bet365)-Number(a.bet365)) || b.coverage-a.coverage);
+  if(!candidates.length) return null;
+  const chosen=candidates[0], byMarket=chosen.byMarket;
+  const read=market=>{
+    const row=byMarket.get(market);
     return row && Number.isFinite(Number(row.probability)) ? Number(row.probability)/100 : null;
   };
+  const outcome=byMarket.get('MS 1').outcomeProbabilities;
   const over25=read('MS 2.5 ÜST');
-  if(!Number.isFinite(over25)) return null;
-  let over45=null;
-  for(const book of bookmakerRows(oddsRow)){
-    for(const bet of (book.bets||[])){
-      const name=String(bet.name||'').toLowerCase();
-      if(!/over.?under|total goals|match goals|goal line|goals total|total/.test(name) ||
-        /first half|1st half|half.?time|home team|away team|team 1 total|team 2 total/.test(name)) continue;
-      let over=null,under=null;
-      for(const v of (bet.values||[])){
-        const label=String(v.value??v.name??'');
-        const price=Number(v.odd);
-        if(!Number.isFinite(price)||price<=1.01)continue;
-        if(/over\s*4[.,]5/i.test(label))over=price;
-        if(/under\s*4[.,]5/i.test(label))under=price;
-      }
-      if(over&&under){const oi=1/over,ui=1/under;over45=oi/(oi+ui);break;}
-    }
-    if(over45!=null)break;
-  }
+  if(![outcome.home,outcome.draw,outcome.away,over25].every(v=>Number.isFinite(Number(v)))) return null;
   return {
     home:Number(outcome.home)/100,draw:Number(outcome.draw)/100,away:Number(outcome.away)/100,
-    over15:read('MS 1.5 ÜST'),over25,over35:read('MS 3.5 ÜST'),over45,
+    over15:read('MS 1.5 ÜST'),over25,over35:read('MS 3.5 ÜST'),over45:read('MS 4.5 ÜST'),
     btts:read('KG VAR'),home15:read('EV 1.5 ÜST'),away15:read('DEP 1.5 ÜST'),
-    bookmaker:one.bookmaker||'API-Football',overBookmaker:best('MS 2.5 ÜST')?.bookmaker||null,hasOver25:true
+    bookmaker:chosen.book,overBookmaker:chosen.book,marketCoverage:chosen.coverage,hasOver25:true
   };
 }
 function scoreShotFormFromPayloads(payloads, teamId, beforeDate) {
@@ -6174,14 +6166,14 @@ function scoreShotFit(market, homeForm=null, awayForm=null) {
       if(c.home>=2)stats.home15+=c.p;if(c.away>=2)stats.away15+=c.p;
     }
     const targets=[
-      ['home',market.home,4.2],['draw',market.draw,4.2],['away',market.away,4.2],
-      ['over15',market.over15,1.0],['over25',market.over25,2.0],
-      ['over35',market.over35,1.25],['over45',market.over45,.8],
-      ['btts',market.btts,1.7],['home15',market.home15,.9],['away15',market.away15,.9]
+      ['home',market.home,3.2],['draw',market.draw,3.2],['away',market.away,3.2],
+      ['over15',market.over15,1.5],['over25',market.over25,3.2],
+      ['over35',market.over35,1.8],['over45',market.over45,1.0],
+      ['btts',market.btts,2.2],['home15',market.home15,1.4],['away15',market.away15,1.4]
     ].filter(x=>x[1]!==null && x[1]!==undefined && Number.isFinite(Number(x[1])));
     const weight=targets.reduce((sum,x)=>sum+x[2],0)||1;
     const marketLoss = targets.reduce((sum,[key,target,w])=>sum+w*Math.pow(stats[key]-Number(target),2),0)/weight;
-    const formPenalty = form ? 0.24 * (Math.pow(lh-form.lambdaHome,2) + Math.pow(la-form.lambdaAway,2)) / 2 : 0;
+    const formPenalty = form ? 0.16 * (Math.pow(lh-form.lambdaHome,2) + Math.pow(la-form.lambdaAway,2)) / 2 : 0;
     return marketLoss + formPenalty;
   };
   let best={loss:Infinity,h:null,a:null};
@@ -6256,7 +6248,7 @@ async function scoreShotReadRows(date) {
   // They must be regenerated before they can appear in the active list.
   return q.rows.filter(row => {
     if (!isScoreShotEligibleCompetition({leagueId:row.league_id,league:row.league,home:row.home_team,away:row.away_team})) return false;
-    if (row.model_data?.method !== 'prematch_odds_plus_last5_form_goal_calibrated_v4') return false;
+    if (row.model_data?.method !== 'prematch_same_bookmaker_market_fit_last5_form_ht_share_v5') return false;
     const ht=parseScore(row.predicted_ht), ft=parseScore(row.predicted_ft);
     return Boolean(ht && ft && ht.home<=ft.home && ht.away<=ft.away);
   }).map(row => ({
@@ -6388,22 +6380,11 @@ async function executeScoreShotJob(date, job) {
       modeled++;
       const top = model.top3[0];
       if (!top) { notEligible++; job.matchesDone++; continue; }
-      const marketQuality = market.hasOver25 ? 1 : .78;
+      const marketQuality = Math.min(1, 0.72 + (Number(market.marketCoverage || 2) - 2) * 0.07);
       const reversalMax = Math.max(model.reversalProbabilities?.["1/2"] || 0, model.reversalProbabilities?.["2/1"] || 0);
       // 1/2 and 2/1 are surfaced as a separate high-interest signal, not treated as guaranteed picks.
       const reversalBoost = Math.max(0, reversalMax - 5) * 0.65;
-      // Rank the fixture on market/model agreement, not only the single most likely
-      // exact score (which systematically favors 0-0/1-0 in low-event matches).
-      // Goal support is conditional on the actual prematch O2.5 probability and
-      // the fitted expected-goal total; it does not force an overs prediction.
-      const over25Support = Number.isFinite(Number(market.over25))
-        ? Math.max(0, Math.min(1, (Number(market.over25) - 0.42) / 0.28)) : 0;
-      const totalGoalSupport = Math.max(0, Math.min(1, (model.lambdaHome + model.lambdaAway - 1.75) / 1.25));
-      const goalProfileScore = 3.5 * over25Support + 2.5 * totalGoalSupport;
-      const formQuality = model.formPrior ? 1 : 0;
-      const selectionScore = Number(Math.min(100, Math.max(0,
-        top.probability * 1.65 + marketQuality * 5 - model.fitLoss * 18 + goalProfileScore + reversalBoost + formQuality
-      )).toFixed(2));
+      const selectionScore = Number(Math.min(100, Math.max(0, (top.probability*1.65 + marketQuality*10 - model.fitLoss*18 + reversalBoost))).toFixed(2));
       candidates.push({fixture:m,market,model,selectionScore,reversalMax,
         predictedHt:model.predictedHt,predictedFt:model.predictedFt,exactProbability:model.exactProbability});
       job.matchesDone++;
@@ -6421,7 +6402,7 @@ async function executeScoreShotJob(date, job) {
     await persistScoreShotJob(job);
     for (const x of selected) {
       await persistScoreShotJob(job); // lease/fencing check before any prediction write
-      const modelData = {method:'prematch_odds_plus_last5_form_goal_calibrated_v4',market:{home:x.market.home,draw:x.market.draw,away:x.market.away,over25:x.market.over25,bookmaker:x.market.bookmaker,overBookmaker:x.market.overBookmaker},lambdaHome:x.model.lambdaHome,lambdaAway:x.model.lambdaAway,fitLoss:x.model.fitLoss,homeFirstHalfShare:x.model.homeFirstHalfShare,awayFirstHalfShare:x.model.awayFirstHalfShare,formPrior:x.model.formPrior,selectedFtProbability:x.exactProbability,reversalProbabilities:x.model.reversalProbabilities,preferredReversal:x.model.preferredReversal};
+      const modelData = {method:'prematch_same_bookmaker_market_fit_last5_form_ht_share_v5',market:{home:x.market.home,draw:x.market.draw,away:x.market.away,over15:x.market.over15,over25:x.market.over25,over35:x.market.over35,over45:x.market.over45,btts:x.market.btts,home15:x.market.home15,away15:x.market.away15,bookmaker:x.market.bookmaker,overBookmaker:x.market.overBookmaker,marketCoverage:x.market.marketCoverage},lambdaHome:x.model.lambdaHome,lambdaAway:x.model.lambdaAway,fitLoss:x.model.fitLoss,homeFirstHalfShare:x.model.homeFirstHalfShare,awayFirstHalfShare:x.model.awayFirstHalfShare,formPrior:x.model.formPrior,selectedFtProbability:x.exactProbability,reversalProbabilities:x.model.reversalProbabilities,preferredReversal:x.model.preferredReversal};
       const r = await databasePool.query(`INSERT INTO winscope_score_shot_predictions
         (fixture_id,match_date,kickoff_at,league_id,league,home_team,away_team,predicted_ht,predicted_ft,top_scores,model_data,features,selection_score,exact_probability)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12::jsonb,$13,$14)
@@ -6583,7 +6564,7 @@ app.post('/api/score-shot/settle',async(req,res)=>{
   if(!databasePool)return res.status(503).json({error:'DATABASE_URL gerekli.'});
   try{
     await archiveDatabaseReady;
-    const pending=await databasePool.query("SELECT fixture_id,predicted_ht,predicted_ft,top_scores FROM winscope_score_shot_predictions WHERE match_date=$1 AND settled_at IS NULL AND model_data->>'method'='prematch_odds_plus_last5_form_goal_calibrated_v4'",[date]);
+    const pending=await databasePool.query("SELECT fixture_id,predicted_ht,predicted_ft,top_scores FROM winscope_score_shot_predictions WHERE match_date=$1 AND settled_at IS NULL AND model_data->>'method'='prematch_same_bookmaker_market_fit_last5_form_ht_share_v5'",[date]);
     let checked=0;
     for(const row of pending.rows){
       const payload=await cachedProviderRequest(`score-shot-settle:${row.fixture_id}`,`/fixtures?id=${row.fixture_id}`,300000);
@@ -6604,7 +6585,7 @@ app.get('/api/score-shot/performance',async(req,res)=>{
     COUNT(*) FILTER(WHERE settled_at IS NULL)::int pending,COUNT(*) FILTER(WHERE ht_hit)::int ht_hits,
     COUNT(*) FILTER(WHERE ft_hit)::int ft_hits,COUNT(*) FILTER(WHERE top3_hit)::int top3_hits,
     AVG(ABS(split_part(actual_ft,'-',1)::int-split_part(predicted_ft,'-',1)::int)+ABS(split_part(actual_ft,'-',2)::int-split_part(predicted_ft,'-',2)::int)) FILTER(WHERE settled_at IS NOT NULL) AS avg_goal_error
-    FROM winscope_score_shot_predictions WHERE match_date=$1 AND model_data->>'method'='prematch_odds_plus_last5_form_goal_calibrated_v4'`,[date]);
+    FROM winscope_score_shot_predictions WHERE match_date=$1 AND model_data->>'method'='prematch_same_bookmaker_market_fit_last5_form_ht_share_v5'`,[date]);
     const x=q.rows[0]||{};res.json({success:true,date,summary:{total:x.total||0,settled:x.settled||0,pending:x.pending||0,htHits:x.ht_hits||0,ftHits:x.ft_hits||0,top3Hits:x.top3_hits||0,htHitRate:x.settled?Math.round(x.ht_hits*100/x.settled):null,ftHitRate:x.settled?Math.round(x.ft_hits*100/x.settled):null,top3Rate:x.settled?Math.round(x.top3_hits*100/x.settled):null,avgGoalError:x.avg_goal_error==null?null:Number(Number(x.avg_goal_error).toFixed(2))}});
   }catch(e){res.status(500).json({error:e.message});}
 });
