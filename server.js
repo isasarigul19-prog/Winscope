@@ -1234,16 +1234,21 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
   const formAway = hasForm
     ? Math.max(0.08,0.58*Number(awayForm.avgGoalsFor||0)+0.42*Number(homeForm.avgGoalsAgainst||0)) : null;
   const pmf=(k,l)=>Math.exp(-l)*Math.pow(l,k)/factorial(k);
-  // V11: Dixon-Coles low-score dependence is disabled until rho is fitted
-  // from a clean, league-aware, time-split historical sample. The previous
-  // fixed negative rho systematically changed 0-0 / 1-1 probabilities without
-  // empirical calibration. Independent Poisson is the transparent baseline.
-  const dcRho=(_lh,_la)=>0;
+  // Conservative Dixon-Coles low-score dependence correction. The coefficient
+  // remains experimental until it is fitted by league on a clean historical set.
+  const dcRho=(lh,la)=>-Math.min(0.06,0.75/Math.max(0.01,lh*la));
+  const dcTau=(h,a,lh,la,rho)=>{
+    if(h===0&&a===0) return 1-lh*la*rho;
+    if(h===0&&a===1) return 1+lh*rho;
+    if(h===1&&a===0) return 1+la*rho;
+    if(h===1&&a===1) return 1-rho;
+    return 1;
+  };
   const dcGrid=(lh,la,maxGoals=10)=>{
-    const cells=[];
+    const rho=dcRho(lh,la), cells=[];
     let mass=0;
     for(let h=0;h<=maxGoals;h++) for(let a=0;a<=maxGoals;a++){
-      const p=pmf(h,lh)*pmf(a,la);
+      const p=Math.max(0,pmf(h,lh)*pmf(a,la)*dcTau(h,a,lh,la,rho));
       cells.push({home:h,away:a,probability:p}); mass+=p;
     }
     const norm=mass||1;
@@ -1514,11 +1519,11 @@ function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, premat
     scoreCondition:preferredMarket || "UNCONDITIONAL",
     scoreProbabilityType:preferredMarket ? "MARKET_CONDITIONAL_FOR_PREDICTED_SCORE" : "UNCONDITIONAL",
     unconditionalScoreProbability:Number(best.probability.toFixed(4)),
-    modelVersion:"V11_INDEPENDENT_POISSON_MARKET_FIT",
-    scoreModelMethod:"INDEPENDENT_POISSON_MARKET_FIT_WITH_CONDITIONAL_SCORE",
+    modelVersion:"V10_MARKET_RANKING_AND_CONDITIONAL_SCORE",
+    scoreModelMethod:"DIXON_COLES_MARKET_FIT_WITH_VALUE_RANKING_AND_CONDITIONAL_SCORE",
     htFtConsistency:true,
     halfTimeScoreProbability:Number((htScores[0]?.p||0).toFixed(4)),
-    dixonColesRho:0,
+    dixonColesRho:Number(dcRho(lambdaHome,lambdaAway).toFixed(4)),
     htTeamFormUsed:Boolean(htTeamFormAvailable),
     htFormSampleSize:{home:Number(homeForm?.htSampleSize||0),away:Number(awayForm?.htSampleSize||0)},
     modelFitError:Number(bestLoss.toFixed(6)),
@@ -6089,23 +6094,23 @@ function scoreShotBinomialPmf(n,k,p=0.44) {
   for(let i=1;i<=k;i++) c=c*(n-i+1)/i;
   return c*Math.pow(p,k)*Math.pow(1-p,n-k);
 }
-function scoreShotConditionalHalfTime(fullTimeCell, firstHalfShare=0.44) {
+function scoreShotConditionalHalfTime(fullTimeCell, homeFirstHalfShare=0.44, awayFirstHalfShare=0.44) {
   let best={home:0,away:0,p:-1};
   for(let h=0;h<=fullTimeCell.home;h++) for(let a=0;a<=fullTimeCell.away;a++) {
-    const p=scoreShotBinomialPmf(fullTimeCell.home,h,firstHalfShare)*
-      scoreShotBinomialPmf(fullTimeCell.away,a,firstHalfShare);
+    const p=scoreShotBinomialPmf(fullTimeCell.home,h,homeFirstHalfShare)*
+      scoreShotBinomialPmf(fullTimeCell.away,a,awayFirstHalfShare);
     if(p>best.p+1e-12 || (Math.abs(p-best.p)<=1e-12 && h+a<best.home+best.away)) best={home:h,away:a,p};
   }
   return best;
 }
 
-function scoreShotReversalProbabilities(lambdaHome, lambdaAway, firstHalfShare=0.44) {
+function scoreShotReversalProbabilities(lambdaHome, lambdaAway, homeFirstHalfShare=0.44, awayFirstHalfShare=0.44) {
   let oneTwo=0, twoOne=0;
   for (const ft of scoreShotGrid(lambdaHome, lambdaAway, 8)) {
     let htHomeLeads=0, htAwayLeads=0;
     for (let h=0; h<=ft.home; h++) for (let a=0; a<=ft.away; a++) {
-      const p=scoreShotBinomialPmf(ft.home,h,firstHalfShare)*
-        scoreShotBinomialPmf(ft.away,a,firstHalfShare);
+      const p=scoreShotBinomialPmf(ft.home,h,homeFirstHalfShare)*
+        scoreShotBinomialPmf(ft.away,a,awayFirstHalfShare);
       if (h>a) htHomeLeads += p;
       else if (a>h) htAwayLeads += p;
     }
@@ -6117,8 +6122,23 @@ function scoreShotReversalProbabilities(lambdaHome, lambdaAway, firstHalfShare=0
     "2/1": Number((twoOne*100).toFixed(2))
   };
 }
-function scoreShotFit(market) {
-  // Joint HT/FT score matrix is fitted to every available pre-match market, not only 1X2 + O2.5.
+function scoreShotFormTargets(homeForm, awayForm) {
+  const valid = x => x && Number.isFinite(Number(x.avgFor)) && Number.isFinite(Number(x.avgAgainst));
+  if (!valid(homeForm) || !valid(awayForm)) return null;
+  // Last-five overall form is only a weak prior; bookmaker prematch markets remain dominant.
+  const home = Math.max(0.25, Math.min(3.2, (Number(homeForm.avgFor) + Number(awayForm.avgAgainst)) / 2));
+  const away = Math.max(0.25, Math.min(3.2, (Number(awayForm.avgFor) + Number(homeForm.avgAgainst)) / 2));
+  const share = form => {
+    const ft = Number(form.avgFor) + Number(form.avgAgainst);
+    const ht = Number(form.htAvgFor) + Number(form.htAvgAgainst);
+    if (!(ft > 0) || !Number.isFinite(ht)) return 0.44;
+    return Math.max(0.35, Math.min(0.55, 0.44 * 0.65 + (ht / ft) * 0.35));
+  };
+  return {lambdaHome:home, lambdaAway:away, homeFirstHalfShare:share(homeForm), awayFirstHalfShare:share(awayForm), homeSample:homeForm.sample, awaySample:awayForm.sample};
+}
+function scoreShotFit(market, homeForm=null, awayForm=null) {
+  // Prematch odds are primary. Last-five form is a deliberately weak regularizing prior.
+  const form = scoreShotFormTargets(homeForm, awayForm);
   const loss=(lh,la)=>{
     const grid=scoreShotGrid(lh,la,8);
     const stats={home:0,draw:0,away:0,over15:0,over25:0,over35:0,over45:0,btts:0,home15:0,away15:0};
@@ -6137,7 +6157,9 @@ function scoreShotFit(market) {
       ['btts',market.btts,1.7],['home15',market.home15,.9],['away15',market.away15,.9]
     ].filter(x=>x[1]!==null && x[1]!==undefined && Number.isFinite(Number(x[1])));
     const weight=targets.reduce((sum,x)=>sum+x[2],0)||1;
-    return targets.reduce((sum,[key,target,w])=>sum+w*Math.pow(stats[key]-Number(target),2),0)/weight;
+    const marketLoss = targets.reduce((sum,[key,target,w])=>sum+w*Math.pow(stats[key]-Number(target),2),0)/weight;
+    const formPenalty = form ? 0.08 * (Math.pow(lh-form.lambdaHome,2) + Math.pow(la-form.lambdaAway,2)) / 2 : 0;
+    return marketLoss + formPenalty;
   };
   let best={loss:Infinity,h:null,a:null};
   for(let h=.2;h<=3.5001;h+=.1)for(let a=.2;a<=3.5001;a+=.1){const v=loss(h,a);if(v<best.loss)best={loss:v,h,a};}
@@ -6148,14 +6170,16 @@ function scoreShotFit(market) {
   const ft=scoreShotGrid(best.h,best.a,7).sort((x,y)=>y.p-x.p || (x.home+x.away)-(y.home+y.away));
   const bestFt=ft[0];
   if(!bestFt)return null;
-  const bestHt=scoreShotConditionalHalfTime(bestFt);
-  const ht=scoreShotGrid(best.h*.44,best.a*.44,5).sort((x,y)=>y.p-x.p);
-  const reversalProbabilities=scoreShotReversalProbabilities(best.h,best.a);
+  const homeShare=form?.homeFirstHalfShare ?? 0.44;
+  const awayShare=form?.awayFirstHalfShare ?? 0.44;
+  const bestHt=scoreShotConditionalHalfTime(bestFt,homeShare,awayShare);
+  const ht=scoreShotGrid(best.h*homeShare,best.a*awayShare,5).sort((x,y)=>y.p-x.p);
+  const reversalProbabilities=scoreShotReversalProbabilities(best.h,best.a,homeShare,awayShare);
   const preferredReversal=Object.entries(reversalProbabilities).sort((a,b)=>b[1]-a[1])[0];
   return {lambdaHome:Number(best.h.toFixed(3)),lambdaAway:Number(best.a.toFixed(3)),fitLoss:Number(best.loss.toFixed(5)),
     ft,ht,top3:ft.slice(0,3).map(x=>({score:`${x.home}-${x.away}`,probability:Number((x.p*100).toFixed(2))})),
     predictedFt:`${bestFt.home}-${bestFt.away}`,exactProbability:Number((bestFt.p*100).toFixed(2)),
-    predictedHt:`${bestHt.home}-${bestHt.away}`,reversalProbabilities,
+    predictedHt:`${bestHt.home}-${bestHt.away}`,homeFirstHalfShare:Number(homeShare.toFixed(3)),awayFirstHalfShare:Number(awayShare.toFixed(3)),formPrior:form,reversalProbabilities,
     preferredReversal:preferredReversal && preferredReversal[1]>=8 ? {scenario:preferredReversal[0],probability:preferredReversal[1]} : null};
 }
 // Score Shot kapsamı: yalnızca A milli takım karşılaşmaları ve seçilmiş majör
@@ -6327,7 +6351,12 @@ async function executeScoreShotJob(date, job) {
       oddsMatched++;
       const market = scoreShotMarketInputs(odds);
       if (!market) { missingMarkets++; job.matchesDone++; continue; }
-      const model = scoreShotFit(market);
+      // Load only pre-kickoff completed-match form; the helper enforces the date cutoff.
+      const [homeForm,awayForm] = await Promise.all([
+        scoreShotTeamForm(m.homeId,m.fixtureDate),
+        scoreShotTeamForm(m.awayId,m.fixtureDate)
+      ]);
+      const model = scoreShotFit(market,homeForm,awayForm);
       if (!model) { notEligible++; job.matchesDone++; continue; }
       modeled++;
       const top = model.top3[0];
@@ -6354,7 +6383,7 @@ async function executeScoreShotJob(date, job) {
     await persistScoreShotJob(job);
     for (const x of selected) {
       await persistScoreShotJob(job); // lease/fencing check before any prediction write
-      const modelData = {method:'prematch_odds_joint_ht_ft_deterministic_v2',market:{home:x.market.home,draw:x.market.draw,away:x.market.away,over25:x.market.over25,bookmaker:x.market.bookmaker,overBookmaker:x.market.overBookmaker},lambdaHome:x.model.lambdaHome,lambdaAway:x.model.lambdaAway,fitLoss:x.model.fitLoss,selectedFtProbability:x.exactProbability,reversalProbabilities:x.model.reversalProbabilities,preferredReversal:x.model.preferredReversal};
+      const modelData = {method:'prematch_odds_plus_weak_last5_form_team_ht_share_v3',market:{home:x.market.home,draw:x.market.draw,away:x.market.away,over25:x.market.over25,bookmaker:x.market.bookmaker,overBookmaker:x.market.overBookmaker},lambdaHome:x.model.lambdaHome,lambdaAway:x.model.lambdaAway,fitLoss:x.model.fitLoss,homeFirstHalfShare:x.model.homeFirstHalfShare,awayFirstHalfShare:x.model.awayFirstHalfShare,formPrior:x.model.formPrior,selectedFtProbability:x.exactProbability,reversalProbabilities:x.model.reversalProbabilities,preferredReversal:x.model.preferredReversal};
       const r = await databasePool.query(`INSERT INTO winscope_score_shot_predictions
         (fixture_id,match_date,kickoff_at,league_id,league,home_team,away_team,predicted_ht,predicted_ft,top_scores,model_data,features,selection_score,exact_probability)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12::jsonb,$13,$14)
