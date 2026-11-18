@@ -309,8 +309,10 @@ if (databasePool) {
         ADD COLUMN IF NOT EXISTS minute INTEGER,
         ADD COLUMN IF NOT EXISTS actual_score TEXT,
         ADD COLUMN IF NOT EXISTS outcome TEXT,
+        ADD COLUMN IF NOT EXISTS signal_snapshot JSONB,
         ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
         ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ`);
+      await databasePool.query(`ALTER TABLE winscope_live_predictions ADD COLUMN IF NOT EXISTS signal_snapshot JSONB`);
       // Existing databases may already have signal_key as NOT NULL. Backfill old rows
       // before enforcing the constraint so tracking writes never fail on a missing key.
       await databasePool.query(`UPDATE winscope_live_predictions
@@ -2867,7 +2869,7 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
   // Late-match probability naturally falls with remaining time. Do not require
   // a fixed 62% chance of ANY goal before even evaluating priced markets.
   // Pre-match odds + usable current live stats + market-specific EV/edge remain mandatory.
-  if ((!stats.available && !strongGoalProfile) || !liveSignalAvailable || minute < 65 || minute > 90 || isHalftime) {
+  if ((!stats.available && !strongGoalProfile) || !liveSignalAvailable || minute < 65 || minute >= 80 || isHalftime) {
     rejected.weakGoalSignal = 1;
   } else {
     for (const item of markets) {
@@ -3000,11 +3002,12 @@ async function analyzeLiveFixture(fixture, liveOddsRow, statsRows, teamForms = n
       // Değer eşiği: istatistik + son 5 maç varsa daha düşük, yoksa daha yüksek edge/EV aranır.
       // A lower raw probability can still be a valid late-game value at a fair
       // live price. Edge and EV, not an arbitrary 60% probability floor, decide.
-      const minEdge = formsAvailable ? 0.025 : 0.035;
-      const minEv = formsAvailable ? 0.035 : 0.045;
+      const lateBand = minute >= 70;
+      const minEdge = lateBand ? (formsAvailable ? 0.05 : 0.06) : (formsAvailable ? 0.025 : 0.035);
+      const minEv = lateBand ? (formsAvailable ? 0.06 : 0.07) : (formsAvailable ? 0.035 : 0.045);
       const minProbability = item.market === "KG VAR"
-        ? (homeGoals + awayGoals > 0 ? 0.42 : 0.25)
-        : (isHomeMarket || isAwayMarket ? 0.30 : 0.25);
+        ? (homeGoals + awayGoals > 0 ? (lateBand ? 0.48 : 0.42) : (lateBand ? 0.32 : 0.25))
+        : (isHomeMarket || isAwayMarket ? (lateBand ? 0.36 : 0.30) : (lateBand ? 0.32 : 0.25));
       if (modelProbability < minProbability || edge < minEdge || ev < minEv) { rejected.noValue++; continue; }
 
       // Skor senaryosuna uymayan pazar seçilmesin. Örn. deplasman golü daha olasıysa evin ikinci golü ana tercih olamaz.
@@ -3643,11 +3646,17 @@ async function buildNextGoalAnalysisInternal({ sendTelegramMessage = false } = {
         if (databasePool) {
           try {
             await archiveDatabaseReady;
+            const signalSnapshot = {
+              signalTime: new Date().toISOString(), score: top.score, minute: top.minute,
+              stats: top.stats || null, goalScenario: top.goalScenario || null,
+              analysisScore: top.valueScore ?? null, confidence: top.confidence || null,
+              prematchBtts: top.prematchBtts || null
+            };
             await databasePool.query(`INSERT INTO winscope_live_predictions
-              (fixture_id,home_team,away_team,market,signal_key,league,match_date,start_score,minute)
-              VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+              (fixture_id,home_team,away_team,market,signal_key,league,match_date,start_score,minute,signal_snapshot)
+              VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
               ON CONFLICT (fixture_id,market) DO NOTHING`,
-              [top.fixtureId,top.home,top.away,top.mainPick,key,top.league,turkeyDateString(),top.score,top.minute]);
+              [top.fixtureId,top.home,top.away,top.mainPick,key,top.league,turkeyDateString(),top.score,top.minute,JSON.stringify(signalSnapshot)]);
           } catch (dbError) {
             console.error(`[LIVE TRACKING SAVE ERROR] ${dbError.message}`);
           }
@@ -6088,18 +6097,18 @@ async function scoreShotTeamForm(teamId, beforeDate) {
   if (!fallback) return null;
   return { ...fallback, source: 'api-last20' };
 }
-function scoreShotBinomialPmf(n,k,p=0.44) {
+function scoreShotBinomialPmf(n,k,p=0.46) {
   if (k<0 || k>n) return 0;
   let c=1;
   for(let i=1;i<=k;i++) c=c*(n-i+1)/i;
   return c*Math.pow(p,k)*Math.pow(1-p,n-k);
 }
-function scoreShotConditionalHalfTime(fullTimeCell, homeFirstHalfShare=0.44, awayFirstHalfShare=0.44) {
+function scoreShotConditionalHalfTime(fullTimeCell, homeFirstHalfShare=0.46, awayFirstHalfShare=0.46) {
   let best={home:0,away:0,p:-1};
   for(let h=0;h<=fullTimeCell.home;h++) for(let a=0;a<=fullTimeCell.away;a++) {
     const p=scoreShotBinomialPmf(fullTimeCell.home,h,homeFirstHalfShare)*
       scoreShotBinomialPmf(fullTimeCell.away,a,awayFirstHalfShare);
-    if(p>best.p+1e-12 || (Math.abs(p-best.p)<=1e-12 && h+a<best.home+best.away)) best={home:h,away:a,p};
+    if(p>best.p+1e-12 || (Math.abs(p-best.p)<=1e-12 && h+a>best.home+best.away)) best={home:h,away:a,p};
   }
   return best;
 }
@@ -6131,8 +6140,8 @@ function scoreShotFormTargets(homeForm, awayForm) {
   const share = form => {
     const ft = Number(form.avgFor) + Number(form.avgAgainst);
     const ht = Number(form.htAvgFor) + Number(form.htAvgAgainst);
-    if (!(ft > 0) || !Number.isFinite(ht)) return 0.44;
-    return Math.max(0.35, Math.min(0.55, 0.44 * 0.65 + (ht / ft) * 0.35));
+    if (!(ft > 0) || !Number.isFinite(ht)) return 0.46;
+    return Math.max(0.35, Math.min(0.55, 0.46 * 0.65 + (ht / ft) * 0.35));
   };
   return {lambdaHome:home, lambdaAway:away, homeFirstHalfShare:share(homeForm), awayFirstHalfShare:share(awayForm), homeSample:homeForm.sample, awaySample:awayForm.sample};
 }
