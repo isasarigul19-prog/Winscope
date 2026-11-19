@@ -136,7 +136,8 @@ app.get("/logout", (req, res) => {
 
 // Tüm uygulama API uçları yönetici oturumu ister. Sağlık kontrolü yalnızca yapılandırma durumunu verir.
 app.use("/api", (req, res, next) => {
-  if (req.path === "/health" || req.path === "/auth/login" || req.path === "/auth/logout" || req.path === "/auth/me") return next();
+  const route = req.originalUrl.split("?")[0];
+if (route === "/api/health" || route === "/api/auth/login" || route === "/api/auth/logout" || route === "/api/auth/me") return next();
   if (!hasValidAdminSession(req)) return res.status(401).json({ error: "Yönetici girişi gerekli.", code: "AUTH_REQUIRED" });
   if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !sameOriginRequest(req)) {
     return res.status(403).json({ error: "Geçersiz istek kaynağı." });
