@@ -1,10 +1,2 @@
-export {
-  toDecimal,
-  impliedProbability,
-  normalizeTwoWay,
-  extractBookmakerMarkets,
-  extractMarketOdds,
-  choosePreMatchSnapshot
-} from './odds.js';
-
-export { analyzeMatch } from './predict.js';
+export { toDecimal, impliedProbability, normalizeTwoWay, extractBookmakerMarkets, extractMarketOdds, choosePreMatchSnapshot } from './odds.js';
+export { analyzePreMatch } from './predict.js';
