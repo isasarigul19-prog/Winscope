@@ -1,14 +1,9 @@
 {
-  "name": "winscope-live",
-  "version": "1.0.0",
+  "name": "winscope-new-odds-engine",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "scripts": {
-    "start": "node server.js",
-    "check": "node --check server.js"
-  },
-  "dependencies": {
-    "express": "^4.21.2",
-    "pg": "^8.13.1"
-  }
+  "description": "Isolated pre-match odds analysis engine for WinScope",
+  "scripts": {"test": "node --test", "check": "node --check src/index.js && node --check src/odds.js && node --check src/predict.js"},
+  "engines": {"node": ">=18"}
 }
