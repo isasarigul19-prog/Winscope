@@ -571,22 +571,66 @@ async function archiveProviderFixtures(pathname, payload) {
 
 async function archiveProviderOdds(pathname, payload) {
   const pathOnly = String(pathname || "").split("?")[0];
-  // Arşive maç önü oranları alınır; /odds/live bilerek analiz arşivine karıştırılmaz.
+  // Yalnızca maç önü oranları arşivlenir; /odds/live bilerek dışarıda tutulur.
   if (pathOnly !== "/odds") return { saved: 0, skipped: true };
   const rows = Array.isArray(payload?.response) ? payload.response : [];
   if (!rows.length || !databasePool) return { saved: 0, skipped: !databasePool };
+
+  let client;
+  let transactionOpen = false;
   try {
     await archiveDatabaseReady;
-    const result = await databasePool.query(`
-      INSERT INTO winscope_fixture_odds_archive (fixture_id, payload, source_endpoint, captured_at)
-      SELECT NULLIF(item->'fixture'->>'id','')::bigint, item, $2, NOW()
-      FROM jsonb_array_elements($1::jsonb) AS x(item)
-      WHERE NULLIF(item->'fixture'->>'id','') IS NOT NULL
-    `, [JSON.stringify(rows), String(pathname || "")]);
-    return { saved: result.rowCount || 0 };
+    client = await databasePool.connect();
+    await client.query("BEGIN");
+    transactionOpen = true;
+    const serializedRows = JSON.stringify(rows);
+
+    // Eşzamanlı arşiv yazımlarını fixture bazında sıraya al.
+    await client.query(`
+      WITH incoming AS (
+        SELECT DISTINCT NULLIF(item->'fixture'->>'id','')::bigint AS fixture_id
+        FROM jsonb_array_elements($1::jsonb) AS x(item)
+        WHERE NULLIF(item->'fixture'->>'id','') IS NOT NULL
+      )
+      SELECT pg_advisory_xact_lock(fixture_id)
+      FROM incoming
+      ORDER BY fixture_id
+    `, [serializedRows]);
+
+    // Aynı fixture + aynı JSONB payload tekrar yazılmaz; değişen payload
+    // yeni oran snapshot'ı olarak korunur. Mevcut kayıtlar silinmez.
+    const result = await client.query(`
+      WITH incoming AS (
+        SELECT DISTINCT
+          NULLIF(item->'fixture'->>'id','')::bigint AS fixture_id,
+          item AS payload
+        FROM jsonb_array_elements($1::jsonb) AS x(item)
+        WHERE NULLIF(item->'fixture'->>'id','') IS NOT NULL
+      )
+      INSERT INTO winscope_fixture_odds_archive
+        (fixture_id, payload, source_endpoint, captured_at)
+      SELECT i.fixture_id, i.payload, $2, NOW()
+      FROM incoming i
+      WHERE NOT EXISTS (
+        SELECT 1 FROM winscope_fixture_odds_archive a
+        WHERE a.fixture_id = i.fixture_id AND a.payload = i.payload
+      )
+    `, [serializedRows, String(pathname || "")]);
+
+    await client.query("COMMIT");
+    transactionOpen = false;
+    return {
+      saved: result.rowCount || 0,
+      skippedDuplicates: Math.max(0, rows.length - (result.rowCount || 0))
+    };
   } catch (error) {
+    if (client && transactionOpen) {
+      try { await client.query("ROLLBACK"); } catch {}
+    }
     console.error(`[Odds archive] Kayıt hatası: ${error.message}`);
     return { saved: 0, error: error.message };
+  } finally {
+    if (client) client.release();
   }
 }
 
