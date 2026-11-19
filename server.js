@@ -6182,7 +6182,15 @@ function scoreShotReversalProbabilities(lambdaHome, lambdaAway, homeFirstHalfSha
   };
 }
 function scoreShotFormTargets(homeForm, awayForm) {
-  const valid = x => x && Number.isFinite(Number(x.avgFor)) && Number.isFinite(Number(x.avgAgainst));
+  // Hard eligibility gate: both teams need five completed pre-match fixtures
+  // and at least four valid half-time records. Odds alone must never bypass it.
+  const valid = x => x &&
+    Number(x.sample) >= 5 &&
+    Number(x.htSample) >= 4 &&
+    Number.isFinite(Number(x.avgFor)) &&
+    Number.isFinite(Number(x.avgAgainst)) &&
+    Number.isFinite(Number(x.htAvgFor)) &&
+    Number.isFinite(Number(x.htAvgAgainst));
   if (!valid(homeForm) || !valid(awayForm)) return null;
   // Last-five overall form is only a weak prior; bookmaker prematch markets remain dominant.
   const home = Math.max(0.25, Math.min(3.2, (Number(homeForm.avgFor) + Number(awayForm.avgAgainst)) / 2));
@@ -6196,8 +6204,10 @@ function scoreShotFormTargets(homeForm, awayForm) {
   return {lambdaHome:home, lambdaAway:away, homeFirstHalfShare:share(homeForm), awayFirstHalfShare:share(awayForm), homeSample:homeForm.sample, awaySample:awayForm.sample};
 }
 function scoreShotFit(market, homeForm=null, awayForm=null) {
-  // Prematch odds are primary. Last-five form is a deliberately weak regularizing prior.
+  // Prematch odds are primary, but last-five data is mandatory eligibility.
+  // No odds-only prediction is emitted when either team's form is incomplete.
   const form = scoreShotFormTargets(homeForm, awayForm);
+  if (!form) return null;
   const loss=(lh,la)=>{
     const grid=scoreShotGrid(lh,la,8);
     const stats={home:0,draw:0,away:0,over15:0,over25:0,over35:0,over45:0,btts:0,home15:0,away15:0};
@@ -6402,7 +6412,7 @@ async function executeScoreShotJob(date, job) {
     }
     console.log(`[SCORE SHOT] odds complete fixtureRequests=${fixtures.length} rows=${oddsRowsCount} uniqueFixtures=${oddsMap.size}`);
 
-    let oddsMatched=0, missingOdds=0, missingMarkets=0, notEligible=0, modeled=0;
+    let oddsMatched=0, missingOdds=0, missingMarkets=0, insufficientLast5=0, notEligible=0, modeled=0;
     const candidates = [];
     job.phase = 'odds_model'; job.matchesTotal = fixtures.length; job.matchesDone = 0; job.updatedAt=new Date().toISOString();
     await persistScoreShotJob(job);
@@ -6419,6 +6429,13 @@ async function executeScoreShotJob(date, job) {
         scoreShotTeamForm(m.homeId,m.fixtureDate),
         scoreShotTeamForm(m.awayId,m.fixtureDate)
       ]);
+      // Hard last-five gate: odds availability cannot compensate for missing team history.
+      const hasFiveValid = form => Number(form?.sample) >= 5 && Number(form?.htSample) >= 4 &&
+        Number.isFinite(Number(form?.avgFor)) && Number.isFinite(Number(form?.avgAgainst)) &&
+        Number.isFinite(Number(form?.htAvgFor)) && Number.isFinite(Number(form?.htAvgAgainst));
+      if (!hasFiveValid(homeForm) || !hasFiveValid(awayForm)) {
+        insufficientLast5++; job.matchesDone++; continue;
+      }
       const model = scoreShotFit(market,homeForm,awayForm);
       if (!model) { notEligible++; job.matchesDone++; continue; }
       modeled++;
@@ -6462,7 +6479,7 @@ async function executeScoreShotJob(date, job) {
       saved += r.rowCount || 0;
     }
     const rows = await scoreShotReadRows(date);
-    const diagnostics = {fixtures:fixtures.length,outsideMajorOrNational:outsideScope,outsideWindowOrStarted:outsideWindow,windowHours:24,oddsFixtureRequests:fixtures.length,oddsRows:oddsRowsCount,oddsMatched,withOdds:oddsMatched,missingOdds,missingMarkets,notEligible,modeled,candidates:candidates.length,selected:selected.length,newlySaved:saved,totalSaved:rows.length,durationMs:Date.now()-startedAt};
+    const diagnostics = {fixtures:fixtures.length,outsideMajorOrNational:outsideScope,outsideWindowOrStarted:outsideWindow,windowHours:24,oddsFixtureRequests:fixtures.length,oddsRows:oddsRowsCount,oddsMatched,withOdds:oddsMatched,missingOdds,missingMarkets,insufficientLast5,notEligible,modeled,candidates:candidates.length,selected:selected.length,newlySaved:saved,totalSaved:rows.length,durationMs:Date.now()-startedAt};
     job.status = 'completed'; job.phase = 'completed'; job.diagnostics = diagnostics;
     job.updatedAt = new Date().toISOString(); job.finishedAt = job.updatedAt;
     await persistScoreShotJob(job);
