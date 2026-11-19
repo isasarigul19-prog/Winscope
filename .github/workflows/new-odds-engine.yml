@@ -1,0 +1,33 @@
+
+name: WinScope New Odds Engine Tests
+
+on:
+  push:
+    branches:
+      - feature/new-odds-engine
+    paths:
+      - 'winscope-new-engine/**'
+      - '.github/workflows/new-odds-engine.yml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: winscope-new-engine
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run tests
+        run: npm test
+
+      - name: Check syntax
+        run: npm run check
