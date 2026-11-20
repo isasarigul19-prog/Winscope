@@ -4206,47 +4206,19 @@ async function runDailyAnalysisJob(job) {
       job.phase = "second_session";
       await persistDailyAnalysisRun(job);
     }
-    // Fetch the full date-level odds feed once and share its cache with coupons/Score Shot.
+    // Avoid scanning every global odds page (often 20-30 pages) when only a small
+    // set of major-league fixtures is selected. Fetch each selected fixture's
+    // prematch odds inside the bounded worker pool below.
     const dailyOddsMap = new Map();
-    let dailyOddsComplete = false;
-    try {
-      job.phase = "odds_prefetch";
-      job.current = 0;
-      job.currentMatch = "Maç önü oran sayfaları hazırlanıyor";
-      job.updatedAt = new Date().toISOString();
-      await persistDailyAnalysisRun(job);
-      const firstOddsPage = await cachedProviderRequest(
-        `odds-date:${date}:page:1`,
-        `/odds?date=${encodeURIComponent(date)}&page=1`,
-        15 * 60 * 1000
-      );
-      const reportedOddsPages = Math.max(1, Number(firstOddsPage.paging?.total || 1));
-      if (!Number.isInteger(reportedOddsPages) || reportedOddsPages > 100) {
-        throw new Error(`Günlük analiz oran sayfalaması güvenlik sınırını aştı: ${reportedOddsPages}`);
-      }
-      for (const row of (firstOddsPage.response || [])) {
-        if (row.fixture?.id) dailyOddsMap.set(Number(row.fixture.id), row);
-      }
-      for (let page = 2; page <= reportedOddsPages; page++) {
-        const pagePayload = await cachedProviderRequest(
-          `odds-date:${date}:page:${page}`,
-          `/odds?date=${encodeURIComponent(date)}&page=${page}`,
-          15 * 60 * 1000
-        );
-        if (!Array.isArray(pagePayload.response)) {
-          throw new Error(`Günlük analiz oran sayfası ${page}/${reportedOddsPages} geçersiz yanıt döndürdü.`);
-        }
-        for (const row of pagePayload.response) {
-          if (row.fixture?.id) dailyOddsMap.set(Number(row.fixture.id), row);
-        }
-        job.oddsPagesDone = page;
-        job.oddsPagesTotal = reportedOddsPages;
-      }
-      dailyOddsComplete = true;
-      console.log(`[Daily analysis odds] ${date}: pages=${reportedOddsPages} fixturesWithOdds=${dailyOddsMap.size}`);
-    } catch (oddsPrefetchError) {
-      console.warn(`[Daily analysis odds] ${date}: toplu oran taraması tamamlanamadı; maç-bazlı güvenli yola dönülüyor: ${oddsPrefetchError.message}`);
-    }
+    const dailyOddsComplete = false;
+    job.phase = "fixture_analysis";
+    job.current = 0;
+    job.currentMatch = "Seçilen maçların maç önü oranları maç bazında hazırlanıyor";
+    job.oddsPagesDone = 0;
+    job.oddsPagesTotal = 0;
+    job.updatedAt = new Date().toISOString();
+    await persistDailyAnalysisRun(job);
+    console.log(`[Daily analysis odds] ${date}: global pagination skipped; selected fixtures=${fixtures.length}; per-fixture odds enabled.`);
 
     const selected = [], rejected = { noOdds:0, outsideRange:0, unbalanced:0, noForm:0, noSupportedPick:0 };
     const workerCount = Math.min(4, Math.max(1, Number(process.env.DAILY_ANALYSIS_CONCURRENCY) || 3));
