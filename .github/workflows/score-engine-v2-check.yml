@@ -9,7 +9,7 @@ on:
       - feature/score-engine-v2
 
 jobs:
-  syntax:
+  syntax-and-unit:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -22,3 +22,5 @@ jobs:
         run: |
           node --check server.js
           node --check score-engine-v2.js
+      - name: Run Score Engine V2 unit tests
+        run: node --test
