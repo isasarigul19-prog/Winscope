@@ -3581,7 +3581,7 @@ async function buildNextGoalAnalysisInternal({ sendTelegramMessage = false } = {
         minute: fixture.minute, periodStatus: fixture.periodStatus, score: `${fixture.homeScore}-${fixture.awayScore}`, prediction: "Analiz tamamlanamadı",
         confidence: "LOW", status: "PARTIAL_DATA", reason: error.message });
     }
-  }
+  });
   const valueCandidates = results.filter(x => x.status === "VALUE_CANDIDATE")
     .sort((a,b) => Number(b.valueScore || 0) - Number(a.valueScore || 0));
   let top = null;
@@ -5175,7 +5175,7 @@ async function runEarlyFirstHalfPick() {
           console.error(`[EARLY HT TELEGRAM NOT SENT] fixture=${fixture.id}: ${result.reason || 'Telegram gönderimi başarısız'}`);
         }
       } catch (e) { console.warn(`[EARLY HT ERROR] fixture=${fixture.id}: ${e.message}`); }
-    }
+    });
     console.log(`[EARLY HT SCAN] prep=${prep.length} live10plus0-0=${fixtures.length} sent=${sent}`);
   } catch (e) {
     console.error(`[EARLY HT SCAN ERROR] ${e.message}`);
