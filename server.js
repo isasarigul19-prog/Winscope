@@ -3954,34 +3954,40 @@ app.get("/api/coupon-tracking/summary", async (req, res) => {
 });
 
 // Günün Analizleri: üst düzey kulüp ligleri + A milli takım resmi turnuvaları/özel maçları; oran ve denge koşulları uygulanır.
-// API-Football lig ID'leri: Premier League, La Liga, Bundesliga, Serie A, Ligue 1, Süper Lig.
-// Günün analiz havuzu: büyük Avrupa ligleri + seçilmiş üst seviye ulusal ligler.
-// Genç/reserve organizasyonları isim kontrolüyle her durumda dışarıda tutulur.
+// Tier 1: majör ligler ve büyük uluslararası turnuvalar.
+// Tier 2: güçlü/izlenebilir ikinci kademe ligler; yalnızca Tier 1 fikstürü yoksa kullanılır.
+// Kadın, U/yaş grubu ve rezerv takımlar her iki kademede de dışarıda tutulur.
 const DAILY_MAJOR_LEAGUE_IDS = new Set([
-  2, 3, 848,                         // UEFA Champions / Europa / Conference League
-  39, 140, 78, 135, 61, 203,        // Premier League, La Liga, Bundesliga, Serie A, Ligue 1, Süper Lig
-  88, 94, 144, 179, 207, 218, 119,   // Netherlands, Portugal, Belgium, Scotland, Switzerland, Austria, Denmark
-  197, 106, 128, 71, 253, 307,       // Greece, Poland, Argentina, Brazil, MLS, Saudi Pro League
-  98, 292, 262                       // Japan, Korea, Mexico
+  2, 3, 848,                    // UEFA Champions / Europa / Conference League
+  39, 140, 78, 135, 61, 203    // Premier League, La Liga, Bundesliga, Serie A, Ligue 1, Süper Lig
+]);
+const DAILY_SECONDARY_LEAGUE_IDS = new Set([
+  88, 94, 144, 179, 207, 218, 119, // Netherlands, Portugal, Belgium, Scotland, Switzerland, Austria, Denmark
+  197, 106, 128, 71, 253, 307,     // Greece, Poland, Argentina, Brazil, MLS, Saudi Pro League
+  98, 292, 262                     // Japan, Korea, Mexico
 ]);
 const DAILY_MAJOR_LEAGUE_NAMES = new Set([
-  "premier league", "championship", "la liga", "bundesliga", "serie a", "ligue 1",
-  "super lig", "süper lig", "eredivisie", "primeira liga", "jupiler pro league",
-  "scottish premiership", "bundesliga austria", "ekstraklasa", "liga profesional argentina",
-  "brasileirão série a", "major league soccer", "mls", "saudi pro league",
-  "j1 league", "k league 1", "liga mx", "uefa champions league", "uefa europa league",
+  "premier league", "la liga", "bundesliga", "serie a", "ligue 1",
+  "super lig", "süper lig", "uefa champions league", "uefa europa league",
   "uefa conference league"
 ]);
-function isDailyMajorLeague(match) {
-  // Major lig allowlist'i analiz kapsamını sınırlamaz: kadın/U takımları hariç tüm ligler.
-  return Boolean(match && Number(match.id) > 0 && !isExcludedAnalysisCompetition(match));
-}
+const DAILY_SECONDARY_LEAGUE_NAMES = new Set([
+  "championship", "eredivisie", "primeira liga", "jupiler pro league",
+  "scottish premiership", "bundesliga austria", "ekstraklasa", "liga profesional argentina",
+  "brasileirão série a", "major league soccer", "mls", "saudi pro league",
+  "j1 league", "k league 1", "liga mx"
+]);
 function dailyAnalysisLeaguePriority(match) {
-  const name=String(match.league||"").toLocaleLowerCase("en");
+  if (!match || !Number(match.id) || isExcludedAnalysisCompetition(match)) return 3;
+  const name=String(match.league||"").toLocaleLowerCase("en").trim();
   const id=Number(match.leagueId);
-  if (DAILY_MAJOR_LEAGUE_IDS.has(id) || DAILY_MAJOR_LEAGUE_NAMES.has(name)) return 1;
-  if (/\\b(nations league|world cup|africa cup|asian cup|gold cup|qualif)/i.test(name)) return 2;
+  const majorTournament = /\b(world cup|euro(?:\s|$)|european championship|copa america|africa cup of nations|asian cup|gold cup|nations league|qualif(?:ication|ying|iers)?)\b/i.test(name);
+  if (DAILY_MAJOR_LEAGUE_IDS.has(id) || DAILY_MAJOR_LEAGUE_NAMES.has(name) || majorTournament) return 1;
+  if (DAILY_SECONDARY_LEAGUE_IDS.has(id) || DAILY_SECONDARY_LEAGUE_NAMES.has(name)) return 2;
   return 3;
+}
+function isDailyMajorLeague(match) {
+  return dailyAnalysisLeaguePriority(match) <= 2;
 }
 const DAILY_MARKET_ODDS_MIN = 1.50;
 const DAILY_MARKET_ODDS_MAX = 1.73;
@@ -4181,7 +4187,12 @@ async function runDailyAnalysisJob(job) {
       if (!scheduledFixtureMap.has(Number(match.id))) scheduledFixtureMap.set(Number(match.id), match);
     }
     const scheduledFixtures = [...scheduledFixtureMap.values()];
-    const eligibleFixtures = scheduledFixtures.filter(isDailyMajorLeague);
+    const primaryFixtures = scheduledFixtures.filter(match => dailyAnalysisLeaguePriority(match) === 1);
+    const secondaryFixtures = scheduledFixtures.filter(match => dailyAnalysisLeaguePriority(match) === 2);
+    // Önce yalnızca Tier 1 (majör ligler/büyük turnuvalar). Hiç maç yoksa Tier 2'ye geç.
+    const eligibleFixtures = primaryFixtures.length ? primaryFixtures : secondaryFixtures;
+    const selectedTier = primaryFixtures.length ? "primary" : secondaryFixtures.length ? "secondary_fallback" : "none";
+    console.log(`[Daily analysis tier] ${date}: primary=${primaryFixtures.length} secondary=${secondaryFixtures.length} selected=${eligibleFixtures.length} tier=${selectedTier}`);
     const kickoffMinuteTR = (match) => {
       const raw = match.fixtureDate || match.date || "";
       const parsed = new Date(raw);
@@ -4200,10 +4211,10 @@ async function runDailyAnalysisJob(job) {
     const firstSessionCount = firstSession.length;
     const fixtures = [...firstSession, ...secondSession];
     const leagueCounts = {};
-    const priorityCounts = { major:0, international:0, other:0 };
+    const priorityCounts = { primary:0, secondary:0, other:0 };
     for (const m of fixtures) {
       const p=dailyAnalysisLeaguePriority(m);
-      priorityCounts[p===1?"major":p===2?"international":"other"]++;
+      priorityCounts[p===1?"primary":p===2?"secondary":"other"]++;
       // Uygun lig dağılımı yalnızca gerçekten analiz havuzuna alınan ligleri göstermeli.
       const leagueKey = `${m.country || "Ülke bilinmiyor"} · ${m.league || "Lig bilinmiyor"}`;
       leagueCounts[leagueKey] = (leagueCounts[leagueKey] || 0) + 1;
