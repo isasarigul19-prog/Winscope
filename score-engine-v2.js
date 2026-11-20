@@ -111,7 +111,7 @@ function predictScore({fixture={},homeForm=null,awayForm=null,markets={},outcome
   }
   const hfHt=homeForm?.available?Number(homeForm.htAvgGoalsFor):NaN;
   const afHt=awayForm?.available?Number(awayForm.htAvgGoalsFor):NaN;
-  const totalHt=htLambda==null?.44*(fit.home+fit.away):htLambda;
+  const totalHt = htLambda == null ? 0.44 * (fit.home + fit.away) : htLambda;
   const share=Number.isFinite(hfHt)&&Number.isFinite(afHt)&&hfHt+afHt>0?hfHt/(hfHt+afHt):fit.home/(fit.home+fit.away);
   const htHome=totalHt*share,htAway=totalHt*(1-share);
   const htScores=[];
