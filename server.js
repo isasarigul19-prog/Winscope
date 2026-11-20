@@ -4295,7 +4295,7 @@ async function runDailyAnalysisJob(job) {
         const mainPick = supported.market;
         const alternativePick = chooseSupportedMarket(oddsRow, "prematch", prematchFixture, forms, null, oddsRow, mainPick);
         const other = alternativePick?.market || null;
-        console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | unconditional=${JSON.stringify(scores.topScoreCandidates)} | matrixMarkets=${JSON.stringify(scores.matrixMarketProbabilities)} | pick=${mainPick} | alt=${other} | confidence=${supported.confidencePct}% | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} | basis=PREMATCH_ODDS_ONLY`);
+        console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | unconditional=${JSON.stringify(scores.topScoreCandidates)} | matrixMarkets=${JSON.stringify(scores.matrixMarketProbabilities)} | pick=${mainPick} | alt=${other} | confidence=${supported.confidencePct}% | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} | basis=PREMATCH_ODDS_PLUS_LAST5_FORM`);
         const analysis = {
           fixtureId:match.id, matchDate:date, home:match.home, away:match.away, league:match.league,
           // Ana skor koşulsuz kalır; tercih senaryosu seçilen pazarın koşuluna bağlı ayrı alandır.
@@ -4345,7 +4345,7 @@ async function runDailyAnalysisJob(job) {
           })),
           rawPrematchOddsCapturedAt:new Date().toISOString(),
           scoreMarketsUsed:scores.marketTargetsUsed || [],
-          selectionBasis:"Mevcut tüm maç önü marketleri: oran olasılığı + ortak skor matrisi + değer farkı",
+          selectionBasis:"Maç önü oranları + son 5 tamamlanmış maç formu + ortak skor matrisi + değer farkı",
           created_at:new Date().toISOString()
         };
         selected.push(analysis);
