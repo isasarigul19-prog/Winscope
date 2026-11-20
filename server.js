@@ -4117,7 +4117,7 @@ async function runDailyAnalysisJob(job) {
           } finally {
             // Her maç bittiği anda ilerlemeyi kalıcılaştır; üçlü grubun tamamını bekleme.
             // Hata alan maç da işlendi sayılır; sonraki maçların ilerlemesini bloke etmez.
-            completedFixtureIds.add(Number(match.id));
+            if (!failedInBatch.has(Number(match.id))) completedFixtureIds.add(Number(match.id));
             progressPersist = progressPersist.then(async () => {
               completedFixtures = completedFixtureIds.size;
               job.completedFixtureIds = [...completedFixtureIds];
