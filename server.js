@@ -5289,7 +5289,7 @@ async function runDailyAnalysisCouponSchedule() {
 }
 
 setTimeout(()=>{ void runDailyAnalysisCouponSchedule(); },30000);
-setInterval(()=>{ void runDailyAnalysisCouponSchedule(); },30000);
+setInterval(()=>{ void runDailyAnalysisCouponSchedule(); },60000);
 
 const autoDailyCouponMemory = new Map();
 // AI kuponları artık yalnızca kullanıcı "Günün Yapay Zekâ Kuponları" düğmesine bastığında gönderilir.
@@ -6536,7 +6536,7 @@ async function claimAndRunScoreShotJob() {
     console.error(`[SCORE SHOT] queue worker error: ${e.stack||e.message}`);
   } finally { scoreShotWorkerBusy=false; }
 }
-setInterval(()=>{ void claimAndRunScoreShotJob(); },5000);
+setInterval(()=>{ void claimAndRunScoreShotJob(); },15000);
 setTimeout(()=>{ void claimAndRunScoreShotJob(); },10000);
 
 const scoreShotAutoSessionsStarted = new Set();
@@ -6557,7 +6557,7 @@ async function runScoreShotAutoSchedule() {
     console.error(`[SCORE SHOT AUTO] SCHEDULER ERROR ${e.stack || e.message}`);
   }
 }
-setInterval(() => { void runScoreShotAutoSchedule(); }, 30000);
+setInterval(() => { void runScoreShotAutoSchedule(); }, 60000);
 
 app.post('/api/score-shot/analyze', async (req,res) => {
   const date = String(req.body?.date || '');
