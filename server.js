@@ -1,4 +1,5 @@
 import express from "express";
+import { predictScore as predictScoreV2 } from "./score-engine-v2.js";
 import pg from "pg";
 import path from "node:path";
 import fs from "node:fs/promises";
@@ -1269,8 +1270,6 @@ function marketProbabilitiesByName(oddsRow) {
   }
   return result;
 }
-const { predictScore: predictScoreV2 } = require("./score-engine-v2");
-
 function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, prematchOddsRow = null, preferredMarket = null) {
   // V2 motor: yalnızca maç önü oranları + tamamlanmış son 5 maç formu.
   // Canlı oranlar kasıtlı olarak bu fonksiyona aktarılmaz.
