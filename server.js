@@ -4279,9 +4279,10 @@ async function runDailyAnalysisJob(job) {
       await persistDailyAnalysisRun(job);
       const oddsPageConcurrency = Math.min(3, Math.max(2, Number(process.env.DAILY_ODDS_PAGE_CONCURRENCY) || 3));
       const pendingPages = Array.from({length:Math.max(0,reportedOddsPages-1)}, (_,i)=>i+2);
+      let failedOddsPages = 0;
       for (let offset = 0; offset < pendingPages.length; offset += oddsPageConcurrency) {
         const pageBatch = pendingPages.slice(offset, offset + oddsPageConcurrency);
-        const pageResults = await Promise.all(pageBatch.map(async page => {
+        const pageResults = await Promise.allSettled(pageBatch.map(async page => {
           const pagePayload = await cachedProviderRequest(
             `odds-date:${date}:page:${page}`,
             `/odds?date=${encodeURIComponent(date)}&page=${page}`,
@@ -4292,20 +4293,29 @@ async function runDailyAnalysisJob(job) {
           }
           return {page, rows:pagePayload.response};
         }));
+        let completedThisBatch = 0;
         for (const result of pageResults) {
-          for (const row of result.rows) {
+          if (result.status !== "fulfilled") {
+            failedOddsPages++;
+            console.warn(`[Daily analysis odds] ${date}: sayfa alınamadı: ${result.reason?.message || "bilinmeyen hata"}`);
+            continue;
+          }
+          completedThisBatch++;
+          for (const row of result.value.rows) {
             if (row.fixture?.id) dailyOddsMap.set(Number(row.fixture.id), row);
           }
         }
-        job.oddsPagesDone += pageResults.length;
+        job.oddsPagesDone += completedThisBatch;
+        job.oddsPagesFailed = failedOddsPages;
         job.oddsFixturesWithData = dailyOddsMap.size;
-        job.currentMatch = `Maç önü oran sayfaları: ${job.oddsPagesDone}/${reportedOddsPages}`;
+        job.currentMatch = `Maç önü oran sayfaları: ${job.oddsPagesDone}/${reportedOddsPages} · eksik sayfa: ${failedOddsPages}`;
         job.updatedAt = new Date().toISOString();
         await persistDailyAnalysisRun(job);
-        console.log(`[Daily analysis odds] ${date}: pages=${job.oddsPagesDone}/${reportedOddsPages} fixturesWithOdds=${dailyOddsMap.size} parallel=${oddsPageConcurrency}`);
+        console.log(`[Daily analysis odds] ${date}: pages=${job.oddsPagesDone}/${reportedOddsPages} fixturesWithOdds=${dailyOddsMap.size} parallel=${oddsPageConcurrency} failed=${failedOddsPages}`);
       }
-      dailyOddsComplete = true;
-      console.log(`[Daily analysis odds] ${date}: pages=${reportedOddsPages} fixturesWithOdds=${dailyOddsMap.size}`);
+      dailyOddsComplete = failedOddsPages === 0;
+      job.oddsPagesFailed = failedOddsPages;
+      console.log(`[Daily analysis odds] ${date}: pages=${reportedOddsPages} fixturesWithOdds=${dailyOddsMap.size} failed=${failedOddsPages}`);
     } catch (oddsPrefetchError) {
       console.warn(`[Daily analysis odds] ${date}: toplu oran taraması tamamlanamadı; maç-bazlı güvenli yola dönülüyor: ${oddsPrefetchError.message}`);
     }
@@ -4353,7 +4363,8 @@ async function runDailyAnalysisJob(job) {
         const failedInBatch = new Set();
         await Promise.all(batch.map(async (match) => {
           try {
-        const oddsRow = dailyOddsComplete ? (dailyOddsMap.get(Number(match.id)) || null) : await getOddsForFixture(match.id, date).catch(()=>null);
+        // Başarılı sayfalardaki oranları koru; yalnızca eksik maçlarda tekil yedek sorgu yap.
+        const oddsRow = dailyOddsMap.get(Number(match.id)) || await getOddsForFixture(match.id, date).catch(()=>null);
         if (!oddsRow) { rejected.noOdds++; return; }
         const prematchFixture = { ...match, status:"NS", minute:null, homeScore:0, awayScore:0, htHomeScore:null, htAwayScore:null };
         // Both teams' last five completed matches are mandatory; odds-only predictions are rejected.
