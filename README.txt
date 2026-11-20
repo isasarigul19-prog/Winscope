@@ -1,0 +1,1 @@
+Bu paket tam uygulama değildir. Güncel GitHub test dalındaki server.js dosyasına uygulanacak 20 saniyelik zaman aşımı yamasını içerir. Eski server.txt ile tam dosya üretmek güvenli olmadığından yalnızca hedefli yama verilmiştir.
