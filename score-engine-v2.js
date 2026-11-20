@@ -161,4 +161,4 @@ function predictScore({fixture={},homeForm=null,awayForm=null,markets={},outcome
     oddsBookmaker:null,market1x2:outcome
   };
 }
-module.exports={predictScore};
+export { predictScore };
