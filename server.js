@@ -1057,7 +1057,7 @@ async function fetchTeamSeasonGoals(teamId, leagueId, season, venue) {
   }
 }
 
-async function fetchTeamRecentForm(teamId, fixtureId, leagueId = null, season = null, venue = null) {
+async function fetchTeamRecentForm(teamId, fixtureId, leagueId = null, season = null, venue = null, includeSeasonStats = false) {
   if (!teamId) return { available: false, sampleSize: 0 };
   try {
     const payload = await cachedProviderRequest(`form:${teamId}`, `/fixtures?team=${teamId}&last=20`, 6 * 60 * 60 * 1000);
@@ -1096,7 +1096,8 @@ async function fetchTeamRecentForm(teamId, fixtureId, leagueId = null, season = 
     const htVals10 = vals10.filter(x => x.htTotal != null);
     const recentAvgGoalsFor = Number((vals.reduce((sum,x)=>sum+x.gf,0)/vals.length).toFixed(2));
     const recentAvgGoalsAgainst = Number((vals.reduce((sum,x)=>sum+x.ga,0)/vals.length).toFixed(2));
-    const seasonStats = await fetchTeamSeasonGoals(teamId, leagueId, season, venue);
+    // Season-wide stats are optional and disabled by default to protect the shared API minute quota.
+    const seasonStats = includeSeasonStats ? await fetchTeamSeasonGoals(teamId, leagueId, season, venue) : null;
     // Blend the recent five-match form with the team's home/away season rate.
     // Recent form carries more weight (70%) so the season average stabilizes rather than overrides it.
     const blend = (recent, seasonal) => seasonal == null ? recent : Number((recent * 0.70 + seasonal * 0.30).toFixed(2));
