@@ -3971,6 +3971,7 @@ async function runDailyAnalysisJob(job) {
     for (const key of ["noOdds","outsideRange","unbalanced","noForm","noSupportedPick"]) rejected[key] = Number(rejected[key] || 0);
     const workerCount = Math.min(4, Math.max(1, Number(process.env.DAILY_ANALYSIS_CONCURRENCY) || 3));
     let completedFixtures = completedFixtureIds.size;
+    let progressPersist = Promise.resolve();
     job.current = completedFixtures;
     job.selected = selected.length;
     job.completedFixtureIds = [...completedFixtureIds];
@@ -4113,20 +4114,25 @@ async function runDailyAnalysisJob(job) {
             failedInBatch.add(Number(match.id));
             console.warn(`[Daily analysis] fixture=${match.id}: ${err.message}`);
             rejected.noSupportedPick++;
+          } finally {
+            // Her maç bittiği anda ilerlemeyi kalıcılaştır; üçlü grubun tamamını bekleme.
+            // Hata alan maç da işlendi sayılır; sonraki maçların ilerlemesini bloke etmez.
+            completedFixtureIds.add(Number(match.id));
+            progressPersist = progressPersist.then(async () => {
+              completedFixtures = completedFixtureIds.size;
+              job.completedFixtureIds = [...completedFixtureIds];
+              job.current = completedFixtures;
+              job.selected = selected.length;
+              job.rejected = {...rejected};
+              job.currentMatch = `${match.home} - ${match.away}`;
+              job.updatedAt = new Date().toISOString();
+              await persistDailyAnalysisRun(job);
+            });
+            await progressPersist;
           }
         }));
 
-        for (const match of batch) {
-          if (!failedInBatch.has(Number(match.id))) completedFixtureIds.add(Number(match.id));
-        }
-        job.completedFixtureIds = [...completedFixtureIds];
-        completedFixtures = completedFixtureIds.size;
-        job.current = completedFixtures;
-        job.selected = selected.length;
-        job.rejected = {...rejected};
-        job.currentMatch = batch.map(m => `${m.home} - ${m.away}`).join(" · ");
-        job.updatedAt = new Date().toISOString();
-        await persistDailyAnalysisRun(job);
+        await progressPersist;
         console.log(`[Daily analysis progress] ${date}: ${completedFixtures}/${job.total} · ${job.currentMatch} · seçilen=${selected.length} · workers=${workerCount} · pendingErrors=${failedInBatch.size}`);
       }
     }
