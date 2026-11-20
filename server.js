@@ -726,6 +726,17 @@ function logProviderUsage(response) {
   }
 }
 
+// Hata yanıtlarında kota başlıklarını mutlaka ayrı kaydet. Normal kullanım logu
+// dakikada bir kez yazıldığı için hatalı yanıtın başlıkları aksi halde kaybolabilir.
+function logProviderFailure(response, pathname, errorText) {
+  const header = name => response.headers.get(name) ?? "?";
+  const safePath = String(pathname || "").replace(/([?&](?:api_key|token|key)=)[^&]*/ig, "$1[redacted]");
+  console.error(`[API FAILURE DIAGNOSTIC] http=${response.status} ok=${response.ok} path=${safePath} ` +
+    `minute=${header("x-ratelimit-remaining")}/${header("x-ratelimit-limit")} ` +
+    `daily=${header("x-ratelimit-requests-remaining")}/${header("x-ratelimit-requests-limit")} ` +
+    `retryAfter=${header("retry-after")} error=${String(errorText || "").slice(0, 700)}`);
+}
+
 function enqueueProviderRequest(run, priority = 1) {
   return new Promise((resolve, reject) => {
     providerQueue.push({ run, priority, sequence: providerQueueSequence++, resolve, reject });
@@ -787,12 +798,21 @@ async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
     const errors = payload.errors && Object.keys(payload.errors).length ? payload.errors : null;
     const errorText = errors ? JSON.stringify(errors) : "";
     if (!response.ok || errors) {
+      // Günlük kota mesajı HTTP 200 + errors gövdesiyle de dönebilir.
+      // Bu, dakikalık HTTP 429 ile aynı hata değildir; gerçek yanıt başlıklarını kaydet.
+      logProviderFailure(response, pathname, errorText || `HTTP ${response.status}`);
+      if (/request limit for the day|daily request limit|requests? per day|daily quota/i.test(errorText)) {
+        const waitMs = 60_000;
+        providerCooldownUntil = Math.max(providerCooldownUntil, Date.now() + waitMs);
+        console.error(`[API DAILY QUOTA RESPONSE] 60 sn koruma beklemesi; istek önceliği=${priority}, kuyruk=${providerQueue.length}. Başlıklardaki günlük kalan hak yukarıdaki tanı kaydındadır.`);
+        throw new Error(`API-Football günlük kota yanıtı verdi; 60 saniye bekleme uygulandı. ${errorText}`);
+      }
       if (response.status === 429 || /rate.?limit|too many requests|per-minute|per-second/i.test(errorText)) {
         const retryHeader = Number(response.headers.get("retry-after")) || 0;
         const retryBody = Number((errorText.match(/retry after\s+(\d+)/i) || [])[1]) || 0;
         const waitMs = Math.max(90_000, (Math.max(retryHeader, retryBody) + 5) * 1000);
         providerCooldownUntil = Math.max(providerCooldownUntil, Date.now() + waitMs);
-        console.error(`[API 429] ${Math.ceil(waitMs / 1000)} sn bekleme; istek önceliği=${priority}, kuyruk=${providerQueue.length}. Aynı API anahtarını kullanan başka süreç olup olmadığını kontrol edin.`);
+        console.error(`[API 429] ${Math.ceil(waitMs / 1000)} sn bekleme; istek önceliği=${priority}, kuyruk=${providerQueue.length}.`);
         throw new Error(`API-Football hız sınırı; ${Math.ceil(waitMs / 1000)} saniye bekleme uygulandı. ${errorText}`);
       }
       throw new Error(`API-Football hatası: ${errors ? errorText : `HTTP ${response.status}`}`);
@@ -4259,13 +4279,9 @@ async function runDailyAnalysisJob(job) {
       await persistDailyAnalysisRun(job);
       const oddsPageConcurrency = Math.min(3, Math.max(2, Number(process.env.DAILY_ODDS_PAGE_CONCURRENCY) || 3));
       const pendingPages = Array.from({length:Math.max(0,reportedOddsPages-1)}, (_,i)=>i+2);
-      let failedOddsPages = 0;
       for (let offset = 0; offset < pendingPages.length; offset += oddsPageConcurrency) {
         const pageBatch = pendingPages.slice(offset, offset + oddsPageConcurrency);
-        // Bir sayfanın geçici hatası, o ana kadar alınan geçerli oran sayfalarını
-        // çöpe atmamalı. Başarılı sayfalar kullanılmaya devam eder; eksikler maç
-        // bazında güvenli yedek istekle tamamlanır.
-        const pageResults = await Promise.allSettled(pageBatch.map(async page => {
+        const pageResults = await Promise.all(pageBatch.map(async page => {
           const pagePayload = await cachedProviderRequest(
             `odds-date:${date}:page:${page}`,
             `/odds?date=${encodeURIComponent(date)}&page=${page}`,
@@ -4277,27 +4293,21 @@ async function runDailyAnalysisJob(job) {
           return {page, rows:pagePayload.response};
         }));
         for (const result of pageResults) {
-          if (result.status !== "fulfilled") {
-            failedOddsPages++;
-            console.warn(`[Daily analysis odds] ${date}: sayfa alınamadı: ${result.reason?.message || "bilinmeyen hata"}`);
-            continue;
-          }
-          for (const row of result.value.rows) {
+          for (const row of result.rows) {
             if (row.fixture?.id) dailyOddsMap.set(Number(row.fixture.id), row);
           }
         }
         job.oddsPagesDone += pageResults.length;
         job.oddsFixturesWithData = dailyOddsMap.size;
-        job.currentMatch = `Maç önü oran sayfaları: ${job.oddsPagesDone}/${reportedOddsPages} · eksik sayfa: ${failedOddsPages}`;
+        job.currentMatch = `Maç önü oran sayfaları: ${job.oddsPagesDone}/${reportedOddsPages}`;
         job.updatedAt = new Date().toISOString();
         await persistDailyAnalysisRun(job);
-        console.log(`[Daily analysis odds] ${date}: pages=${job.oddsPagesDone}/${reportedOddsPages} fixturesWithOdds=${dailyOddsMap.size} parallel=${oddsPageConcurrency} failed=${failedOddsPages}`);
+        console.log(`[Daily analysis odds] ${date}: pages=${job.oddsPagesDone}/${reportedOddsPages} fixturesWithOdds=${dailyOddsMap.size} parallel=${oddsPageConcurrency}`);
       }
-      dailyOddsComplete = failedOddsPages === 0;
-      job.oddsPagesFailed = failedOddsPages;
-      console.log(`[Daily analysis odds] ${date}: pages=${reportedOddsPages} fixturesWithOdds=${dailyOddsMap.size} failed=${failedOddsPages}`);
+      dailyOddsComplete = true;
+      console.log(`[Daily analysis odds] ${date}: pages=${reportedOddsPages} fixturesWithOdds=${dailyOddsMap.size}`);
     } catch (oddsPrefetchError) {
-      console.warn(`[Daily analysis odds] ${date}: toplu oran taraması tamamlanamadı; alınan sayfalar korunuyor, eksik maçlarda maç-bazlı yedek kullanılacak: ${oddsPrefetchError.message}`);
+      console.warn(`[Daily analysis odds] ${date}: toplu oran taraması tamamlanamadı; maç-bazlı güvenli yola dönülüyor: ${oddsPrefetchError.message}`);
     }
 
     const completedFixtureIds = new Set((job.completedFixtureIds || []).map(Number).filter(Number.isFinite));
@@ -4343,10 +4353,7 @@ async function runDailyAnalysisJob(job) {
         const failedInBatch = new Set();
         await Promise.all(batch.map(async (match) => {
           try {
-        // Toplu tarih taramasında bulunan oranı öncelikle kullan. Sayfalama
-        // eksik olsa da bulunan kayıtlar korunur; yalnızca bu maçta kayıt yoksa
-        // fixture bazlı yedek çağrı yapılır.
-        const oddsRow = dailyOddsMap.get(Number(match.id)) || await getOddsForFixture(match.id, date).catch(()=>null);
+        const oddsRow = dailyOddsComplete ? (dailyOddsMap.get(Number(match.id)) || null) : await getOddsForFixture(match.id, date).catch(()=>null);
         if (!oddsRow) { rejected.noOdds++; return; }
         const prematchFixture = { ...match, status:"NS", minute:null, homeScore:0, awayScore:0, htHomeScore:null, htAwayScore:null };
         // Both teams' last five completed matches are mandatory; odds-only predictions are rejected.
