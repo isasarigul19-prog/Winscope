@@ -1,19 +1,22 @@
-# WinScope Rebuilt
+# WinScope
 
-Bu paket WinScope arayüzünü korur ve analiz akışını yeniden düzenler.
+## Analiz kuralları
+- API-Football gerçek fikstür, maç önü oranı, skor ve canlı istatistik kaynağıdır.
+- Bet365 maç önü oranı varsa önceliklidir; yoksa API-Football'ın döndürdüğü diğer gerçek bookmaker verisi kullanılır.
+- Maç önü analizinde maç önü oranları ana sinyaldir; son 5 tamamlanmış maç takım formu yalnızca destekleyici girdidir.
+- Canlı analizde canlı oran kullanılmaz. Maç önü oranı; güncel dakika, skor ve mevcut canlı istatistiklerle birlikte değerlendirilir.
+- KG Var ve MS 2.5 Üst seçimlerinde maç önü oranı 1.50–1.73 aralığında olmalıdır. 1.50 altı fiyatla tercih üretilmez.
+- Kadın, U/yaş grubu, genç ve rezerv takımlar analiz havuzundan çıkarılır.
+- Gerçek veri yoksa oran, istatistik veya skor uydurulmaz; yeterli veri yoksa tercih/kupon üretilmez.
+- Oran değerleri kullanıcı arayüzünde ve Telegram bildirimlerinde gösterilmez; yalnızca iç analizde kullanılır.
+- Hiçbir tahmin garanti değildir. Sistem, eşikleri geçen en güçlü adayları seçer; aday yoksa kuponu zorlamaz.
 
-## Kurallar
-- API-Football verileri esas alınır.
-- Maç önü analizinde maç önü oranı ve son 5 maç formu destekleyici girdilerdir.
-- Canlı analizde son 5 maç formu seçim kapısı değildir; skor, dakika, mevcut canlı istatistik ve mevcutsa gerçek canlı oran kullanılır.
-- Gerçek canlı oran yoksa maç önü oranı kullanıldığı açıkça belirtilir; canlı oran diye etiketlenmez.
-- Oran/istatistik uydurulmaz. Veri eksikse senaryo tahmini ayrıca etiketlenir.
-- Oran değerleri arayüzde/Telegram'da gösterilmez.
-- Ana tercih ve alternatif aynı piyasa olarak tekrarlanmaz.
-- API-Football anahtarı ve Telegram/DB ayarları Render ortam değişkenlerinde tutulur.
+## Dağıtım
+- Başlangıç komutu: `npm start`
+- Sözdizimi kontrolü: `npm run check`
+- Gerekli Render ortam değişkenleri: `API_FOOTBALL_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DATABASE_URL`.
+- `/api/health` API anahtarı, Telegram ve veritabanı yapılandırmasını bildirir.
+- GitHub Actions, `server.js` değişikliklerinde otomatik `node --check server.js` kontrolü çalıştırır.
 
-## Deploy
-GitHub'daki mevcut projeyi yedekleyin. Bu paketteki `server.js`, `index.html`, `package.json` dosyalarını proje köküne koyun. Render'daki `API_FOOTBALL_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DATABASE_URL` değişkenlerini silmeyin.
-
-## Kontrol
-`/api/health` endpoint'i API anahtarı, Telegram ve veritabanı yapılandırmasını gösterir. Gerçek veri ve canlı odds erişimi API-Football aboneliğine bağlıdır; bu ortamda Render anahtarıyla uçtan uca test edilemez.
+## Not
+Canlı veri ve oranların kapsamı API-Football aboneliğine ve maç bazında sağlanan bookmaker verisine bağlıdır. Maç önü oranı kaydı her zaman resmî kapanış oranı anlamına gelmez.
