@@ -4259,9 +4259,13 @@ async function runDailyAnalysisJob(job) {
       await persistDailyAnalysisRun(job);
       const oddsPageConcurrency = Math.min(3, Math.max(2, Number(process.env.DAILY_ODDS_PAGE_CONCURRENCY) || 3));
       const pendingPages = Array.from({length:Math.max(0,reportedOddsPages-1)}, (_,i)=>i+2);
+      let failedOddsPages = 0;
       for (let offset = 0; offset < pendingPages.length; offset += oddsPageConcurrency) {
         const pageBatch = pendingPages.slice(offset, offset + oddsPageConcurrency);
-        const pageResults = await Promise.all(pageBatch.map(async page => {
+        // Bir sayfanın geçici hatası, o ana kadar alınan geçerli oran sayfalarını
+        // çöpe atmamalı. Başarılı sayfalar kullanılmaya devam eder; eksikler maç
+        // bazında güvenli yedek istekle tamamlanır.
+        const pageResults = await Promise.allSettled(pageBatch.map(async page => {
           const pagePayload = await cachedProviderRequest(
             `odds-date:${date}:page:${page}`,
             `/odds?date=${encodeURIComponent(date)}&page=${page}`,
@@ -4273,21 +4277,27 @@ async function runDailyAnalysisJob(job) {
           return {page, rows:pagePayload.response};
         }));
         for (const result of pageResults) {
-          for (const row of result.rows) {
+          if (result.status !== "fulfilled") {
+            failedOddsPages++;
+            console.warn(`[Daily analysis odds] ${date}: sayfa alınamadı: ${result.reason?.message || "bilinmeyen hata"}`);
+            continue;
+          }
+          for (const row of result.value.rows) {
             if (row.fixture?.id) dailyOddsMap.set(Number(row.fixture.id), row);
           }
         }
         job.oddsPagesDone += pageResults.length;
         job.oddsFixturesWithData = dailyOddsMap.size;
-        job.currentMatch = `Maç önü oran sayfaları: ${job.oddsPagesDone}/${reportedOddsPages}`;
+        job.currentMatch = `Maç önü oran sayfaları: ${job.oddsPagesDone}/${reportedOddsPages} · eksik sayfa: ${failedOddsPages}`;
         job.updatedAt = new Date().toISOString();
         await persistDailyAnalysisRun(job);
-        console.log(`[Daily analysis odds] ${date}: pages=${job.oddsPagesDone}/${reportedOddsPages} fixturesWithOdds=${dailyOddsMap.size} parallel=${oddsPageConcurrency}`);
+        console.log(`[Daily analysis odds] ${date}: pages=${job.oddsPagesDone}/${reportedOddsPages} fixturesWithOdds=${dailyOddsMap.size} parallel=${oddsPageConcurrency} failed=${failedOddsPages}`);
       }
-      dailyOddsComplete = true;
-      console.log(`[Daily analysis odds] ${date}: pages=${reportedOddsPages} fixturesWithOdds=${dailyOddsMap.size}`);
+      dailyOddsComplete = failedOddsPages === 0;
+      job.oddsPagesFailed = failedOddsPages;
+      console.log(`[Daily analysis odds] ${date}: pages=${reportedOddsPages} fixturesWithOdds=${dailyOddsMap.size} failed=${failedOddsPages}`);
     } catch (oddsPrefetchError) {
-      console.warn(`[Daily analysis odds] ${date}: toplu oran taraması tamamlanamadı; maç-bazlı güvenli yola dönülüyor: ${oddsPrefetchError.message}`);
+      console.warn(`[Daily analysis odds] ${date}: toplu oran taraması tamamlanamadı; alınan sayfalar korunuyor, eksik maçlarda maç-bazlı yedek kullanılacak: ${oddsPrefetchError.message}`);
     }
 
     const completedFixtureIds = new Set((job.completedFixtureIds || []).map(Number).filter(Number.isFinite));
@@ -4333,7 +4343,10 @@ async function runDailyAnalysisJob(job) {
         const failedInBatch = new Set();
         await Promise.all(batch.map(async (match) => {
           try {
-        const oddsRow = dailyOddsComplete ? (dailyOddsMap.get(Number(match.id)) || null) : await getOddsForFixture(match.id, date).catch(()=>null);
+        // Toplu tarih taramasında bulunan oranı öncelikle kullan. Sayfalama
+        // eksik olsa da bulunan kayıtlar korunur; yalnızca bu maçta kayıt yoksa
+        // fixture bazlı yedek çağrı yapılır.
+        const oddsRow = dailyOddsMap.get(Number(match.id)) || await getOddsForFixture(match.id, date).catch(()=>null);
         if (!oddsRow) { rejected.noOdds++; return; }
         const prematchFixture = { ...match, status:"NS", minute:null, homeScore:0, awayScore:0, htHomeScore:null, htAwayScore:null };
         // Both teams' last five completed matches are mandatory; odds-only predictions are rejected.
