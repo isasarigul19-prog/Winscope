@@ -1675,10 +1675,10 @@ function liveMarketAlreadySettled(market, fixture) {
 
 // PREMATCH-ONLY selector: compare every supported market against the odds-fitted score matrix.
 // This branch is deliberately isolated; live selection continues through the original logic below.
-function choosePrematchOddsMarket(oddsRow, fixture, excludeMarket = null, preferredMarket = null) {
+function choosePrematchOddsMarket(oddsRow, fixture, excludeMarket = null, preferredMarket = null, forms = null) {
   const rows = oddsForFixture(oddsRow);
   if (!rows.length) return null;
-  const fittedScores = scorePrediction(fixture, null, null, null, oddsRow);
+  const fittedScores = scorePrediction(fixture, forms?.home || null, forms?.away || null, null, oddsRow);
   const matrix = fittedScores?.matrixMarketProbabilities || {};
   const expectedGoals = fittedScores?.expectedGoals || {};
   const lambdaHome = Number(expectedGoals.home);
@@ -1725,6 +1725,7 @@ function choosePrematchOddsMarket(oddsRow, fixture, excludeMarket = null, prefer
     const edge = matrixPct - marketPct;
     const expectedReturnPct = (matrixPct / 100) * odd * 100 - 100;
     const agreement = Math.abs(matrixPct - marketPct);
+    const formPct = marketSupport(market, forms?.home, forms?.away);
     // Do not allow a negative model-vs-market edge to win merely because its
     // raw hit probability is high. Small calibration noise is tolerated.
     if (edge < -5) return;
@@ -1732,12 +1733,13 @@ function choosePrematchOddsMarket(oddsRow, fixture, excludeMarket = null, prefer
       + Math.max(-10, Math.min(10, edge * 1.15))
       + Math.max(-5, 4 - agreement * 0.25)
       + Math.min(3, Math.max(0, (matrixPct - 45) * 0.05))
-      + (/bet365/i.test(String(bookmaker || "")) ? 1.0 : 0);
+      + (/bet365/i.test(String(bookmaker || "")) ? 1.0 : 0)
+      + (formPct == null ? 0 : Math.max(-2, Math.min(2, (formPct - 50) * 0.04)));
     candidates.push({
       market, selection, odd, probability: marketPct, matrixPct,
       estimatedPct: Number(matrixPct.toFixed(1)),
       confidencePct: Math.max(1, Math.min(99, Math.round(matrixPct))),
-      valueEdge: Number(edge.toFixed(1)), score, bookmaker: bookmaker || "API-Football",
+      valueEdge: Number(edge.toFixed(1)), formPct, score, bookmaker: bookmaker || "API-Football",
       oddsTiming: "prematch", ...extra
     });
   };
@@ -1836,7 +1838,7 @@ function choosePrematchOddsMarket(oddsRow, fixture, excludeMarket = null, prefer
 
 function chooseSupportedMarket(oddsRow, mode, fixture, forms, stats, prematchOddsRow, excludeMarket = null, preferredMarket = null) {
   const live = mode === "live";
-  if (!live) return choosePrematchOddsMarket(prematchOddsRow || oddsRow, fixture, excludeMarket, preferredMarket);
+  if (!live) return choosePrematchOddsMarket(prematchOddsRow || oddsRow, fixture, excludeMarket, preferredMarket, forms);
   const total = Number(fixture.homeScore || 0) + Number(fixture.awayScore || 0);
   const minute = Number(fixture.minute || 0);
   const periodStatus = String(fixture.periodStatus || fixture.status || "").toUpperCase();
@@ -2723,10 +2725,14 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
               fetchTeamRecentForm(fixture.homeId,fixture.id,fixture.leagueId,fixture.season,"home"),
               fetchTeamRecentForm(fixture.awayId,fixture.id,fixture.leagueId,fixture.season,"away")
             ])
-          : [null, null];
-        if (mode === "live" && (!homeForm?.available || !awayForm?.available)) { rejected.noForm++; continue; }
-        let chosen = chooseSupportedMarket(marketOddsRow, mode, fixture, {home:homeForm,away:awayForm}, null, marketOddsRow);
-        const couponSupport = null;
+          : await Promise.all([
+              fetchTeamRecentForm(fixture.homeId, fixture.id),
+              fetchTeamRecentForm(fixture.awayId, fixture.id)
+            ]);
+        if (!homeForm?.available || !awayForm?.available) { rejected.noForm++; continue; }
+        const forms = {home:homeForm,away:awayForm};
+        let chosen = chooseSupportedMarket(marketOddsRow, mode, fixture, forms, null, marketOddsRow);
+        const couponSupport = { source:"son 5 tamamlanmış maç formu", sampleSize:Math.min(homeForm.sampleSize,awayForm.sampleSize) };
         if (!chosen) { rejected.noSignal++; continue; }
         oddsBasis = chosen.fallbackType
           ? "Maç önü oranları ve ortak skor matrisi"
@@ -2734,7 +2740,7 @@ async function createCouponByMode(date, mode = "prematch", options = {}) {
         candidates.push({fixtureId:fixture.id,league:fixture.league,country:fixture.country,home:fixture.home,away:fixture.away,
           fixtureDate:fixture.fixtureDate,market:chosen.market,selection:chosen.selection || null,confidencePct:chosen.confidencePct ?? null,
           source:chosen.bookmaker,internalOdd:chosen.odd,marketProbability:chosen.probability,
-          formSupport:chosen.formPct,score:chosen.score,scoreBasis:couponSupport?.source || "prematch odds + odds-fitted score matrix",supportSampleSize:couponSupport?.sampleSize || null,
+          formSupport:chosen.formPct,score:chosen.score,scoreBasis:couponSupport?.source || "prematch odds + odds-fitted score matrix + last-5 form",supportSampleSize:couponSupport?.sampleSize || null,
           minute:null,currentScore:"0-0",isLive:false,oddsBasis,statsSummary:null});
       }
     } catch(e) {
@@ -4273,14 +4279,21 @@ async function runDailyAnalysisJob(job) {
         if (!oddsRow) { rejected.noOdds++; return; }
         const prematchFixture = { ...match, status:"NS", minute:null, homeScore:0, awayScore:0, htHomeScore:null, htAwayScore:null };
         // Maç önü kararında yalnızca gerçek maç önü oranları ve ortak skor matrisi kullanılır.
-        let scores = scorePrediction(prematchFixture, null, null, null, oddsRow);
-        const supported = chooseSupportedMarket(oddsRow, "prematch", prematchFixture, {home:null,away:null}, null, oddsRow);
-        if (!supported) { rejected.noOddsMarket = (rejected.noOddsMarket || 0) + 1; return; }
-        // Refit the scenario after the main market is selected. Unconditional
-        // top scores remain available separately for honest score prediction.
-        scores = scorePrediction(prematchFixture, null, null, null, oddsRow, supported.market);
+        const initialSupported = chooseSupportedMarket(oddsRow, "prematch", prematchFixture, {home:null,away:null}, null, oddsRow);
+        if (!initialSupported) { rejected.noOddsMarket = (rejected.noOddsMarket || 0) + 1; return; }
+        if (!match.homeId || !match.awayId) { rejected.noForm++; return; }
+        const [homeForm, awayForm] = await Promise.all([
+          fetchTeamRecentForm(match.homeId, match.id),
+          fetchTeamRecentForm(match.awayId, match.id)
+        ]);
+        if (!homeForm?.available || !awayForm?.available) { rejected.noForm++; return; }
+        const forms = {home:homeForm,away:awayForm};
+        const supported = chooseSupportedMarket(oddsRow, "prematch", prematchFixture, forms, null, oddsRow);
+        if (!supported) { rejected.noSupportedPick++; return; }
+        // Son 5 tamamlanmış maç formu yalnızca destekleyici öncül; maç önü piyasası ana sinyaldir.
+        const scores = scorePrediction(prematchFixture, homeForm, awayForm, null, oddsRow, supported.market);
         const mainPick = supported.market;
-        const alternativePick = chooseSupportedMarket(oddsRow, "prematch", prematchFixture, {home:null,away:null}, null, oddsRow, mainPick);
+        const alternativePick = chooseSupportedMarket(oddsRow, "prematch", prematchFixture, forms, null, oddsRow, mainPick);
         const other = alternativePick?.market || null;
         console.log(`[Daily score] fixture=${match.id} ${match.home} vs ${match.away} | bookmaker=${scores.oddsBookmaker||"n/a"} | 1X2=${JSON.stringify(scores.market1x2)} | xG=${JSON.stringify(scores.expectedGoals)} | HT-xG=${JSON.stringify(scores.expectedHalfTimeGoals)} | unconditional=${JSON.stringify(scores.topScoreCandidates)} | matrixMarkets=${JSON.stringify(scores.matrixMarketProbabilities)} | pick=${mainPick} | alt=${other} | confidence=${supported.confidencePct}% | HT=${scores.halfTimeScore} FT=${scores.fullTimeScore} | basis=PREMATCH_ODDS_ONLY`);
         const analysis = {
@@ -4300,11 +4313,11 @@ async function runDailyAnalysisJob(job) {
           estimatedMarketProbability: supported.estimatedPct == null ? null : Number(supported.estimatedPct)/100,
           valueEdge: supported.valueEdge ?? null,
           modelMarketProbability: supported.matrixPct == null ? null : Number(supported.matrixPct)/100,
-          marketPercentages:analysisPercentages(oddsRow, null, null),
-          formSupport: 0,
+          marketPercentages:analysisPercentages(oddsRow, homeForm, awayForm),
+          formSupport: marketSupport(mainPick, homeForm, awayForm),
           selectionBookmaker: supported?.bookmaker || null,
           surprise:scores.surprise || null,
-          scoreBasis:scores.scoreBasis || "Yalnızca maç önü oranları ve ortak skor matrisi",
+          scoreBasis:scores.scoreBasis || "Maç önü oranları + son 5 tamamlanmış maç formu + ortak skor matrisi",
           expectedGoals:scores.expectedGoals || null,
           expectedHalfTimeGoals:scores.expectedHalfTimeGoals || null,
           halfTimeBasis:scores.halfTimeBasis || null,
