@@ -1,0 +1,29 @@
+WINSCOPE API HIZ SINIRI DÜZELTMESİ
+Hedef dal: test/winscope-improvements
+Dosya: server.js
+
+Güncel test dalındaki server.js içinde yaklaşık 699 ve 702. satırlardaki iki ayarı değiştir.
+
+ESKİ:
+const PROVIDER_MAX_IN_FLIGHT = Math.min(3, Math.max(1, Number(process.env.API_FOOTBALL_MAX_IN_FLIGHT) || 2));
+const PROVIDER_MIN_INTERVAL_MS = Math.max(350, Number(process.env.API_FOOTBALL_MIN_INTERVAL_MS) || 450);
+
+YENİ:
+const PROVIDER_MAX_IN_FLIGHT = 1; // API-Football dakika kotasını korumak için tek istek
+const PROVIDER_MIN_INTERVAL_MS = Math.max(1000, Number(process.env.API_FOOTBALL_MIN_INTERVAL_MS) || 1000);
+
+NEDEN:
+- Ekrandaki API planı 450 istek/dakika.
+- Logda dakikalık hız sınırı hatası var; günlük hakta 71.926/75.000 kalmış.
+- Eski ayar aynı anda 2 istek ve 450 ms aralıkla çalışabiliyordu.
+- Yeni ayar aynı anda tek istek ve en az 1 saniye aralık uygular (yaklaşık en fazla 60 istek/dakika).
+
+KONTROL:
+1. Yalnızca test/winscope-improvements dalında server.js dosyasını düzenle.
+2. package.json'daki npm run check komutunu çalıştır.
+3. Test servisi loglarında [API 429] hatasının tekrarlayıp tekrarlamadığını izle.
+4. Canlı branch'e veya main'e geçirme; Render canlı servisine deploy etme.
+
+NOT:
+Bu ZIP yalnızca iki satırlık güvenli kod yamasıdır, tam server.js değildir.
+GitHub entegrasyonunun yazma işlemi 403 ile engellendiği için değişikliği doğrudan depoya kaydedemedim.
