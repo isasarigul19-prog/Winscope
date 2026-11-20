@@ -3979,11 +3979,12 @@ const DAILY_SECONDARY_LEAGUE_NAMES = new Set([
 ]);
 function dailyAnalysisLeaguePriority(match) {
   if (!match || !Number(match.id) || isExcludedAnalysisCompetition(match)) return 3;
-  const name=String(match.league||"").toLocaleLowerCase("en").trim();
-  const id=Number(match.leagueId);
-  const majorTournament = /\b(world cup|euro(?:\s|$)|european championship|copa america|africa cup of nations|asian cup|gold cup|nations league|qualif(?:ication|ying|iers)?)\b/i.test(name);
-  if (DAILY_MAJOR_LEAGUE_IDS.has(id) || DAILY_MAJOR_LEAGUE_NAMES.has(name) || majorTournament) return 1;
-  if (DAILY_SECONDARY_LEAGUE_IDS.has(id) || DAILY_SECONDARY_LEAGUE_NAMES.has(name)) return 2;
+  // League IDs are globally unique in API-Football. Do not classify by generic
+  // labels such as "Premier League" or "Ligue 1": those names exist in many countries.
+  const id = Number(match.leagueId);
+  const majorTournamentIds = new Set([1, 4, 5, 6, 7, 9, 22]); // World Cup, Euro, Nations League, AFCON, Asian Cup, Copa America, Gold Cup
+  if (DAILY_MAJOR_LEAGUE_IDS.has(id) || majorTournamentIds.has(id)) return 1;
+  if (DAILY_SECONDARY_LEAGUE_IDS.has(id)) return 2;
   return 3;
 }
 function isDailyMajorLeague(match) {
