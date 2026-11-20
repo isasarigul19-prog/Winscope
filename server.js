@@ -4232,73 +4232,21 @@ async function runDailyAnalysisJob(job) {
       job.phase = "second_session";
       await persistDailyAnalysisRun(job);
     }
-    // Fetch the full date-level odds feed once and share its cache with coupons/Score Shot.
+    // Skip the global paginated odds feed. It can require 20-30 requests even
+    // when only a few dozen major-league fixtures are selected. The bounded
+    // fixture workers below fetch prematch odds only for selected fixtures.
     const dailyOddsMap = new Map();
-    let dailyOddsComplete = false;
-    try {
-      job.phase = "odds_prefetch";
-      job.current = 0;
-      job.currentMatch = "Maç önü oran sayfaları hazırlanıyor";
-      job.updatedAt = new Date().toISOString();
-      await persistDailyAnalysisRun(job);
-      const firstOddsPage = await cachedProviderRequest(
-        `odds-date:${date}:page:1`,
-        `/odds?date=${encodeURIComponent(date)}&page=1`,
-        15 * 60 * 1000
-      );
-      const reportedOddsPages = Math.max(1, Number(firstOddsPage.paging?.total || 1));
-      if (!Number.isInteger(reportedOddsPages) || reportedOddsPages > 100) {
-        throw new Error(`Günlük analiz oran sayfalaması güvenlik sınırını aştı: ${reportedOddsPages}`);
-      }
-      for (const row of (firstOddsPage.response || [])) {
-        if (row.fixture?.id) dailyOddsMap.set(Number(row.fixture.id), row);
-      }
-      job.oddsPagesDone = 1;
-      job.oddsPagesTotal = reportedOddsPages;
-      job.oddsFixturesWithData = dailyOddsMap.size;
-      await persistDailyAnalysisRun(job);
-      const oddsPageConcurrency = Math.min(3, Math.max(2, Number(process.env.DAILY_ODDS_PAGE_CONCURRENCY) || 3));
-      const pendingPages = Array.from({length:Math.max(0,reportedOddsPages-1)}, (_,i)=>i+2);
-      let failedOddsPages = 0;
-      for (let offset = 0; offset < pendingPages.length; offset += oddsPageConcurrency) {
-        const pageBatch = pendingPages.slice(offset, offset + oddsPageConcurrency);
-        // Bir sayfanın geçici hatası, o ana kadar alınan geçerli oran sayfalarını
-        // çöpe atmamalı. Başarılı sayfalar kullanılmaya devam eder; eksikler maç
-        // bazında güvenli yedek istekle tamamlanır.
-        const pageResults = await Promise.allSettled(pageBatch.map(async page => {
-          const pagePayload = await cachedProviderRequest(
-            `odds-date:${date}:page:${page}`,
-            `/odds?date=${encodeURIComponent(date)}&page=${page}`,
-            15 * 60 * 1000
-          );
-          if (!Array.isArray(pagePayload.response)) {
-            throw new Error(`Günlük analiz oran sayfası ${page}/${reportedOddsPages} geçersiz yanıt döndürdü.`);
-          }
-          return {page, rows:pagePayload.response};
-        }));
-        for (const result of pageResults) {
-          if (result.status !== "fulfilled") {
-            failedOddsPages++;
-            console.warn(`[Daily analysis odds] ${date}: sayfa alınamadı: ${result.reason?.message || "bilinmeyen hata"}`);
-            continue;
-          }
-          for (const row of result.value.rows) {
-            if (row.fixture?.id) dailyOddsMap.set(Number(row.fixture.id), row);
-          }
-        }
-        job.oddsPagesDone += pageResults.length;
-        job.oddsFixturesWithData = dailyOddsMap.size;
-        job.currentMatch = `Maç önü oran sayfaları: ${job.oddsPagesDone}/${reportedOddsPages} · eksik sayfa: ${failedOddsPages}`;
-        job.updatedAt = new Date().toISOString();
-        await persistDailyAnalysisRun(job);
-        console.log(`[Daily analysis odds] ${date}: pages=${job.oddsPagesDone}/${reportedOddsPages} fixturesWithOdds=${dailyOddsMap.size} parallel=${oddsPageConcurrency} failed=${failedOddsPages}`);
-      }
-      dailyOddsComplete = failedOddsPages === 0;
-      job.oddsPagesFailed = failedOddsPages;
-      console.log(`[Daily analysis odds] ${date}: pages=${reportedOddsPages} fixturesWithOdds=${dailyOddsMap.size} failed=${failedOddsPages}`);
-    } catch (oddsPrefetchError) {
-      console.warn(`[Daily analysis odds] ${date}: toplu oran taraması tamamlanamadı; alınan sayfalar korunuyor, eksik maçlarda maç-bazlı yedek kullanılacak: ${oddsPrefetchError.message}`);
-    }
+    const dailyOddsComplete = false;
+    job.phase = "fixture_analysis";
+    job.current = 0;
+    job.currentMatch = "Seçilen maçların maç önü oranları maç bazında hazırlanıyor";
+    job.oddsPagesDone = 0;
+    job.oddsPagesTotal = 0;
+    job.oddsPagesFailed = 0;
+    job.oddsFixturesWithData = 0;
+    job.updatedAt = new Date().toISOString();
+    await persistDailyAnalysisRun(job);
+    console.log(`[Daily analysis odds] ${date}: global pagination skipped; selected fixtures=${fixtures.length}; per-fixture odds enabled.`);
 
     const completedFixtureIds = new Set((job.completedFixtureIds || []).map(Number).filter(Number.isFinite));
     const existingAnalyses = (archives.analyses || []).filter(row => {
