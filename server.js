@@ -1639,6 +1639,27 @@ function analysisPercentages(oddsRow, homeForm, awayForm) {
   return out;
 }
 
+function couponPickConsistentWithPrediction(analysis) {
+  // A coupon leg must be supported by its own displayed unconditional score.
+  // Missing or unparsable scores are rejected rather than silently accepted.
+  const parse = value => {
+    const match = String(value || "").match(/(\\d+)\\s*[-:]\\s*(\\d+)/);
+    return match ? [Number(match[1]), Number(match[2])] : null;
+  };
+  const ft = parse(analysis?.fullTimeScore);
+  const ht = parse(analysis?.halfTimeScore);
+  if (!ft || !ht) return false;
+  if (ht[0] > ft[0] || ht[1] > ft[1]) return false;
+  const total = ft[0] + ft[1];
+  const market = String(analysis?.mainPick || "").trim().toUpperCase();
+  if (market === "KG VAR") return ft[0] >= 1 && ft[1] >= 1;
+  if (market === "MS 2.5 ÜST") return total >= 3;
+  if (market === "MS 3.5 ÜST") return total >= 4;
+  if (market === "EV 1.5 ÜST") return ft[0] >= 2;
+  if (market === "DEP 1.5 ÜST") return ft[1] >= 2;
+  return false;
+}
+
 function marketConsistentWithScore(market, scoreObj) {
   const pair = value => {
     const m = String(value || "").match(/(\d+)\s*[-:]\s*(\d+)/);
@@ -5329,8 +5350,18 @@ async function sendDailyAnalysisTopThree(session, date) {
       Number(a.fixtureId)>0 && upcoming.has(Number(a.fixtureId)) &&
       !alreadyUsed.has(Number(a.fixtureId)) &&
       ["KG VAR","MS 2.5 ÜST"].includes(String(a.mainPick||"")) &&
-      Boolean(a._couponEvidence)
+      Boolean(a._couponEvidence) &&
+      couponPickConsistentWithPrediction(a)
     );
+    const rejectedScoreConflict=rows.filter(a=>
+      Number(a.fixtureId)>0 && upcoming.has(Number(a.fixtureId)) &&
+      ["KG VAR","MS 2.5 ÜST"].includes(String(a.mainPick||"")) &&
+      Boolean(dailyCouponEvidence(a)) &&
+      !couponPickConsistentWithPrediction(a)
+    ).length;
+    if (rejectedScoreConflict) {
+      console.warn(`[DAILY ANALYSIS COUPON SCORE GATE] ${key} rejected=${rejectedScoreConflict} reason=market_score_conflict_or_missing_score`);
+    }
     const deduped=[...new Map(valid.map(a=>[Number(a.fixtureId),a])).values()];
     deduped.sort((a,b)=>
       Number(b._couponEvidence.tier)-Number(a._couponEvidence.tier) ||
