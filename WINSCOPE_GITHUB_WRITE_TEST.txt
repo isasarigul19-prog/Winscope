@@ -1,3 +1,0 @@
-WinScope GitHub write-access verification
-Created on test/winscope-improvements only.
-Temporary verification file; safe to delete after read-back.
