@@ -1,4 +1,5 @@
 import express from "express";
+import { predictScore as predictScoreV2 } from "./score-engine-v2.js";
 import pg from "pg";
 import path from "node:path";
 import fs from "node:fs/promises";
@@ -1270,338 +1271,15 @@ function marketProbabilitiesByName(oddsRow) {
   return result;
 }
 function scorePrediction(fixture, homeForm, awayForm, liveOddsRow = null, prematchOddsRow = null, preferredMarket = null) {
-  // Günün Analizi skor motoru: maç önü oranları ana sinyaldir; son 5 maç
-  // yalnızca gol toplamını ve takım gol dağılımını destekler. Canlı oran/skor kullanılmaz.
-  const hasForm = Boolean(homeForm?.available && awayForm?.available);
+  // V2 motor: yalnızca maç önü oranları + tamamlanmış son 5 maç formu.
+  // Canlı oranlar kasıtlı olarak bu fonksiyona aktarılmaz.
   const pre = marketProbabilitiesByName(prematchOddsRow);
   const rows = oddsForFixture(prematchOddsRow);
-  const outcomeRows = rows.filter(x => x.market === "MS 1" && x.outcomeProbabilities);
-  const outcomeRow = outcomeRows.find(x => /bet365/i.test(String(x.bookmaker || ""))) || outcomeRows[0];
-  // oddsForFixture outcomeProbabilities yüzdelik (0-100) döndürür.
-  // Modelin bütün hedefleri 0-1 aralığında olduğundan burada normalize et.
-  const outcomePct = outcomeRow?.outcomeProbabilities || null;
-  const outcome = outcomePct ? {
-    home:Number(outcomePct.home)/100,
-    draw:Number(outcomePct.draw)/100,
-    away:Number(outcomePct.away)/100
-  } : null;
-
-  const totalLines = [["MS 1.5 ÜST",2],["MS 2.5 ÜST",3],["MS 3.5 ÜST",4],["MS 4.5 ÜST",5],["MS 5.5 ÜST",6]];
-  const totalLambdas = totalLines.map(([market,threshold]) =>
-    lambdaFromMarketProbability(pre[market],threshold,0)
-  ).filter(Number.isFinite).sort((a,b)=>a-b);
-  const marketTotalLambda = totalLambdas.length
-    ? totalLambdas[Math.floor((totalLambdas.length-1)/2)] : null;
-
-  const marketHomeLambda = lambdaFromMarketProbability(pre["EV 1.5 ÜST"],2,0);
-  const marketAwayLambda = lambdaFromMarketProbability(pre["DEP 1.5 ÜST"],2,0);
-  // V4: Ev/deplasman gol beklentilerini ayrı ayrı, aynı skor matrisi üzerinde
-  // maç önü piyasalarının tamamına uydur. Önceki sürüm toplam gol + ev payı
-  // şeklinde iki aşamalıydı; bu yaklaşım bazı farklı maçları aynı 1-1 skoruna
-  // yığabiliyordu. Bet365 her pazarda önceliklidir.
-  const formHome = hasForm
-    ? Math.max(0.08,0.58*Number(homeForm.avgGoalsFor||0)+0.42*Number(awayForm.avgGoalsAgainst||0)) : null;
-  const formAway = hasForm
-    ? Math.max(0.08,0.58*Number(awayForm.avgGoalsFor||0)+0.42*Number(homeForm.avgGoalsAgainst||0)) : null;
-  const pmf=(k,l)=>Math.exp(-l)*Math.pow(l,k)/factorial(k);
-  // Conservative Dixon-Coles low-score dependence correction. The coefficient
-  // remains experimental until it is fitted by league on a clean historical set.
-  const dcRho=(lh,la)=>-Math.min(0.06,0.75/Math.max(0.01,lh*la));
-  const dcTau=(h,a,lh,la,rho)=>{
-    if(h===0&&a===0) return 1-lh*la*rho;
-    if(h===0&&a===1) return 1+lh*rho;
-    if(h===1&&a===0) return 1+la*rho;
-    if(h===1&&a===1) return 1-rho;
-    return 1;
-  };
-  const dcGrid=(lh,la,maxGoals=10)=>{
-    const rho=dcRho(lh,la), cells=[];
-    let mass=0;
-    for(let h=0;h<=maxGoals;h++) for(let a=0;a<=maxGoals;a++){
-      const p=Math.max(0,pmf(h,lh)*pmf(a,la)*dcTau(h,a,lh,la,rho));
-      cells.push({home:h,away:a,probability:p}); mass+=p;
-    }
-    const norm=mass||1;
-    for(const cell of cells) cell.probability/=norm;
-    return cells;
-  };
-  const matrixStats=(lh,la)=>{
-    let home=0,draw=0,away=0,over15=0,over25=0,over35=0,over45=0,over55=0,btts=0,home15=0,away15=0;
-    for(const cell of dcGrid(lh,la,10)){
-      const {home:h,away:a,probability:p}=cell, total=h+a;
-      if(h>a) home+=p; else if(h===a) draw+=p; else away+=p;
-      if(total>=2) over15+=p;
-      if(total>=3) over25+=p;
-      if(total>=4) over35+=p;
-      // Critical V9 fix: the 4.5 line means 5+ total goals.
-      // Previously over45 was initialized but never accumulated, so the
-      // selector interpreted MS 4.5 ALT as a 100% probability every time.
-      if(total>=5) over45+=p;
-      if(total>=6) over55+=p;
-      if(h>0&&a>0) btts+=p; if(h>=2) home15+=p; if(a>=2) away15+=p;
-    }
-    return {home,draw,away,over15,over25,over35,over45,over55,btts,home15,away15};
-  };
-  const targets=[];
-  const addTarget=(key,target,weight)=>{
-    const p=Number(target);
-    if(Number.isFinite(p)&&p>=0.03&&p<=0.97) targets.push({key,p,weight});
-  };
-  if(outcome){
-    // 1X2 piyasa yönü skor motorunun ana girdisidir. Önceki 2.2 ağırlığı,
-    // gol çizgileri ve form öncülünün 1X2 favori bilgisini bastırmasına izin veriyordu.
-    addTarget("home",outcome.home,5.5); addTarget("draw",outcome.draw,5.5); addTarget("away",outcome.away,5.5);
-  }
-  addTarget("over15",pre["MS 1.5 ÜST"],1.0);
-  addTarget("over25",pre["MS 2.5 ÜST"],2.2);
-  addTarget("over35",pre["MS 3.5 ÜST"],1.2);
-  addTarget("over45",pre["MS 4.5 ÜST"],0.8);
-  addTarget("over55",pre["MS 5.5 ÜST"],0.45);
-  addTarget("btts",pre["KG VAR"],1.8);
-  addTarget("home15",pre["EV 1.5 ÜST"],1.0);
-  addTarget("away15",pre["DEP 1.5 ÜST"],1.0);
-
-  // Takım formu veri varsa zayıf öncül olarak kullanılır; maç önü piyasa
-  // olasılıkları daha yüksek ağırlıktadır.
-  const priorHome=Number.isFinite(formHome)?Math.max(0.15,Math.min(3.8,formHome)):null;
-  const priorAway=Number.isFinite(formAway)?Math.max(0.15,Math.min(3.8,formAway)):null;
-  const lossAt=(lh,la)=>{
-    const stats=matrixStats(lh,la);
-    let loss=0,weight=0;
-    for(const t of targets){loss+=t.weight*Math.pow(stats[t.key]-t.p,2);weight+=t.weight;}
-    // Son 5 maç formu yalnızca destekleyici öncül; piyasa sinyalini geçersiz kılamaz.
-    if(priorHome!=null){loss+=0.12*Math.pow(lh-priorHome,2);weight+=0.12;}
-    if(priorAway!=null){loss+=0.12*Math.pow(la-priorAway,2);weight+=0.12;}
-    return weight?loss/weight:Infinity;
-  };
-  let lambdaHome=null,lambdaAway=null,bestLoss=Infinity;
-  // Kaba tarama + en iyi bölgenin hassas taraması. Her maçta iki gol
-  // beklentisi ayrı optimize edilir; tek bir sabit gol paylaşımı yoktur.
-  if(targets.length||priorHome!=null||priorAway!=null){
-    for(let h=0.20;h<=3.8001;h+=0.10) for(let a=0.20;a<=3.8001;a+=0.10){
-      const loss=lossAt(h,a);
-      if(loss<bestLoss){bestLoss=loss;lambdaHome=h;lambdaAway=a;}
-    }
-    if(lambdaHome!=null){
-      const centerH=lambdaHome,centerA=lambdaAway;
-      for(let h=Math.max(0.12,centerH-0.12);h<=Math.min(4.0,centerH+0.12)+0.0001;h+=0.02)
-        for(let a=Math.max(0.12,centerA-0.12);a<=Math.min(4.0,centerA+0.12)+0.0001;a+=0.02){
-          const loss=lossAt(h,a);
-          if(loss<bestLoss){bestLoss=loss;lambdaHome=h;lambdaAway=a;}
-        }
-    }
-  }
-  if(!Number.isFinite(lambdaHome)||!Number.isFinite(lambdaAway)) return {
-    halfTimeScore:"Tahmin üretilemedi",fullTimeScore:"Tahmin üretilemedi",alternativeFullTimeScore:"Tahmin üretilemedi",
-    sixPlusProbability:null,sixPlusCandidate:false,
-    scoreBasis:"Maç önü oranı veya iki takımın son 5 maç gol verisi yetersiz"
-  };
-  lambdaHome=Math.max(0.08,Math.min(4.5,lambdaHome));
-  lambdaAway=Math.max(0.08,Math.min(4.5,lambdaAway));
-
-  const scores=dcGrid(lambdaHome,lambdaAway,10)
-    .filter(x=>x.home<=9&&x.away<=9)
-    .map(x=>({home:x.home,away:x.away,probability:x.probability}));
-  const scoreMeetsMarket=(x,market)=>{
-    const total=x.home+x.away;
-    if(market==="KG VAR") return x.home>0&&x.away>0;
-    if(market==="KG YOK") return x.home===0||x.away===0;
-    if(market==="EV 0.5 ÜST") return x.home>=1;
-    if(market==="DEP 0.5 ÜST") return x.away>=1;
-    if(market==="EV 1.5 ÜST") return x.home>=2;
-    if(market==="DEP 1.5 ÜST") return x.away>=2;
-    if(market==="MS 0.5 ÜST") return total>=1;
-    if(market==="MS 1.5 ÜST") return total>=2;
-    if(market==="MS 2.5 ÜST") return total>=3;
-    if(market==="MS 3.5 ÜST") return total>=4;
-    if(market==="MS 4.5 ÜST") return total>=5;
-    if(market==="MS 5.5 ÜST") return total>=6;
-    if(market==="MS 1.5 ALT") return total<=1;
-    if(market==="MS 2.5 ALT") return total<=2;
-    if(market==="MS 3.5 ALT") return total<=3;
-    if(market==="MS 4.5 ALT") return total<=4;
-    return true;
-  };
-  // İki ayrı skor sıralaması tutulur:
-  // 1) Koşulsuz skor: maçın genel olarak en olası gerçek skoru.
-  // 2) Pazar senaryosu: seçilen KG/ÜST tercihi gerçekleşirse en olası skor.
-  // Pazar koşuluna göre normalize edilmiş yüzde, genel skor olasılığı gibi sunulmaz.
-  const unconditionalScores = scores.map(x => ({...x}));
-  unconditionalScores.sort((a,b)=>
-    b.probability-a.probability ||
-    (a.home+a.away)-(b.home+b.away) ||
-    b.home-a.home
-  );
-  const unconditionalBest = unconditionalScores[0];
-  const unconditionalAlternative = unconditionalScores[1] || unconditionalBest;
-
-  const conditionalScores=preferredMarket
-    ? scores.filter(x=>scoreMeetsMarket(x,preferredMarket))
-    : scores;
-  const scenarioScores=(conditionalScores.length?conditionalScores:scores).map(x=>({...x}));
-  const scenarioMass=scenarioScores.reduce((sum,x)=>sum+x.probability,0)||1;
-  for(const x of scenarioScores)x.probability/=scenarioMass;
-  scenarioScores.sort((a,b)=>
-    b.probability-a.probability ||
-    (a.home+a.away)-(b.home+b.away) ||
-    b.home-a.home
-  );
-  let marketScenarioBest=scenarioScores[0];
-  // 1X2 yönü yalnızca pazar senaryosunda çok yakın olasılıklarda bağlayıcıdır.
-  if(outcome){
-    const favorite=outcome.home>outcome.away?"home":outcome.away>outcome.home?"away":null;
-    if(favorite){
-      const favoriteCandidate=scenarioScores.find(x=>
-        favorite==="home"?x.home>x.away:x.away>x.home
-      );
-      if(favoriteCandidate && favoriteCandidate.probability>=marketScenarioBest.probability*0.92)
-        marketScenarioBest=favoriteCandidate;
-    }
-  }
-  const marketScenarioAlternative=
-    scenarioScores.find(x=>x.home!==marketScenarioBest.home||x.away!==marketScenarioBest.away)
-    || unconditionalAlternative;
-  const best=unconditionalBest;
-  const alternative=unconditionalAlternative;
-  const sixPlusProbability=scores.reduce((sum,x)=>sum+(x.home+x.away>=6?x.probability:0),0);
-  const sixPlusCandidate=sixPlusProbability>=0.20;
-  const matrixMarketStats = matrixStats(lambdaHome, lambdaAway);
-  const matrixMarketProbabilities = {
-    "KG VAR": matrixMarketStats.btts,
-    "MS 2.5 ÜST": matrixMarketStats.over25,
-    "EV 1.5 ÜST": matrixMarketStats.home15,
-    "DEP 1.5 ÜST": matrixMarketStats.away15,
-    "MS 1.5 ÜST": matrixMarketStats.over15,
-    "MS 3.5 ÜST": matrixMarketStats.over35,
-    "MS 4.5 ÜST": matrixMarketStats.over45,
-    "MS 5.5 ÜST": matrixMarketStats.over55
-  };
-  const constraints=targets;
-
-  // İlk yarı modeli: önce maç önü İY gol çizgileri, yoksa son 5 maçın
-  // gerçek devre arası gol frekansları kullanılır. Sabit %44 varsayımı artık
-  // tek başına kullanılmaz; yalnızca veri yoksa emniyetli yedek olarak kalır.
-  const ht05=pre["İY 0.5 ÜST"], ht15=pre["İY 1.5 ÜST"];
-  const fitLambdaFromRates = (p05, p15) => {
-    if (!Number.isFinite(p05) && !Number.isFinite(p15)) return null;
-    let bestLambda=null, bestError=Infinity;
-    for(let l=0.05;l<=4.00;l+=0.005){
-      let error=0, count=0;
-      if(Number.isFinite(p05)){ error+=Math.pow(poissonProbabilityAtLeast(1,l,0)-p05,2); count++; }
-      if(Number.isFinite(p15)){ error+=Math.pow(poissonProbabilityAtLeast(2,l,0)-p15,2); count++; }
-      if(count && error/count<bestError){bestError=error/count;bestLambda=l;}
-    }
-    return bestLambda;
-  };
-  const marketHtLambda=fitLambdaFromRates(ht05,ht15);
-  const formHt05Vals=[homeForm?.htOver05Pct,awayForm?.htOver05Pct]
-    .filter(Number.isFinite).map(x=>Number(x)/100);
-  const formHt15Vals=[homeForm?.htOver15Pct,awayForm?.htOver15Pct]
-    .filter(Number.isFinite).map(x=>Number(x)/100);
-  const formHt05=formHt05Vals.length ? formHt05Vals.reduce((a,b)=>a+b,0)/formHt05Vals.length : null;
-  const formHt15=formHt15Vals.length ? formHt15Vals.reduce((a,b)=>a+b,0)/formHt15Vals.length : null;
-  const formHtLambda=fitLambdaFromRates(formHt05,formHt15);
-  let htTotal=null, halfTimeBasis="yedek %44 tam maç gol payı";
-  if(Number.isFinite(marketHtLambda) && Number.isFinite(formHtLambda)){
-    htTotal=0.65*marketHtLambda+0.35*formHtLambda;
-    halfTimeBasis="maç önü İY gol oranları + son 5 maç devre arası gol frekansı";
-  } else if(Number.isFinite(marketHtLambda)){
-    htTotal=marketHtLambda;
-    halfTimeBasis="maç önü İY gol oranları";
-  } else if(Number.isFinite(formHtLambda)){
-    htTotal=0.75*formHtLambda+0.25*0.44*(lambdaHome+lambdaAway);
-    halfTimeBasis="son 5 maç devre arası gol frekansı + tam maç beklentisi";
-  } else {
-    htTotal=0.44*(lambdaHome+lambdaAway);
-  }
-  htTotal=Math.max(0.05,Math.min(lambdaHome+lambdaAway,htTotal));
-  const htHomeForm = Number.isFinite(homeForm?.htAvgGoalsFor) && Number.isFinite(awayForm?.htAvgGoalsAgainst)
-    ? Math.max(0.03,0.55*Number(homeForm.htAvgGoalsFor)+0.45*Number(awayForm.htAvgGoalsAgainst)) : null;
-  const htAwayForm = Number.isFinite(awayForm?.htAvgGoalsFor) && Number.isFinite(homeForm?.htAvgGoalsAgainst)
-    ? Math.max(0.03,0.55*Number(awayForm.htAvgGoalsFor)+0.45*Number(homeForm.htAvgGoalsAgainst)) : null;
-  const htTeamFormAvailable = htHomeForm != null && htAwayForm != null;
-  const ftShare = lambdaHome/(lambdaHome+lambdaAway);
-  let htShare=ftShare;
-  if(htTeamFormAvailable && (htHomeForm+htAwayForm)>0){
-    const formShare=htHomeForm/(htHomeForm+htAwayForm);
-    htShare=0.65*formShare+0.35*ftShare;
-  }
-  const htHome=htTotal*htShare, htAway=htTotal*(1-htShare);
-  // İY skoru artık bağımsız bir Poisson tablosundan seçilmez.
-  // Önce en olası MS skoru belirlenir; ardından o MS skoruna ulaşabilecek
-  // İY skorları, gollerin devre öncesi gerçekleşme olasılığıyla sıralanır.
-  // Böylece İY ev/deplasman golleri hiçbir zaman MS skorunu aşamaz.
-  const binomialPmf=(n,k,p)=>{
-    if(k<0||k>n) return 0;
-    let choose=1;
-    for(let i=1;i<=k;i++) choose=choose*(n-i+1)/i;
-    return choose*Math.pow(p,k)*Math.pow(1-p,n-k);
-  };
-  const htShareHome=Math.max(0.01,Math.min(0.95,htHome/Math.max(0.01,lambdaHome)));
-  const htShareAway=Math.max(0.01,Math.min(0.95,htAway/Math.max(0.01,lambdaAway)));
-  const htScores=[];
-  for(let h=0;h<=best.home;h++) for(let a=0;a<=best.away;a++){
-    htScores.push({
-      home:h,away:a,
-      p:binomialPmf(best.home,h,htShareHome)*binomialPmf(best.away,a,htShareAway)
-    });
-  }
-  htScores.sort((a,b)=>b.p-a.p||(a.home+a.away)-(b.home+b.away)||b.home-a.home);
-  if(htTeamFormAvailable) halfTimeBasis += " + takım bazında son 5 İY golü";
-
-  const basis=[];
-  if(outcome) basis.push("Bet365 öncelikli, marjı ayıklanmış maç önü 1X2 güç dağılımı");
-  if(marketTotalLambda!=null) basis.push("maç önü toplam gol çizgileri");
-  if(marketHomeLambda!=null||marketAwayLambda!=null) basis.push("takım gol çizgileri");
-  if(hasForm) basis.push("son 5 maç hücum/savunma desteği");
-  if(constraints.length) basis.push("gol/KG/1X2 olasılıklarıyla ortak skor matrisi");
-  if(Number.isFinite(ht05)||Number.isFinite(ht15)||Number.isFinite(formHtLambda)) basis.push(halfTimeBasis);
-  return {
-    halfTimeScore:`${htScores[0].home}-${htScores[0].away} (tahmin)`,
-    // Kesin skor tahmini, seçilen bahis pazarına göre koşullandırılmaz.
-    // Aksi halde KG VAR seçildiğinde 1-1 gibi skorlar yapay biçimde öne çıkar.
-    // Pazar gerçekleşirse en olası skorlar aşağıdaki marketScenario alanlarında ayrı tutulur.
-    fullTimeScore:`${best.home}-${best.away} (tahmin)`,
-    alternativeFullTimeScore:`${alternative.home}-${alternative.away} (alternatif tahmin)`,
-    unconditionalFullTimeScore:`${best.home}-${best.away}`,
-    unconditionalAlternativeFullTimeScore:`${alternative.home}-${alternative.away}`,
-    predictedScoreProbability:Number(best.probability.toFixed(4)),
-    sixPlusProbability:Number(sixPlusProbability.toFixed(4)),
-    sixPlusCandidate,
-    marketScenarioScore:`${marketScenarioBest.home}-${marketScenarioBest.away} (tercih senaryosu)`,
-    marketScenarioAlternativeScore:`${marketScenarioAlternative.home}-${marketScenarioAlternative.away} (tercih senaryosu alternatifi)`,
-    scoreBasis:basis.join(" + ")||"Maç önü oranları ve son 5 maç formu",
-    expectedGoals:{home:Number(lambdaHome.toFixed(2)),away:Number(lambdaAway.toFixed(2))},
-    matrixMarketProbabilities,
-    expectedHalfTimeGoals:{home:Number(htHome.toFixed(2)),away:Number(htAway.toFixed(2)),total:Number(htTotal.toFixed(2))},
-    halfTimeBasis,
-    topScoreCandidates:unconditionalScores.slice(0,3).map(x=>({
-      score:`${x.home}-${x.away}`,
-      probability:Number(x.probability.toFixed(4))
-    })),
-    marketScenarioCandidates:scenarioScores.slice(0,3).map(x=>({
-      score:`${x.home}-${x.away}`,
-      conditionalProbability:Number(x.probability.toFixed(4))
-    })),
-    scoreProbability:Number(best.probability.toFixed(4)),
-    alternativeScoreProbability:Number(alternative.probability.toFixed(4)),
-    marketScenarioProbability:Number(marketScenarioBest.probability.toFixed(4)),
-    scoreCondition:preferredMarket || "UNCONDITIONAL",
-    scoreProbabilityType:preferredMarket ? "MARKET_CONDITIONAL_FOR_PREDICTED_SCORE" : "UNCONDITIONAL",
-    unconditionalScoreProbability:Number(best.probability.toFixed(4)),
-    modelVersion:"V11_MARKET_PLUS_LAST5_FORM",
-    scoreModelMethod:"DIXON_COLES_MARKET_FIT_WITH_LAST5_FORM_PRIOR_AND_VALUE_RANKING",
-    htFtConsistency:true,
-    halfTimeScoreProbability:Number((htScores[0]?.p||0).toFixed(4)),
-    dixonColesRho:Number(dcRho(lambdaHome,lambdaAway).toFixed(4)),
-    htTeamFormUsed:Boolean(htTeamFormAvailable),
-    htFormSampleSize:{home:Number(homeForm?.htSampleSize||0),away:Number(awayForm?.htSampleSize||0)},
-    modelFitError:Number(bestLoss.toFixed(6)),
-    marketTargetsUsed:targets.map(x=>x.key),
-    oddsBookmaker:outcomeRow?.bookmaker || rows.find(x=>/bet365/i.test(String(x.bookmaker||"")))?.bookmaker || rows[0]?.bookmaker || null,
-    market1x2:outcome?{home:Number(outcome.home.toFixed(4)),draw:Number(outcome.draw.toFixed(4)),away:Number(outcome.away.toFixed(4))}:null,
-    rawOdds1x2:outcomeRow?{home:Number(outcomeRow.homeOdd),draw:Number(outcomeRow.drawOdd),away:Number(outcomeRow.awayOdd),bookmaker:outcomeRow.bookmaker}:null
-  };
+  const outcomeRow = rows.find(x => x.market === "MS 1" && x.outcomeProbabilities && /bet365/i.test(String(x.bookmaker || "")))
+    || rows.find(x => x.market === "MS 1" && x.outcomeProbabilities) || null;
+  const p = outcomeRow?.outcomeProbabilities;
+  const outcome = p ? { home:Number(p.home)/100, draw:Number(p.draw)/100, away:Number(p.away)/100 } : null;
+  return predictScoreV2({ fixture, homeForm, awayForm, markets:pre, outcome, preferredMarket });
 }
 
 function analysisPercentages(oddsRow, homeForm, awayForm) {
@@ -4293,6 +3971,7 @@ async function runDailyAnalysisJob(job) {
     for (const key of ["noOdds","outsideRange","unbalanced","noForm","noSupportedPick"]) rejected[key] = Number(rejected[key] || 0);
     const workerCount = Math.min(4, Math.max(1, Number(process.env.DAILY_ANALYSIS_CONCURRENCY) || 3));
     let completedFixtures = completedFixtureIds.size;
+    let progressPersist = Promise.resolve();
     job.current = completedFixtures;
     job.selected = selected.length;
     job.completedFixtureIds = [...completedFixtureIds];
@@ -4306,6 +3985,7 @@ async function runDailyAnalysisJob(job) {
     }
 
     const sessions = [firstSession, secondSession];
+    const terminalFailures = new Set();
     for (let sessionIndex = 0; sessionIndex < sessions.length; sessionIndex++) {
       const sessionFixtures = sessions[sessionIndex].filter(match => !completedFixtureIds.has(Number(match.id)));
       if (sessionIndex === 1) {
@@ -4318,7 +3998,8 @@ async function runDailyAnalysisJob(job) {
         console.log(`[Daily analysis] ${date}: 1. tarama tamamlandı (${firstSessionCount} maç); 2. tarama otomatik başlıyor (${secondSession.length} maç).`);
       }
 
-      for (let batchStart = 0; batchStart < sessionFixtures.length; batchStart += workerCount) {
+      const retryCounts = new Map();
+      for (let batchStart = 0; batchStart < sessionFixtures.length;) {
         const batch = sessionFixtures.slice(batchStart, batchStart + workerCount);
         const failedInBatch = new Set();
         await Promise.all(batch.map(async (match) => {
@@ -4435,22 +4116,55 @@ async function runDailyAnalysisJob(job) {
             failedInBatch.add(Number(match.id));
             console.warn(`[Daily analysis] fixture=${match.id}: ${err.message}`);
             rejected.noSupportedPick++;
+          } finally {
+            // Her maç bittiği anda ilerlemeyi kalıcılaştır; üçlü grubun tamamını bekleme.
+            // Hata alan maç da işlendi sayılır; sonraki maçların ilerlemesini bloke etmez.
+            if (!failedInBatch.has(Number(match.id))) completedFixtureIds.add(Number(match.id));
+            progressPersist = progressPersist.then(async () => {
+              completedFixtures = completedFixtureIds.size;
+              job.completedFixtureIds = [...completedFixtureIds];
+              job.current = completedFixtures;
+              job.selected = selected.length;
+              job.rejected = {...rejected};
+              job.currentMatch = `${match.home} - ${match.away}`;
+              job.updatedAt = new Date().toISOString();
+              await persistDailyAnalysisRun(job);
+            });
+            await progressPersist;
           }
         }));
 
-        for (const match of batch) {
-          if (!failedInBatch.has(Number(match.id))) completedFixtureIds.add(Number(match.id));
-        }
-        job.completedFixtureIds = [...completedFixtureIds];
-        completedFixtures = completedFixtureIds.size;
-        job.current = completedFixtures;
-        job.selected = selected.length;
-        job.rejected = {...rejected};
-        job.currentMatch = batch.map(m => `${m.home} - ${m.away}`).join(" · ");
-        job.updatedAt = new Date().toISOString();
-        await persistDailyAnalysisRun(job);
+        await progressPersist;
         console.log(`[Daily analysis progress] ${date}: ${completedFixtures}/${job.total} · ${job.currentMatch} · seçilen=${selected.length} · workers=${workerCount} · pendingErrors=${failedInBatch.size}`);
+        // Geçici API/DB hatası alan fikstürleri en fazla iki kez daha kuyruğa al.
+        for (const failedId of failedInBatch) {
+          const attempts = (retryCounts.get(failedId) || 0) + 1;
+          retryCounts.set(failedId, attempts);
+          if (attempts <= 2) {
+            const failedMatch = batch.find(item => Number(item.id) === failedId);
+            if (failedMatch) {
+              sessionFixtures.push(failedMatch);
+              console.warn(`[Daily analysis retry] fixture=${failedId} retry=${attempts}/2`);
+            } else terminalFailures.add(failedId);
+          } else {
+            terminalFailures.add(failedId);
+            console.error(`[Daily analysis exhausted] fixture=${failedId} attempts=3`);
+          }
+        }
+        batchStart += batch.length;
       }
+    }
+    if (terminalFailures.size > 0) {
+      job.status = "failed";
+      job.phase = "failed";
+      job.error = `${terminalFailures.size} maç 3 denemeden sonra tamamlanamadı.`;
+      job.failedFixtureIds = [...terminalFailures];
+      job.completedFixtureIds = [...completedFixtureIds];
+      job.current = completedFixtureIds.size;
+      job.selected = selected.length;
+      job.rejected = {...rejected};
+      await persistDailyAnalysisRun(job);
+      return;
     }
     await settleDailyMarketPredictions();
     job.firstScanCompleted = true;
@@ -6337,29 +6051,42 @@ const SCORE_SHOT_MAJOR_LEAGUE_NAMES = new Set([
   "j1 league", "k league 1", "liga mx", "uefa champions league", "uefa europa league",
   "uefa conference league"
 ]);
-// API-Football A milli takım organizasyonları: Dünya Kupası, kıta turnuvaları,
-// Milletler Ligi, Gold Cup, elemeler ve A milli takım dostluk maçları.
-const SCORE_SHOT_NATIONAL_LEAGUE_IDS = new Set([1, 4, 5, 6, 7, 9, 22, 29, 30, 31, 32, 33, 34]);
+// API-Football A milli takım organizasyonları: yalnızca doğrulanmış üst düzey
+// milli takım turnuvaları/elemeleri. Belirsiz ID'ler (29-34) bilerek alınmaz.
+const SCORE_SHOT_NATIONAL_LEAGUE_IDS = new Set([1, 4, 5, 6, 7, 9, 22]);
 const SCORE_SHOT_NATIONAL_LEAGUE_NAMES = new Set([
   "fifa world cup", "world cup", "uefa european championship", "european championship",
   "uefa nations league", "nations league", "africa cup of nations", "asian cup",
-  "copa america", "concacaf gold cup", "world cup - qualification", "world cup qualification"
+  "copa america", "concacaf gold cup", "world cup qualification"
 ]);
 function isScoreShotEligibleCompetition(match) {
-  // Score Shot: all identified senior competitions are eligible, not only the
-  // former fixed major/national league allowlist. Youth, women's, reserve and
-  // second-team competitions remain excluded by the shared exclusion guard.
+  // Fail-closed: only the explicit major/secondary club competition allowlist
+  // and verified senior national-team competitions are eligible.
+  // Do not use dailyAnalysisLeaguePriority's numeric return as a boolean.
   if (!match || isExcludedAnalysisCompetition(match)) return false;
   const leagueId = Number(match.leagueId || match.league_id || 0);
   const leagueName = String(match.league || match.league_name || "")
     .toLocaleLowerCase("en").replace(/[’']/g, " ").replace(/[._-]+/g, " ")
     .replace(/\s+/g, " ").trim();
-  const country = String(match.country || match.league_country || "").trim();
-  // Exclude friendly/preseason competitions, while allowing any named league or
-  // competition with a provider ID so an unfamiliar league cannot zero the scan.
   const friendly = /\b(friendlies?|club friendlies?|preseason|pre season)\b/i.test(leagueName);
-  if (friendly) return false;
-  return leagueId > 0 || Boolean(leagueName && country);
+  if (friendly || !Number.isInteger(leagueId) || leagueId <= 0) return false;
+  const majorClub = SCORE_SHOT_MAJOR_LEAGUE_IDS.has(leagueId);
+  const seniorNational = SCORE_SHOT_NATIONAL_LEAGUE_IDS.has(leagueId) ||
+    SCORE_SHOT_NATIONAL_LEAGUE_NAMES.has(leagueName);
+  return majorClub || seniorNational;
+}
+
+// SCORE SHOT is a shortlist engine, not a score generator for every fixture.
+// Hard caps protect API quota and force the model to focus on the strongest leagues.
+const SCORE_SHOT_MAX_FIXTURES_PER_RUN = 30;
+const SCORE_SHOT_MAX_PICKS_PER_RUN = 3;
+const SCORE_SHOT_MIN_MARKET_COVERAGE = 4;
+const SCORE_SHOT_MAX_FIT_LOSS = 0.025;
+const SCORE_SHOT_MIN_EXACT_PROBABILITY = 8.5;
+function scoreShotLeagueRank(match) {
+  const id = Number(match?.leagueId || 0);
+  if ([2,3,848,39,140,78,135,61,203,1,4,5,6,7,9,22].includes(id)) return 1;
+  return 2;
 }
 
 async function scoreShotReadRows(date) {
@@ -6458,12 +6185,18 @@ async function executeScoreShotJob(date, job) {
       const localDay = new Intl.DateTimeFormat('en-CA', { timeZone:'Europe/Istanbul', year:'numeric', month:'2-digit', day:'2-digit' }).format(kickoffDate);
       return localDay === date;
     });
-    const fixtures = upcomingInWindow.filter(isScoreShotEligibleCompetition);
-    const outsideScope = upcomingInWindow.length - fixtures.length;
+    const eligibleFixtures = upcomingInWindow.filter(isScoreShotEligibleCompetition)
+      .sort((a,b) => scoreShotLeagueRank(a) - scoreShotLeagueRank(b) ||
+        String(a.fixtureDate || "").localeCompare(String(b.fixtureDate || "")));
+    const outsideScope = upcomingInWindow.length - eligibleFixtures.length;
+    const fixtures = eligibleFixtures.slice(0, SCORE_SHOT_MAX_FIXTURES_PER_RUN);
+    const cappedByLimit = Math.max(0, eligibleFixtures.length - fixtures.length);
     const outsideWindow = allFixtures.length - upcomingInWindow.length;
     job.fixtures = fixtures.length; job.outsideScope = outsideScope; job.phase = 'odds'; job.updatedAt = new Date().toISOString();
     await persistScoreShotJob(job);
-    console.log(`[SCORE SHOT] fixtures received=${allFixtures.length} sameDayUpcoming=${upcomingInWindow.length} eligible=${fixtures.length} outsideMajorOrNational=${outsideScope} outsideWindowOrStarted=${outsideWindow}`);
+    console.log(`[SCORE SHOT] fixtures received=${allFixtures.length} sameDayUpcoming=${upcomingInWindow.length} eligibleBeforeCap=${eligibleFixtures.length} selectedForOdds=${fixtures.length} cappedByLimit=${cappedByLimit} outsideMajorOrNational=${outsideScope} outsideWindowOrStarted=${outsideWindow}`);
+    const eligibleLeagues = [...new Set(fixtures.map(x => `${x.leagueId}:${x.league}`))].sort();
+    console.log(`[SCORE SHOT] eligible leagues count=${eligibleLeagues.length} list=${eligibleLeagues.join(" | ") || "none"}`);
 
     // Do not download every paginated odds row when the competition/time filters
     // found no fixtures. Fetch odds only for eligible fixtures, avoiding dozens
@@ -6491,17 +6224,26 @@ async function executeScoreShotJob(date, job) {
       if (!odds) { missingOdds++; job.matchesDone++; continue; }
       oddsMatched++;
       const market = scoreShotMarketInputs(odds);
-      if (!market) { missingMarkets++; job.matchesDone++; continue; }
-      // Load only pre-kickoff completed-match form; the helper enforces the date cutoff.
+      if (!market || Number(market.marketCoverage || 0) < SCORE_SHOT_MIN_MARKET_COVERAGE) {
+        missingMarkets++; job.matchesDone++; continue;
+      }
+      // No fallback score from odds alone: both teams need a valid five-match form sample.
       const [homeForm,awayForm] = await Promise.all([
         scoreShotTeamForm(m.homeId,m.fixtureDate),
         scoreShotTeamForm(m.awayId,m.fixtureDate)
       ]);
+      if (!homeForm || !awayForm || Number(homeForm.sample) < 5 || Number(awayForm.sample) < 5 ||
+          Number(homeForm.htSample) < 4 || Number(awayForm.htSample) < 4) {
+        notEligible++; job.matchesDone++; continue;
+      }
       const model = scoreShotFit(market,homeForm,awayForm);
       if (!model) { notEligible++; job.matchesDone++; continue; }
       modeled++;
       const top = model.top3[0];
-      if (!top) { notEligible++; job.matchesDone++; continue; }
+      if (!top || Number(model.fitLoss) > SCORE_SHOT_MAX_FIT_LOSS ||
+          Number(model.exactProbability) < SCORE_SHOT_MIN_EXACT_PROBABILITY) {
+        notEligible++; job.matchesDone++; continue;
+      }
       const marketQuality = Math.min(1, 0.72 + (Number(market.marketCoverage || 2) - 2) * 0.07);
       const reversalMax = Math.max(model.reversalProbabilities?.["1/2"] || 0, model.reversalProbabilities?.["2/1"] || 0);
       // 1/2 and 2/1 are surfaced as a separate high-interest signal, not treated as guaranteed picks.
@@ -6517,7 +6259,7 @@ async function executeScoreShotJob(date, job) {
       }
     }
     candidates.sort((a,b) => b.selectionScore-a.selectionScore || b.exactProbability-a.exactProbability);
-    const selected = candidates.slice(0,5);
+    const selected = candidates.slice(0, SCORE_SHOT_MAX_PICKS_PER_RUN);
     let saved = 0;
     console.log(`[SCORE SHOT] model complete oddsMatched=${oddsMatched} missingOdds=${missingOdds} missingMarkets=${missingMarkets} modeled=${modeled} candidates=${candidates.length} selected=${selected.length}`);
     job.phase = 'saving'; job.selected = selected.length; job.updatedAt=new Date().toISOString();
@@ -6540,7 +6282,7 @@ async function executeScoreShotJob(date, job) {
       saved += r.rowCount || 0;
     }
     const rows = await scoreShotReadRows(date);
-    const diagnostics = {fixtures:fixtures.length,outsideMajorOrNational:outsideScope,outsideWindowOrStarted:outsideWindow,windowHours:24,oddsFixtureRequests:fixtures.length,oddsRows:oddsRowsCount,oddsMatched,withOdds:oddsMatched,missingOdds,missingMarkets,notEligible,modeled,candidates:candidates.length,selected:selected.length,newlySaved:saved,totalSaved:rows.length,durationMs:Date.now()-startedAt};
+    const diagnostics = {fixtures:fixtures.length,eligibleBeforeCap:eligibleFixtures.length,cappedByLimit,outsideMajorOrNational:outsideScope,outsideWindowOrStarted:outsideWindow,windowHours:24,oddsFixtureRequests:fixtures.length,oddsRows:oddsRowsCount,oddsMatched,withOdds:oddsMatched,missingOdds,missingMarkets,notEligible,modeled,candidates:candidates.length,selected:selected.length,maxFixtures:SCORE_SHOT_MAX_FIXTURES_PER_RUN,maxPicks:SCORE_SHOT_MAX_PICKS_PER_RUN,minMarketCoverage:SCORE_SHOT_MIN_MARKET_COVERAGE,maxFitLoss:SCORE_SHOT_MAX_FIT_LOSS,minExactProbability:SCORE_SHOT_MIN_EXACT_PROBABILITY,newlySaved:saved,totalSaved:rows.length,durationMs:Date.now()-startedAt};
     job.status = 'completed'; job.phase = 'completed'; job.diagnostics = diagnostics;
     job.updatedAt = new Date().toISOString(); job.finishedAt = job.updatedAt;
     await persistScoreShotJob(job);

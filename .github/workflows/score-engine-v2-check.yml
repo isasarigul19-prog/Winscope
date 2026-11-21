@@ -1,0 +1,26 @@
+name: Score Engine V2 checks
+
+on:
+  pull_request:
+    branches:
+      - security/single-admin-auth
+  push:
+    branches:
+      - feature/score-engine-v2
+
+jobs:
+  syntax-and-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Check JavaScript syntax
+        run: |
+          node --check server.js
+          node --check score-engine-v2.js
+      - name: Run Score Engine V2 unit tests
+        run: node --test
