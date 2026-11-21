@@ -6060,20 +6060,25 @@ const SCORE_SHOT_NATIONAL_LEAGUE_NAMES = new Set([
   "copa america", "concacaf gold cup", "world cup - qualification", "world cup qualification"
 ]);
 function isScoreShotEligibleCompetition(match) {
-  // Score Shot: all identified senior competitions are eligible, not only the
-  // former fixed major/national league allowlist. Youth, women's, reserve and
-  // second-team competitions remain excluded by the shared exclusion guard.
+  // Score Shot uses the same Tier 1 + Tier 2 competition scope as Günün Analizleri.
+  // Senior national-team tournaments/qualifiers are additionally allowed.
+  // Youth, women's, reserve and second-team competitions remain excluded.
   if (!match || isExcludedAnalysisCompetition(match)) return false;
   const leagueId = Number(match.leagueId || match.league_id || 0);
   const leagueName = String(match.league || match.league_name || "")
     .toLocaleLowerCase("en").replace(/[’']/g, " ").replace(/[._-]+/g, " ")
     .replace(/\s+/g, " ").trim();
-  const country = String(match.country || match.league_country || "").trim();
-  // Exclude friendly/preseason competitions, while allowing any named league or
-  // competition with a provider ID so an unfamiliar league cannot zero the scan.
   const friendly = /\b(friendlies?|club friendlies?|preseason|pre season)\b/i.test(leagueName);
-  if (friendly) return false;
-  return leagueId > 0 || Boolean(leagueName && country);
+  if (friendly || !Number.isInteger(leagueId) || leagueId <= 0) return false;
+  const dailyScope = dailyAnalysisLeaguePriority({
+    id: leagueId,
+    leagueId,
+    league: leagueName,
+    country: match.country || match.league_country || "",
+    home: match.home || match.home_team || "",
+    away: match.away || match.away_team || ""
+  }) <= 2;
+  return dailyScope || SCORE_SHOT_NATIONAL_LEAGUE_IDS.has(leagueId);
 }
 
 async function scoreShotReadRows(date) {
