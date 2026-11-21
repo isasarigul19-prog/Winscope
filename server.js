@@ -6076,6 +6076,19 @@ function isScoreShotEligibleCompetition(match) {
   return majorClub || seniorNational;
 }
 
+// SCORE SHOT is a shortlist engine, not a score generator for every fixture.
+// Hard caps protect API quota and force the model to focus on the strongest leagues.
+const SCORE_SHOT_MAX_FIXTURES_PER_RUN = 30;
+const SCORE_SHOT_MAX_PICKS_PER_RUN = 3;
+const SCORE_SHOT_MIN_MARKET_COVERAGE = 4;
+const SCORE_SHOT_MAX_FIT_LOSS = 0.025;
+const SCORE_SHOT_MIN_EXACT_PROBABILITY = 8.5;
+function scoreShotLeagueRank(match) {
+  const id = Number(match?.leagueId || 0);
+  if ([2,3,848,39,140,78,135,61,203,1,4,5,6,7,9,22].includes(id)) return 1;
+  return 2;
+}
+
 async function scoreShotReadRows(date) {
   const q=await databasePool.query(`SELECT fixture_id,kickoff_at,league_id,league,home_team,away_team,predicted_ht,predicted_ft,top_scores,model_data,selection_score,exact_probability,actual_ht,actual_ft,ht_hit,ft_hit,top3_hit,settled_at,created_at
     FROM winscope_score_shot_predictions WHERE match_date=$1 ORDER BY selection_score DESC,kickoff_at NULLS LAST`,[date]);
@@ -6172,12 +6185,16 @@ async function executeScoreShotJob(date, job) {
       const localDay = new Intl.DateTimeFormat('en-CA', { timeZone:'Europe/Istanbul', year:'numeric', month:'2-digit', day:'2-digit' }).format(kickoffDate);
       return localDay === date;
     });
-    const fixtures = upcomingInWindow.filter(isScoreShotEligibleCompetition);
-    const outsideScope = upcomingInWindow.length - fixtures.length;
+    const eligibleFixtures = upcomingInWindow.filter(isScoreShotEligibleCompetition)
+      .sort((a,b) => scoreShotLeagueRank(a) - scoreShotLeagueRank(b) ||
+        String(a.fixtureDate || "").localeCompare(String(b.fixtureDate || "")));
+    const outsideScope = upcomingInWindow.length - eligibleFixtures.length;
+    const fixtures = eligibleFixtures.slice(0, SCORE_SHOT_MAX_FIXTURES_PER_RUN);
+    const cappedByLimit = Math.max(0, eligibleFixtures.length - fixtures.length);
     const outsideWindow = allFixtures.length - upcomingInWindow.length;
     job.fixtures = fixtures.length; job.outsideScope = outsideScope; job.phase = 'odds'; job.updatedAt = new Date().toISOString();
     await persistScoreShotJob(job);
-    console.log(`[SCORE SHOT] fixtures received=${allFixtures.length} sameDayUpcoming=${upcomingInWindow.length} eligible=${fixtures.length} outsideMajorOrNational=${outsideScope} outsideWindowOrStarted=${outsideWindow}`);
+    console.log(`[SCORE SHOT] fixtures received=${allFixtures.length} sameDayUpcoming=${upcomingInWindow.length} eligibleBeforeCap=${eligibleFixtures.length} selectedForOdds=${fixtures.length} cappedByLimit=${cappedByLimit} outsideMajorOrNational=${outsideScope} outsideWindowOrStarted=${outsideWindow}`);
     const eligibleLeagues = [...new Set(fixtures.map(x => `${x.leagueId}:${x.league}`))].sort();
     console.log(`[SCORE SHOT] eligible leagues count=${eligibleLeagues.length} list=${eligibleLeagues.join(" | ") || "none"}`);
 
@@ -6207,17 +6224,26 @@ async function executeScoreShotJob(date, job) {
       if (!odds) { missingOdds++; job.matchesDone++; continue; }
       oddsMatched++;
       const market = scoreShotMarketInputs(odds);
-      if (!market) { missingMarkets++; job.matchesDone++; continue; }
-      // Load only pre-kickoff completed-match form; the helper enforces the date cutoff.
+      if (!market || Number(market.marketCoverage || 0) < SCORE_SHOT_MIN_MARKET_COVERAGE) {
+        missingMarkets++; job.matchesDone++; continue;
+      }
+      // No fallback score from odds alone: both teams need a valid five-match form sample.
       const [homeForm,awayForm] = await Promise.all([
         scoreShotTeamForm(m.homeId,m.fixtureDate),
         scoreShotTeamForm(m.awayId,m.fixtureDate)
       ]);
+      if (!homeForm || !awayForm || Number(homeForm.sample) < 5 || Number(awayForm.sample) < 5 ||
+          Number(homeForm.htSample) < 4 || Number(awayForm.htSample) < 4) {
+        notEligible++; job.matchesDone++; continue;
+      }
       const model = scoreShotFit(market,homeForm,awayForm);
       if (!model) { notEligible++; job.matchesDone++; continue; }
       modeled++;
       const top = model.top3[0];
-      if (!top) { notEligible++; job.matchesDone++; continue; }
+      if (!top || Number(model.fitLoss) > SCORE_SHOT_MAX_FIT_LOSS ||
+          Number(model.exactProbability) < SCORE_SHOT_MIN_EXACT_PROBABILITY) {
+        notEligible++; job.matchesDone++; continue;
+      }
       const marketQuality = Math.min(1, 0.72 + (Number(market.marketCoverage || 2) - 2) * 0.07);
       const reversalMax = Math.max(model.reversalProbabilities?.["1/2"] || 0, model.reversalProbabilities?.["2/1"] || 0);
       // 1/2 and 2/1 are surfaced as a separate high-interest signal, not treated as guaranteed picks.
@@ -6233,7 +6259,7 @@ async function executeScoreShotJob(date, job) {
       }
     }
     candidates.sort((a,b) => b.selectionScore-a.selectionScore || b.exactProbability-a.exactProbability);
-    const selected = candidates.slice(0,5);
+    const selected = candidates.slice(0, SCORE_SHOT_MAX_PICKS_PER_RUN);
     let saved = 0;
     console.log(`[SCORE SHOT] model complete oddsMatched=${oddsMatched} missingOdds=${missingOdds} missingMarkets=${missingMarkets} modeled=${modeled} candidates=${candidates.length} selected=${selected.length}`);
     job.phase = 'saving'; job.selected = selected.length; job.updatedAt=new Date().toISOString();
@@ -6256,7 +6282,7 @@ async function executeScoreShotJob(date, job) {
       saved += r.rowCount || 0;
     }
     const rows = await scoreShotReadRows(date);
-    const diagnostics = {fixtures:fixtures.length,outsideMajorOrNational:outsideScope,outsideWindowOrStarted:outsideWindow,windowHours:24,oddsFixtureRequests:fixtures.length,oddsRows:oddsRowsCount,oddsMatched,withOdds:oddsMatched,missingOdds,missingMarkets,notEligible,modeled,candidates:candidates.length,selected:selected.length,newlySaved:saved,totalSaved:rows.length,durationMs:Date.now()-startedAt};
+    const diagnostics = {fixtures:fixtures.length,eligibleBeforeCap:eligibleFixtures.length,cappedByLimit,outsideMajorOrNational:outsideScope,outsideWindowOrStarted:outsideWindow,windowHours:24,oddsFixtureRequests:fixtures.length,oddsRows:oddsRowsCount,oddsMatched,withOdds:oddsMatched,missingOdds,missingMarkets,notEligible,modeled,candidates:candidates.length,selected:selected.length,maxFixtures:SCORE_SHOT_MAX_FIXTURES_PER_RUN,maxPicks:SCORE_SHOT_MAX_PICKS_PER_RUN,minMarketCoverage:SCORE_SHOT_MIN_MARKET_COVERAGE,maxFitLoss:SCORE_SHOT_MAX_FIT_LOSS,minExactProbability:SCORE_SHOT_MIN_EXACT_PROBABILITY,newlySaved:saved,totalSaved:rows.length,durationMs:Date.now()-startedAt};
     job.status = 'completed'; job.phase = 'completed'; job.diagnostics = diagnostics;
     job.updatedAt = new Date().toISOString(); job.finishedAt = job.updatedAt;
     await persistScoreShotJob(job);
