@@ -3985,6 +3985,7 @@ async function runDailyAnalysisJob(job) {
     }
 
     const sessions = [firstSession, secondSession];
+    const terminalFailures = new Set();
     for (let sessionIndex = 0; sessionIndex < sessions.length; sessionIndex++) {
       const sessionFixtures = sessions[sessionIndex].filter(match => !completedFixtureIds.has(Number(match.id)));
       if (sessionIndex === 1) {
@@ -3997,6 +3998,7 @@ async function runDailyAnalysisJob(job) {
         console.log(`[Daily analysis] ${date}: 1. tarama tamamlandı (${firstSessionCount} maç); 2. tarama otomatik başlıyor (${secondSession.length} maç).`);
       }
 
+      const retryCounts = new Map();
       for (let batchStart = 0; batchStart < sessionFixtures.length; batchStart += workerCount) {
         const batch = sessionFixtures.slice(batchStart, batchStart + workerCount);
         const failedInBatch = new Set();
@@ -4134,7 +4136,34 @@ async function runDailyAnalysisJob(job) {
 
         await progressPersist;
         console.log(`[Daily analysis progress] ${date}: ${completedFixtures}/${job.total} · ${job.currentMatch} · seçilen=${selected.length} · workers=${workerCount} · pendingErrors=${failedInBatch.size}`);
+        // Geçici API/DB hatası alan fikstürleri en fazla iki kez daha kuyruğa al.
+        for (const failedId of failedInBatch) {
+          const attempts = (retryCounts.get(failedId) || 0) + 1;
+          retryCounts.set(failedId, attempts);
+          if (attempts <= 2) {
+            const failedMatch = batch.find(item => Number(item.id) === failedId);
+            if (failedMatch) {
+              sessionFixtures.push(failedMatch);
+              console.warn(`[Daily analysis retry] fixture=${failedId} retry=${attempts}/2`);
+            } else terminalFailures.add(failedId);
+          } else {
+            terminalFailures.add(failedId);
+            console.error(`[Daily analysis exhausted] fixture=${failedId} attempts=3`);
+          }
+        }
       }
+    }
+    if (terminalFailures.size > 0) {
+      job.status = "failed";
+      job.phase = "failed";
+      job.error = `${terminalFailures.size} maç 3 denemeden sonra tamamlanamadı.`;
+      job.failedFixtureIds = [...terminalFailures];
+      job.completedFixtureIds = [...completedFixtureIds];
+      job.current = completedFixtureIds.size;
+      job.selected = selected.length;
+      job.rejected = {...rejected};
+      await persistDailyAnalysisRun(job);
+      return;
     }
     await settleDailyMarketPredictions();
     job.firstScanCompleted = true;
