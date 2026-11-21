@@ -3999,7 +3999,7 @@ async function runDailyAnalysisJob(job) {
       }
 
       const retryCounts = new Map();
-      for (let batchStart = 0; batchStart < sessionFixtures.length; batchStart += workerCount) {
+      for (let batchStart = 0; batchStart < sessionFixtures.length;) {
         const batch = sessionFixtures.slice(batchStart, batchStart + workerCount);
         const failedInBatch = new Set();
         await Promise.all(batch.map(async (match) => {
@@ -4151,6 +4151,7 @@ async function runDailyAnalysisJob(job) {
             console.error(`[Daily analysis exhausted] fixture=${failedId} attempts=3`);
           }
         }
+        batchStart += batch.length;
       }
     }
     if (terminalFailures.size > 0) {
