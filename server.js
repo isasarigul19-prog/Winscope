@@ -6051,18 +6051,18 @@ const SCORE_SHOT_MAJOR_LEAGUE_NAMES = new Set([
   "j1 league", "k league 1", "liga mx", "uefa champions league", "uefa europa league",
   "uefa conference league"
 ]);
-// API-Football A milli takım organizasyonları: Dünya Kupası, kıta turnuvaları,
-// Milletler Ligi, Gold Cup, elemeler ve A milli takım dostluk maçları.
-const SCORE_SHOT_NATIONAL_LEAGUE_IDS = new Set([1, 4, 5, 6, 7, 9, 22, 29, 30, 31, 32, 33, 34]);
+// API-Football A milli takım organizasyonları: yalnızca doğrulanmış üst düzey
+// milli takım turnuvaları/elemeleri. Belirsiz ID'ler (29-34) bilerek alınmaz.
+const SCORE_SHOT_NATIONAL_LEAGUE_IDS = new Set([1, 4, 5, 6, 7, 9, 22]);
 const SCORE_SHOT_NATIONAL_LEAGUE_NAMES = new Set([
   "fifa world cup", "world cup", "uefa european championship", "european championship",
   "uefa nations league", "nations league", "africa cup of nations", "asian cup",
-  "copa america", "concacaf gold cup", "world cup - qualification", "world cup qualification"
+  "copa america", "concacaf gold cup", "world cup qualification"
 ]);
 function isScoreShotEligibleCompetition(match) {
-  // Score Shot uses the same Tier 1 + Tier 2 competition scope as Günün Analizleri.
-  // Senior national-team tournaments/qualifiers are additionally allowed.
-  // Youth, women's, reserve and second-team competitions remain excluded.
+  // Fail-closed: only the explicit major/secondary club competition allowlist
+  // and verified senior national-team competitions are eligible.
+  // Do not use dailyAnalysisLeaguePriority's numeric return as a boolean.
   if (!match || isExcludedAnalysisCompetition(match)) return false;
   const leagueId = Number(match.leagueId || match.league_id || 0);
   const leagueName = String(match.league || match.league_name || "")
@@ -6070,15 +6070,10 @@ function isScoreShotEligibleCompetition(match) {
     .replace(/\s+/g, " ").trim();
   const friendly = /\b(friendlies?|club friendlies?|preseason|pre season)\b/i.test(leagueName);
   if (friendly || !Number.isInteger(leagueId) || leagueId <= 0) return false;
-  const dailyScope = dailyAnalysisLeaguePriority({
-    id: leagueId,
-    leagueId,
-    league: leagueName,
-    country: match.country || match.league_country || "",
-    home: match.home || match.home_team || "",
-    away: match.away || match.away_team || ""
-  }) <= 2;
-  return dailyScope || SCORE_SHOT_NATIONAL_LEAGUE_IDS.has(leagueId);
+  const majorClub = SCORE_SHOT_MAJOR_LEAGUE_IDS.has(leagueId);
+  const seniorNational = SCORE_SHOT_NATIONAL_LEAGUE_IDS.has(leagueId) ||
+    SCORE_SHOT_NATIONAL_LEAGUE_NAMES.has(leagueName);
+  return majorClub || seniorNational;
 }
 
 async function scoreShotReadRows(date) {
@@ -6183,6 +6178,8 @@ async function executeScoreShotJob(date, job) {
     job.fixtures = fixtures.length; job.outsideScope = outsideScope; job.phase = 'odds'; job.updatedAt = new Date().toISOString();
     await persistScoreShotJob(job);
     console.log(`[SCORE SHOT] fixtures received=${allFixtures.length} sameDayUpcoming=${upcomingInWindow.length} eligible=${fixtures.length} outsideMajorOrNational=${outsideScope} outsideWindowOrStarted=${outsideWindow}`);
+    const eligibleLeagues = [...new Set(fixtures.map(x => `${x.leagueId}:${x.league}`))].sort();
+    console.log(`[SCORE SHOT] eligible leagues count=${eligibleLeagues.length} list=${eligibleLeagues.join(" | ") || "none"}`);
 
     // Do not download every paginated odds row when the competition/time filters
     // found no fixtures. Fetch odds only for eligible fixtures, avoiding dozens
