@@ -709,7 +709,9 @@ function providerRequestPriority(pathname) {
   // Canlı fikstür, maç önü oranı ve canlı istatistik aynı yüksek öncelik grubunda.
   if (/\/fixtures\?live=all|\/odds\/live|\/fixtures\/statistics\?fixture=|\/odds\?fixture=/.test(path)) return 0;
   if (/\/fixtures\?id=/.test(path)) return 0;
-  if (/\/odds\?date=.*page=/.test(path)) return 2;
+  // Daily prematch odds pages must not sit behind the recurring background queue.
+  // Keep them below live requests, but ahead of routine background refreshes.
+  if (/\/odds\?date=.*page=/.test(path)) return 0.5;
   return 1;
 }
 
@@ -739,7 +741,7 @@ function logProviderFailure(response, pathname, errorText) {
 
 function enqueueProviderRequest(run, priority = 1) {
   return new Promise((resolve, reject) => {
-    providerQueue.push({ run, priority, sequence: providerQueueSequence++, resolve, reject });
+    providerQueue.push({ run, priority, sequence: providerQueueSequence++, queuedAt: Date.now(), resolve, reject });
     providerQueue.sort((a, b) => a.priority - b.priority || a.sequence - b.sequence);
     void pumpProviderQueue();
   });
@@ -755,6 +757,10 @@ async function pumpProviderQueue() {
       if (allowedAt > now) await delay(allowedAt - now);
       if (!providerQueue.length || providerQueueActive >= PROVIDER_MAX_IN_FLIGHT) break;
       const item = providerQueue.shift();
+      const queueWaitMs = Date.now() - Number(item.queuedAt || now);
+      if (queueWaitMs >= 2000) {
+        console.warn(`[API QUEUE WAIT] priority=${item.priority} waitMs=${queueWaitMs} queueRemaining=${providerQueue.length}`);
+      }
       lastProviderRequestAt = Date.now();
       providerQueueActive++;
       Promise.resolve().then(item.run).then(item.resolve, item.reject).finally(() => {
@@ -787,14 +793,6 @@ async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
     const raw = await response.text();
     let payload;
     try { payload = raw ? JSON.parse(raw) : {}; } catch { throw new Error("API-Football geçerli JSON döndürmedi."); }
-    // Her gerçek /fixtures API cevabındaki fikstürleri analizden bağımsız arşivle.
-    // Arşiv yazımı başarısız olsa bile maç akışını kesmez.
-    if (String(pathname || "").split("?")[0] === "/fixtures") {
-      await archiveProviderFixtures(pathname, payload);
-    }
-    if (String(pathname || "").split("?")[0] === "/odds") {
-      await archiveProviderOdds(pathname, payload);
-    }
     const errors = payload.errors && Object.keys(payload.errors).length ? payload.errors : null;
     const errorText = errors ? JSON.stringify(errors) : "";
     if (!response.ok || errors) {
@@ -825,9 +823,20 @@ async function cachedProviderRequest(cacheKey, pathname, ttlMs = 30000) {
     }
     return payload;
   }, priority);
-  providerInFlight.set(cacheKey, task);
-  try { return await task; }
-  finally { providerInFlight.delete(cacheKey); }
+  // Release the scarce API queue slot as soon as the provider response is parsed.
+  // PostgreSQL archiving runs after the network task, so DB locks/writes cannot block
+  // live and prematch requests waiting in the provider queue.
+  const requestPromise = task.then(async payload => {
+    const endpoint = String(pathname || "").split("?")[0];
+    if (endpoint === "/fixtures") await archiveProviderFixtures(pathname, payload);
+    if (endpoint === "/odds") await archiveProviderOdds(pathname, payload);
+    return payload;
+  });
+  providerInFlight.set(cacheKey, requestPromise);
+  try { return await requestPromise; }
+  finally {
+    if (providerInFlight.get(cacheKey) === requestPromise) providerInFlight.delete(cacheKey);
+  }
 }
 
 function normalizeProviderMatch(match) {
