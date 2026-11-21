@@ -1643,7 +1643,7 @@ function couponPickConsistentWithPrediction(analysis) {
   // A coupon leg must be supported by its own displayed unconditional score.
   // Missing or unparsable scores are rejected rather than silently accepted.
   const parse = value => {
-    const match = String(value || "").match(/(\\d+)\\s*[-:]\\s*(\\d+)/);
+    const match = String(value || "").match(/(\d+)\s*[-:]\s*(\d+)/);
     return match ? [Number(match[1]), Number(match[2])] : null;
   };
   const ft = parse(analysis?.fullTimeScore);
